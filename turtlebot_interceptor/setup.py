@@ -24,6 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'trajectory_node = turtlebot_interceptor.trajectory:main',
+            'controller_node = turtlebot_interceptor.planner:main',
         ],
     },
 )

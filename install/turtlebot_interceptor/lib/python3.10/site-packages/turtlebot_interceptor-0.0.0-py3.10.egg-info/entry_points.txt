@@ -1,0 +1,4 @@
+[console_scripts]
+controller_node = turtlebot_interceptor.planner:main
+trajectory_node = turtlebot_interceptor.trajectory:main
+

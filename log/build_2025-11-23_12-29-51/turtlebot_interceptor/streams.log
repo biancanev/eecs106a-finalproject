@@ -1,0 +1,22 @@
+[1.674s] Invoking command in '/mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/turtlebot_interceptor': PYTHONPATH=/mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/build/turtlebot_interceptor/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/install/turtlebot_interceptor/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/turtlebot_interceptor build --build-base /mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/build/turtlebot_interceptor/build install --record /mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/build/turtlebot_interceptor/install.log --single-version-externally-managed install_data
+[2.398s] running egg_info
+[2.403s] writing ../build/turtlebot_interceptor/turtlebot_interceptor.egg-info/PKG-INFO
+[2.410s] writing dependency_links to ../build/turtlebot_interceptor/turtlebot_interceptor.egg-info/dependency_links.txt
+[2.416s] writing entry points to ../build/turtlebot_interceptor/turtlebot_interceptor.egg-info/entry_points.txt
+[2.420s] writing requirements to ../build/turtlebot_interceptor/turtlebot_interceptor.egg-info/requires.txt
+[2.423s] writing top-level names to ../build/turtlebot_interceptor/turtlebot_interceptor.egg-info/top_level.txt
+[2.458s] reading manifest file '../build/turtlebot_interceptor/turtlebot_interceptor.egg-info/SOURCES.txt'
+[2.521s] writing manifest file '../build/turtlebot_interceptor/turtlebot_interceptor.egg-info/SOURCES.txt'
+[2.524s] running build
+[2.525s] running build_py
+[2.565s] running install
+[2.566s] running install_lib
+[2.683s] running install_data
+[2.708s] running install_egg_info
+[2.718s] removing '/mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/install/turtlebot_interceptor/lib/python3.10/site-packages/turtlebot_interceptor-0.0.0-py3.10.egg-info' (and everything under it)
+[2.771s] Copying ../build/turtlebot_interceptor/turtlebot_interceptor.egg-info to /mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/install/turtlebot_interceptor/lib/python3.10/site-packages/turtlebot_interceptor-0.0.0-py3.10.egg-info
+[2.998s] running install_scripts
+[3.063s] Installing controller_node script to /mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/install/turtlebot_interceptor/lib/turtlebot_interceptor
+[3.072s] Installing trajectory_node script to /mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/install/turtlebot_interceptor/lib/turtlebot_interceptor
+[3.084s] writing list of installed files to '/mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/build/turtlebot_interceptor/install.log'
+[3.109s] Invoked command in '/mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/turtlebot_interceptor' returned '0': PYTHONPATH=/mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/build/turtlebot_interceptor/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/install/turtlebot_interceptor/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/turtlebot_interceptor build --build-base /mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/build/turtlebot_interceptor/build install --record /mnt/c/Users/rkwon/Documents/106/eecs106a-finalproject/build/turtlebot_interceptor/install.log --single-version-externally-managed install_data
