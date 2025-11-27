@@ -6,9 +6,13 @@ import tf2_ros
 import numpy as np
 import transforms3d.euler as euler
 from geometry_msgs.msg import TransformStamped, PoseStamped, Twist, PointStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import OccupancyGrid
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_pose
 from turtlebot_interceptor.trajectory import plan_probabilistic_trajectory, NoiseModel
 import time
+from turtlebot_interceptor.MCL_test import MCL
+from turtlebot_interceptor.MPC_test import MPC
+from turtlebot_interceptor.Target_Estimator import TargetKF
 
 class TrajectoryController(Node):
     def __init__(self):
@@ -23,6 +27,12 @@ class TrajectoryController(Node):
         self.Kp = np.diag([2.0, 0.8])
         self.Kd = np.diag([-0.5, 0.5])
         self.Ki = np.diag([-0.1, 0.1])
+
+        # New MPC Variables
+        self.prev_uv = 0
+        self.mcl_client = self.create_client(Twist, "map")
+        self.kf_client = self.create_client(Twist, "kf")
+        self.mpc = MPC()
         
         self.noise_model = NoiseModel()
         
@@ -67,6 +77,75 @@ class TrajectoryController(Node):
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
             pass
     
+    ### NEW MPC Contoller ###
+    def mpc_controller(self, waypoint_with_cov):
+        nominal_waypoint = waypoint_with_cov[0]
+        covariance = waypoint_with_cov[1]
+        
+        while rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.1)
+            
+            try:
+                trans = self.tf_buffer.lookup_transform('base_footprint', 'odom', rclpy.time.Time())
+                
+                wp_pose = PoseStamped()
+                wp_pose.header.frame_id = 'odom'
+                wp_pose.pose.position.x = nominal_waypoint[0]
+                wp_pose.pose.position.y = nominal_waypoint[1]
+                quat = self._quat_from_yaw(nominal_waypoint[2])
+                wp_pose.pose.orientation.x = quat[0]
+                wp_pose.pose.orientation.y = quat[1]
+                wp_pose.pose.orientation.z = quat[2]
+                wp_pose.pose.orientation.w = quat[3]
+                
+                wp_base = do_transform_pose(wp_pose.pose, trans)
+                
+                x_err = wp_base.position.x
+                q = wp_base.orientation
+                roll, pitch, yaw_err = euler.quat2euler([q.w, q.x, q.y, q.z])
+
+                ### MCL CALL ### -- this might be slow maybe need another soln
+                while not self.mcl_client.wait_for_service(timeout_sec=1.0):
+                    self.get_logger().info(f"Service {self._service_name} not available, waiting...")
+
+                # Build request
+                req = Twist.Request()
+
+                # Send request (async under the hood)
+                self._future = self.mcl_client.call_async(req)
+                self.get_logger().info(f"Requesting MCL")
+
+                ### KF CALL ### -- this might be slow need maybe need another soln
+                while not self.kf_client.wait_for_service(timeout_sec=1.0):
+                    self.get_logger().info(f"Service KF not available, waiting...")
+
+                # Build request
+                req = Twist.Request()
+
+                # Send request (async under the hood)
+                self._future = self.kf_client.call_async(req)
+                self.get_logger().info(f"Requesting KF")
+                
+                if abs(x_err) < 0.03 and abs(yaw_err) < 0.2:
+                    self.get_logger().info(f"Waypoint reached (cov trace: {np.trace(covariance[:2,:2]):.4f})")
+                    return
+
+                x0 = [0, 0, 0, self.prev_uv] # in baseframe
+                target = [wp_base.position.x, wp_base.position.y]
+                u0v, u0w = self.mpc.solve()
+                
+                cmd = Twist()
+                cmd.linear.x = u0v
+                self.prev_uv = u0v
+                cmd.angular.z = u0w
+                self.pub_cmd.publish(cmd)
+                
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+                pass
+            
+            time.sleep(0.1)
+
+    ### Basic Proportional Gain controller ##
     def controller(self, waypoint_with_cov):
         nominal_waypoint = waypoint_with_cov[0]
         covariance = waypoint_with_cov[1]
@@ -114,7 +193,7 @@ class TrajectoryController(Node):
         
         for waypoint_with_cov in waypoints_with_cov:
             self.controller(waypoint_with_cov)
-    
+        
     @staticmethod
     def _quat_from_yaw(yaw):
         return [0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)]
