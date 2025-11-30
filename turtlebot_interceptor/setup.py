@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'turtlebot_interceptor'
 
@@ -10,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -23,9 +26,14 @@ setup(
         ],
     },
     entry_points={
-        'console_scripts': [
-            'trajectory_node = turtlebot_interceptor.trajectory:main',
-            'controller_node = turtlebot_interceptor.planner:main',
-        ],
-    },
+            'console_scripts': [
+                'mpc_node = turtlebot_interceptor.mpc_node:main',
+                'mcl_node = turtlebot_interceptor.mcl_node:main',
+                'ukf_node = turtlebot_interceptor.ukf_node:main',
+                'target_kf_node = turtlebot_interceptor.target_kf_node:main',  # Legacy - uses UKF
+                'slam_node = turtlebot_interceptor.slam_node:main',
+                'lidar_processor_node = turtlebot_interceptor.lidar_processor_node:main',
+                'animated_sim = turtlebot_interceptor.animated_sim:main',  # Standalone simulation
+            ],
+        },
 )

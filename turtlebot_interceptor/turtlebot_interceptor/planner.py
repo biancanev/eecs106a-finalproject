@@ -10,9 +10,7 @@ from nav_msgs.msg import OccupancyGrid
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_pose
 from turtlebot_interceptor.trajectory import plan_probabilistic_trajectory, NoiseModel
 import time
-from turtlebot_interceptor.MCL_test import MCL
-from turtlebot_interceptor.MPC_test import MPC
-from turtlebot_interceptor.Target_Estimator import TargetKF
+from turtlebot_interceptor.MPC_test import SimpleUnicycleMPC
 
 class TrajectoryController(Node):
     def __init__(self):
@@ -30,9 +28,7 @@ class TrajectoryController(Node):
 
         # New MPC Variables
         self.prev_uv = 0
-        self.mcl_client = self.create_client(Twist, "map")
-        self.kf_client = self.create_client(Twist, "kf")
-        self.mpc = MPC()
+        self.mpc = None  # Will be initialized when needed
         
         self.noise_model = NoiseModel()
         
@@ -104,35 +100,30 @@ class TrajectoryController(Node):
                 q = wp_base.orientation
                 roll, pitch, yaw_err = euler.quat2euler([q.w, q.x, q.y, q.z])
 
-                ### MCL CALL ### -- this might be slow maybe need another soln
-                while not self.mcl_client.wait_for_service(timeout_sec=1.0):
-                    self.get_logger().info(f"Service {self._service_name} not available, waiting...")
-
-                # Build request
-                req = Twist.Request()
-
-                # Send request (async under the hood)
-                self._future = self.mcl_client.call_async(req)
-                self.get_logger().info(f"Requesting MCL")
-
-                ### KF CALL ### -- this might be slow need maybe need another soln
-                while not self.kf_client.wait_for_service(timeout_sec=1.0):
-                    self.get_logger().info(f"Service KF not available, waiting...")
-
-                # Build request
-                req = Twist.Request()
-
-                # Send request (async under the hood)
-                self._future = self.kf_client.call_async(req)
-                self.get_logger().info(f"Requesting KF")
-                
                 if abs(x_err) < 0.03 and abs(yaw_err) < 0.2:
                     self.get_logger().info(f"Waypoint reached (cov trace: {np.trace(covariance[:2,:2]):.4f})")
                     return
 
-                x0 = [0, 0, 0, self.prev_uv] # in baseframe
+                # Initialize MPC if needed
+                if self.mpc is None:
+                    self.mpc = SimpleUnicycleMPC(horizon=15, dt=0.1)
+
+                # Get current state in base frame
+                x0 = [0, 0, yaw_err, self.prev_uv]  # in base frame
                 target = [wp_base.position.x, wp_base.position.y]
-                u0v, u0w = self.mpc.solve()
+                
+                try:
+                    a_cmd, omega_cmd = self.mpc.solve(x0, target)
+                    # Convert acceleration to velocity
+                    v_cmd = np.clip(self.prev_uv + a_cmd * 0.1, 0.0, 0.6)
+                    self.prev_uv = v_cmd
+                    u0v = v_cmd
+                    u0w = omega_cmd
+                except Exception as e:
+                    self.get_logger().error(f"MPC solve failed: {e}")
+                    # Fallback to proportional control
+                    u0v = self.Kp[0, 0] * x_err
+                    u0w = self.Kp[1, 1] * yaw_err
                 
                 cmd = Twist()
                 cmd.linear.x = u0v
