@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""
+LIDAR Processor Node
+Hardware-ready ROS2 node for processing raw LIDAR data
+Filters noise, detects obstacles, and publishes processed scan
+"""
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
+import numpy as np
+import math
+
+# Import QoS settings
+from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
+
+class LidarProcessorNode(Node):
+    """Processes LIDAR scans for obstacle detection and filtering"""
+    
+    def __init__(self):
+        super().__init__('lidar_processor_node')
+        
+        # Set QoS for subscription to match typical LIDAR publishers (Best Effort)
+        qos_profile = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT  # Use BEST_EFFORT reliability
+        )
+        
+        # Subscriptions
+        self.raw_scan_sub = self.create_subscription(
+            LaserScan,
+            '/scan',  # Raw LIDAR from hardware
+            self.raw_scan_callback,
+            qos_profile
+        )
+        
+        # Publishers
+        self.processed_scan_pub = self.create_publisher(
+            LaserScan,
+            '/scan_processed',  # Processed scan for other nodes
+            10
+        )
+        
+        # Processing parameters
+        self.min_range = 0.25  # Minimum valid range (robot footprint)
+        self.max_range = 3.5   # Maximum valid range
+        self.range_noise_threshold = 0.05  # Filter jumps > 5cm
+        self.median_filter_size = 3  # Median filter window
+        
+        self.get_logger().info('LIDAR processor node initialized')
+    
+    def raw_scan_callback(self, msg: LaserScan):
+        """Process raw LIDAR scan"""
+        processed_scan = self.process_scan(msg)
+        if processed_scan is not None:
+            self.processed_scan_pub.publish(processed_scan)
+    
+    def process_scan(self, scan: LaserScan) -> LaserScan:
+        """Process scan: filter noise, remove invalid readings"""
+        processed = LaserScan()
+        processed.header = scan.header
+        processed.angle_min = scan.angle_min
+        processed.angle_max = scan.angle_max
+        processed.angle_increment = scan.angle_increment
+        processed.time_increment = scan.time_increment
+        processed.scan_time = scan.scan_time
+        processed.range_min = max(self.min_range, scan.range_min)
+        processed.range_max = min(self.max_range, scan.range_max)
+        
+        # Process ranges
+        ranges = list(scan.ranges)
+        processed_ranges = []
+        
+        for i, r in enumerate(ranges):
+            # Filter invalid readings
+            if math.isnan(r) or math.isinf(r):
+                processed_ranges.append(float('inf'))
+                continue
+            
+            # Clamp to valid range
+            r = max(processed.range_min, min(r, processed.range_max))
+            
+            # Median filter for noise reduction#!/usr/bin/env python3
+"""
+LIDAR Processor Node
+Hardware-ready ROS2 node for processing raw LIDAR data
+Filters noise, detects obstacles, and publishes processed scan
+"""
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
+import numpy as np
+import math
+
+# Import QoS settings
+from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
+
+class LidarProcessorNode(Node):
+    """Processes LIDAR scans for obstacle detection and filtering"""
+    
+    def __init__(self):
+        super().__init__('lidar_processor_node')
+        
+        # Set QoS for subscription to match typical LIDAR publishers (Best Effort)
+        qos_profile = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT  # Use BEST_EFFORT reliability
+        )
+        
+        # Subscriptions
+        self.raw_scan_sub = self.create_subscription(
+            LaserScan,
+            '/scan',  # Raw LIDAR from hardware
+            self.raw_scan_callback,
+            qos_profile
+        )
+        
+        # Publishers
+        self.processed_scan_pub = self.create_publisher(
+            LaserScan,
+            '/scan_processed',  # Processed scan for other nodes
+            10
+        )
+        
+        # Processing parameters
+        self.min_range = 0.25  # Minimum valid range (robot footprint)
+        self.max_range = 3.5   # Maximum valid range
+        self.range_noise_threshold = 0.05  # Filter jumps > 5cm
+        self.median_filter_size = 3  # Median filter window
+        
+        self.get_logger().info('LIDAR processor node initialized')
+    
+    def raw_scan_callback(self, msg: LaserScan):
+        """Process raw LIDAR scan"""
+        processed_scan = self.process_scan(msg)
+        if processed_scan is not None:
+            self.processed_scan_pub.publish(processed_scan)
+    
+    def process_scan(self, scan: LaserScan) -> LaserScan:
+        """Process scan: filter noise, remove invalid readings"""
+        processed = LaserScan()
+        processed.header = scan.header
+        processed.angle_min = scan.angle_min
+        processed.angle_max = scan.angle_max
+        processed.angle_increment = scan.angle_increment
+        processed.time_increment = scan.time_increment
+        processed.scan_time = scan.scan_time
+        processed.range_min = max(self.min_range, scan.range_min)
+        processed.range_max = min(self.max_range, scan.range_max)
+        
+        # Process ranges
+        ranges = list(scan.ranges)
+        processed_ranges = []
+        
+        for i, r in enumerate(ranges):
+            # Filter invalid readings
+            if math.isnan(r) or math.isinf(r):
+                processed_ranges.append(float('inf'))
+                continue
+            
+            # Clamp to valid range
+            r = max(processed.range_min, min(r, processed.range_max))
+            
+            # Median filter for noise reduction
+            if i > 0 and i < len(ranges) - 1:
+                window = [ranges[i-1], r, ranges[i+1]]
+                valid_window = [x for x in window if not (math.isnan(x) or math.isinf(x))]
+                if len(valid_window) > 0:
+                    r = np.median(valid_window)
+            
+            # Filter large jumps (likely noise)
+            if i > 0 and len(processed_ranges) > 0:
+                prev_r = processed_ranges[-1]
+                if prev_r != float('inf'):
+                    jump = abs(r - prev_r)
+                    if jump > self.range_noise_threshold:
+                        # Smooth the jump
+                        r = prev_r + np.sign(r - prev_r) * min(jump, self.range_noise_threshold)
+            
+            processed_ranges.append(r)
+        
+        processed.ranges = processed_ranges
+        processed.intensities = scan.intensities if len(scan.intensities) > 0 else []
+        
+        return processed
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = LidarProcessorNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
+            if i > 0 and i < len(ranges) - 1:
+                window = [ranges[i-1], r, ranges[i+1]]
+                valid_window = [x for x in window if not (math.isnan(x) or math.isinf(x))]
+                if len(valid_window) > 0:
+                    r = np.median(valid_window)
+            
+            # Filter large jumps (likely noise)
+            if i > 0 and len(processed_ranges) > 0:
+                prev_r = processed_ranges[-1]
+                if prev_r != float('inf'):
+                    jump = abs(r - prev_r)
+                    if jump > self.range_noise_threshold:
+                        # Smooth the jump
+                        r = prev_r + np.sign(r - prev_r) * min(jump, self.range_noise_threshold)
+            
+            processed_ranges.append(r)
+        
+        processed.ranges = processed_ranges
+        processed.intensities = scan.intensities if len(scan.intensities) > 0 else []
+        
+        return processed
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = LidarProcessorNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
