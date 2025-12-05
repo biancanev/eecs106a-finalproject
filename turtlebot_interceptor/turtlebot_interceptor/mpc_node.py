@@ -18,12 +18,13 @@ class MPCNode(Node):
         super().__init__('mpc_node')
 
         # Declare parameters (lab4 + lab8 pattern)
+        # Use ignore_override=True to allow launch file parameters to override
         self.declare_parameter('mpc_horizon', 15)
         self.declare_parameter('dt', 0.1)
         self.declare_parameter('v_max_base', 0.6)
         self.declare_parameter('v_min', 0.0)
         self.declare_parameter('omega_max', 1.5)
-        self.declare_parameter('use_sim_time', False)
+        self.declare_parameter('use_sim_time', False, ignore_override=True)
         # Fallback control gains (lab8 pattern)
         self.declare_parameter('Kp_v', 2.0)
         self.declare_parameter('Kp_w', 0.8)
@@ -256,10 +257,19 @@ class MPCNode(Node):
         # Build initial state
         x0 = self.seeker_state.copy()
 
-        # Predict target trajectory
-        target_seq = self.predict_target_trajectory()
-        if target_seq is None:
-            return
+        # Get target/goal position
+        if use_goal:
+            # Use goal point for navigation
+            target_pos = np.array([self.goal_x, self.goal_y])
+            # Create constant target sequence
+            target_seq = np.zeros((2, self.N + 1))
+            target_seq[0, :] = target_pos[0]
+            target_seq[1, :] = target_pos[1]
+        else:
+            # Predict target trajectory
+            target_seq = self.predict_target_trajectory()
+            if target_seq is None:
+                return
 
         # Compute obstacles with uncertainty inflation
         obstacles = self.compute_obstacles()

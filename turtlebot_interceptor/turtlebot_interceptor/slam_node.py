@@ -53,11 +53,18 @@ class SLAMNode(Node):
         self.occupancy_threshold = self.get_parameter('occupancy_threshold').get_parameter_value().double_value
         
         # Subscriptions
+        # Use BEST_EFFORT QoS to match hardware LIDAR publishers
+        from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
+        scan_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT
+        )
         self.scan_sub = self.create_subscription(
             LaserScan,
             '/scan',
             self.scan_callback,
-            10
+            scan_qos
         )
         
         self.pose_sub = self.create_subscription(

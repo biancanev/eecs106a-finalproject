@@ -9,6 +9,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 import numpy as np
 import math
+from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
 
 class LidarProcessorNode(Node):
@@ -17,12 +18,20 @@ class LidarProcessorNode(Node):
     def __init__(self):
         super().__init__('lidar_processor_node')
         
+        # Set QoS for subscription to match typical LIDAR publishers (Best Effort)
+        # Hardware LIDAR typically uses BEST_EFFORT reliability
+        qos_profile = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT
+        )
+        
         # Subscriptions
         self.raw_scan_sub = self.create_subscription(
             LaserScan,
             '/scan',  # Raw LIDAR from hardware
             self.raw_scan_callback,
-            10
+            qos_profile
         )
         
         # Publishers
