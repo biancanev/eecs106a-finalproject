@@ -25,6 +25,20 @@ def generate_launch_description():
             description='Use simulation time'
         ),
         
+        # Static TF publisher (map to base_scan for RViz)
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='map_to_base_scan_tf',
+            arguments=[
+                '0', '0', '0',  # x, y, z translation
+                '0', '0', '0', '1',  # quaternion (no rotation)
+                'map',  # parent frame
+                'base_scan'  # child frame
+            ],
+            output='screen'
+        ),
+        
         # Simple pose publisher (for SLAM node - uses odometry or static pose)
         Node(
             package='turtlebot_interceptor',

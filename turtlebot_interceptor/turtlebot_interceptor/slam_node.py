@@ -96,6 +96,12 @@ class SLAMNode(Node):
     def scan_callback(self, msg: LaserScan):
         """Process LIDAR scan and update map using log-odds"""
         if self.current_pose is None:
+            # Log warning periodically (not every scan)
+            if not hasattr(self, '_pose_warn_count'):
+                self._pose_warn_count = 0
+            self._pose_warn_count += 1
+            if self._pose_warn_count % 50 == 0:  # Every ~5 seconds at 10Hz
+                self.get_logger().warn('SLAM: Waiting for pose (current_pose is None) - check /amcl_pose topic')
             return
         
         # Extract pose
@@ -257,7 +263,24 @@ class SLAMNode(Node):
         # Flatten map data (row-major order)
         map_msg.data = self.map_data.flatten().tolist()
         
+        # Count occupied cells for debugging
+        occupied_count = sum(1 for x in map_msg.data if x > 0)
+        unknown_count = sum(1 for x in map_msg.data if x == -1)
+        free_count = sum(1 for x in map_msg.data if x == 0)
+        
         self.map_pub.publish(map_msg)
+        
+        # Log map status periodically
+        if hasattr(self, '_map_pub_count'):
+            self._map_pub_count += 1
+        else:
+            self._map_pub_count = 0
+        
+        if self._map_pub_count % 10 == 0:  # Every 5 seconds (0.5s * 10)
+            self.get_logger().info(
+                f'Map published: {occupied_count} occupied, {free_count} free, '
+                f'{unknown_count} unknown, pose={self.current_pose is not None}'
+            )
 
 
 def main(args=None):
