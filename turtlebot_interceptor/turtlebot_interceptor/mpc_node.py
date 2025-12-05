@@ -197,11 +197,14 @@ class MPCNode(Node):
             self._map_origin_logged = True
         
         # Extract occupied cells (not walls)
+        # CRITICAL: Use lower threshold to catch more obstacles (50 might miss some)
         occupied_cells = []
         wall_margin = 0.35  # Cells near boundaries are walls
+        occupancy_threshold = 30  # Lower threshold - catch more obstacles (was 50)
         
         for i in range(width * height):
-            if self.map.data[i] > 50:  # Occupied
+            # Use lower threshold to catch more obstacles
+            if self.map.data[i] > occupancy_threshold:  # Occupied (lowered from 50)
                 gx = i % width
                 gy = i // width
                 world_x = gx * resolution + origin_x
@@ -236,23 +239,30 @@ class MPCNode(Node):
             return obstacles
         
         # Cluster nearby cells (cones are compact circular clusters)
+        # CRITICAL: Use larger clustering distance for better obstacle detection
+        # With 0.02m resolution, resolution*3 = 0.06m is too small
+        # Use 0.15m clustering distance (about 7-8 cells at 0.02m resolution)
+        cluster_distance = 0.15  # 15cm - good for small obstacles like cones
+        
         clusters = []
         for x, y in occupied_cells:
             assigned = False
             for cluster in clusters:
-                for cx, cy in cluster:
-                    if np.sqrt((x - cx)**2 + (y - cy)**2) < resolution * 3:
-                        cluster.append((x, y))
-                        assigned = True
-                        break
-                if assigned:
+                # Check distance to cluster center (more efficient)
+                cluster_points = np.array(cluster)
+                cluster_center = np.mean(cluster_points, axis=0)
+                dist = np.sqrt((x - cluster_center[0])**2 + (y - cluster_center[1])**2)
+                if dist < cluster_distance:
+                    cluster.append((x, y))
+                    assigned = True
                     break
             if not assigned:
                 clusters.append([(x, y)])
         
         # Extract circular obstacles from clusters
+        # CRITICAL: Improved obstacle extraction with better radius calculation
         for cluster in clusters:
-            if len(cluster) < 3:  # Too small
+            if len(cluster) < 2:  # Reduced from 3 - allow smaller obstacles
                 continue
             
             points = np.array(cluster)
@@ -261,27 +271,94 @@ class MPCNode(Node):
             width_cluster = max_x - min_x
             height_cluster = max_y - min_y
             
-            # Skip elongated clusters (walls)
-            if width_cluster < 0.01 or height_cluster < 0.01:
-                continue
-            aspect_ratio = max(width_cluster, height_cluster) / min(width_cluster, height_cluster)
-            if aspect_ratio > 2.5:
+            # Skip very small clusters (noise)
+            if width_cluster < 0.005 or height_cluster < 0.005:  # 5mm minimum
                 continue
             
-            # Compute center and radius
-            center_x = (min_x + max_x) / 2
-            center_y = (min_y + max_y) / 2
-            radius = max(width_cluster, height_cluster) / 2 + 0.02
+            # Skip elongated clusters (walls) - but be less strict
+            if width_cluster > 0.01 and height_cluster > 0.01:  # Both dimensions significant
+                aspect_ratio = max(width_cluster, height_cluster) / min(width_cluster, height_cluster)
+                if aspect_ratio > 3.0:  # Increased from 2.5 - be less strict
+                    continue
             
-            # Accept reasonable cone sizes
-            if 0.06 < radius < 0.5:
+            # Compute center (use mean for better accuracy)
+            center_x = np.mean(points[:, 0])
+            center_y = np.mean(points[:, 1])
+            
+            # Compute radius more accurately - use distance from center to farthest point
+            distances_from_center = np.sqrt((points[:, 0] - center_x)**2 + (points[:, 1] - center_y)**2)
+            max_dist = np.max(distances_from_center)
+            radius = max_dist + resolution * 2  # Add 2 cells margin for safety
+            
+            # Also use bounding box as fallback
+            radius_bbox = max(width_cluster, height_cluster) / 2 + resolution
+            radius = max(radius, radius_bbox)  # Use larger of the two
+            
+            # Accept reasonable obstacle sizes (cones are typically 0.1-0.2m radius)
+            if 0.05 < radius < 0.6:  # Expanded range - was 0.06-0.5
                 obstacles.append((np.array([center_x, center_y]), radius))
         
         return obstacles[:10]  # Limit to 10 cones max
     
+    def get_occupied_cells_as_obstacles(self, robot_pos, lookahead_dist=2.0):
+        """
+        Get ALL occupied cells near the robot as obstacles.
+        This ensures the robot never hits any occupied cell.
+        
+        Args:
+            robot_pos: (x, y) robot position in map frame
+            lookahead_dist: Only consider cells within this distance (m)
+        
+        Returns:
+            List of (center, radius) tuples for each occupied cell
+        """
+        obstacles = []
+        if self.map is None:
+            return obstacles
+        
+        width = self.map.info.width
+        height = self.map.info.height
+        resolution = self.map.info.resolution
+        origin_x = self.map.info.origin.position.x
+        origin_y = self.map.info.origin.position.y
+        
+        # Robot safety radius (robot radius + margin)
+        robot_radius = 0.15  # Robot radius
+        safety_margin = 0.1  # Additional safety margin
+        cell_radius = resolution * np.sqrt(2) / 2  # Half diagonal of cell (worst case)
+        min_obstacle_radius = robot_radius + safety_margin + cell_radius
+        
+        # Extract occupied cells near robot
+        occupancy_threshold = 30  # Same as extract_cones_from_map
+        
+        for i in range(width * height):
+            if self.map.data[i] > occupancy_threshold:  # Occupied
+                gx = i % width
+                gy = i // width
+                world_x = gx * resolution + origin_x + resolution / 2  # Cell center
+                world_y = gy * resolution + origin_y + resolution / 2
+                
+                # Only consider cells within lookahead distance
+                dist_to_robot = np.sqrt((world_x - robot_pos[0])**2 + (world_y - robot_pos[1])**2)
+                if dist_to_robot > lookahead_dist:
+                    continue
+                
+                # Add as obstacle with minimum radius to ensure robot doesn't hit it
+                obstacles.append((np.array([world_x, world_y]), min_obstacle_radius))
+        
+        return obstacles
+    
     def compute_obstacles(self):
-        """Extract obstacles from map - use cone extraction for better detection"""
-        return self.extract_cones_from_map()
+        """Extract obstacles from map - use occupied cells directly for guaranteed avoidance"""
+        if self.robot_pose is None:
+            return []
+        
+        # Get robot position
+        robot_x = self.robot_pose.pose.pose.position.x
+        robot_y = self.robot_pose.pose.pose.position.y
+        
+        # Get all occupied cells as obstacles
+        return self.get_occupied_cells_as_obstacles((robot_x, robot_y), lookahead_dist=3.0)
 
     def predict_target_trajectory(self):
         """Predict target trajectory over MPC horizon (lab8 pattern - improved prediction)"""
@@ -373,21 +450,27 @@ class MPCNode(Node):
             self._obstacle_debug_count = 0
         self._obstacle_debug_count += 1
         if self._obstacle_debug_count % 10 == 0:  # Every 1 second
+            total_occupied = np.sum(np.array(self.map.data) > 30) if self.map else 0
             if obstacles and len(obstacles) > 0:
                 self.get_logger().error(  # ERROR level so it's visible
-                    f"OBSTACLES: Found {len(obstacles)} obstacles in map frame. "
+                    f"OCCUPIED CELL OBSTACLES: Found {len(obstacles)} occupied cells as obstacles. "
+                    f"Total occupied cells in map: {total_occupied}, "
                     f"Map frame_id: {self.map.header.frame_id if self.map else 'None'}, "
                     f"Robot pose: ({x0[0]:.3f}, {x0[1]:.3f})"
                 )
-                for i, (center, radius) in enumerate(obstacles[:5]):  # Log first 5
-                    dist_to_robot = np.sqrt((center[0] - x0[0])**2 + (center[1] - x0[1])**2)
+                # Log closest obstacles
+                obstacle_dists = [(np.sqrt((center[0] - x0[0])**2 + (center[1] - x0[1])**2), center, radius) 
+                                 for center, radius in obstacles]
+                obstacle_dists.sort()
+                for i, (dist, center, radius) in enumerate(obstacle_dists[:5]):  # Log 5 closest
                     self.get_logger().error(
                         f"  Obstacle {i+1}: center=({center[0]:.3f}, {center[1]:.3f}), "
-                        f"radius={radius:.3f}m, dist_to_robot={dist_to_robot:.3f}m"
+                        f"radius={radius:.3f}m, dist_to_robot={dist:.3f}m"
                     )
             else:
                 self.get_logger().warn(
-                    f"NO OBSTACLES DETECTED! Map has {np.sum(np.array(self.map.data) > 50) if self.map else 0} occupied cells"
+                    f"NO OCCUPIED CELLS NEAR ROBOT! Map has {total_occupied} total occupied cells "
+                    f"(threshold=30, lookahead=3.0m)"
                 )
 
         # Adjust speed limit based on uncertainty (from paper)
