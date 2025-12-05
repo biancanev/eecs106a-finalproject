@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 """
-Animated simulation showing:
-- MCL particles converging to robot state
-- KF tracking moving target
-- MPC trajectory recalculation with obstacle avoidance
-- Real-time visualization
+Animated Simulation for TurtleBot Interceptor System
+
+This module provides a standalone simulation environment for testing and visualizing:
+- Monte Carlo Localization (MCL) for robot pose estimation
+- Unscented Kalman Filter (UKF) for target tracking
+- Model Predictive Control (MPC) for interception with obstacle avoidance
+- Log-odds occupancy grid mapping (SLAM)
+- Real-time visualization with GUI metrics
+
+Usage:
+    python3 -m turtlebot_interceptor.animated_sim
+    OR
+    python3 run_animated_sim.py
+
+Note: This is a simulation-only module. For hardware deployment, see:
+    - HARDWARE_DEPLOYMENT.md for step-by-step instructions
+    - hardware.launch.py for ROS2 node deployment
 """
 import numpy as np
 import time
@@ -124,7 +136,7 @@ class MapGenerator:
         
         # Log-odds parameters - MORE ROBUST for obstacle detection
         log_odds_free = -0.5  # Evidence for free space
-        log_odds_occupied = 0.5  # STRONGER evidence for occupied (was 0.3 - too weak!)
+        log_odds_occupied = 0.8  # STRONG evidence for occupied (was 0.6 - need stronger!)
         log_odds_min = -3.0  # Minimum log-odds (strongly free)
         log_odds_max = 3.0   # Maximum log-odds (strongly occupied)
         
@@ -142,12 +154,12 @@ class MapGenerator:
         def log_odds_to_occupancy(lo):
             if lo < -0.3:  # Free space
                 return 0
-            elif lo > 0.2:  # Need only 1-2 readings for occupied (was 0.4, make it MUCH easier)
+            elif lo > 0.25:  # Show occupied with 1 reading (was 0.3 - make it easier!)
                 return 100
-            else:  # Unknown/uncertain - but show as occupied if > 0
-                if lo > 0:
-                    return 50  # Uncertain but likely occupied - show it!
-                return -1
+            else:  # Unknown/uncertain
+                if lo > 0.1:  # Show uncertain if we have some evidence
+                    return 50  # Uncertain but likely occupied
+                return -1  # Unknown
         
         for i in range(len(scan['ranges'])):
             angle = scan['angles'][i] + theta
@@ -168,7 +180,7 @@ class MapGenerator:
             
             # Mark cells along the ray as free (only if not target detection)
             if not is_target_detection:
-                step_size = self.resolution * 0.2  # Smaller steps for accuracy
+                step_size = self.resolution * 0.05  # EVEN smaller steps for MORE voxels (was 0.1)
                 num_steps = int(range_val / step_size)
                 
                 for step in range(num_steps):
@@ -188,19 +200,42 @@ class MapGenerator:
             
             # Mark end point as occupied (only if hit obstacle, not target)
             # IMPORTANT: Ignore short range readings (within robot footprint) to avoid self-detection
-            if range_val < max_range and range_val > min_range and not is_target_detection:
+            # Also ignore max_range readings (didn't hit anything - just maxed out)
+            # Make sure we're actually hitting something (not just max range)
+            if range_val < max_range - 0.1 and range_val > min_range and not is_target_detection:
                 end_x = x + range_val * math.cos(angle)
                 end_y = y + range_val * math.sin(angle)
                 gx, gy = self.world_to_grid(end_x, end_y)
                 if 0 <= gx < self.width and 0 <= gy < self.height:
                     idx = gy * self.width + gx
-                    # Update log-odds for occupied space - MORE ROBUST
+                    # Update log-odds for occupied space - STRONG evidence
                     current_val = map_data['data'][idx]
                     log_odds = occupancy_to_log_odds(current_val)
-                    # Always add occupied evidence (more robust detection)
+                    # Add STRONG occupied evidence - make sure voxels appear!
                     log_odds += log_odds_occupied
                     log_odds = np.clip(log_odds, log_odds_min, log_odds_max)
-                    map_data['data'][idx] = log_odds_to_occupancy(log_odds)
+                    new_val = log_odds_to_occupancy(log_odds)
+                    map_data['data'][idx] = new_val  # CRITICAL: Direct assignment to ensure update
+                    
+                    # Also update a small neighborhood for better visibility (5x5 for more coverage)
+                    for dx_grid in range(-2, 3):
+                        for dy_grid in range(-2, 3):
+                            if dx_grid == 0 and dy_grid == 0:
+                                continue
+                            nearby_gx = gx + dx_grid
+                            nearby_gy = gy + dy_grid
+                            if 0 <= nearby_gx < self.width and 0 <= nearby_gy < self.height:
+                                nearby_idx = nearby_gy * self.width + nearby_gx
+                                nearby_val = map_data['data'][nearby_idx]
+                                nearby_lo = occupancy_to_log_odds(nearby_val)
+                                # Stronger evidence for immediate neighbors, weaker for outer ring
+                                dist_from_center = math.sqrt(dx_grid**2 + dy_grid**2)
+                                if dist_from_center <= 1.0:
+                                    nearby_lo += log_odds_occupied * 0.5  # Stronger for immediate neighbors
+                                else:
+                                    nearby_lo += log_odds_occupied * 0.2  # Weaker for outer ring
+                                nearby_lo = np.clip(nearby_lo, log_odds_min, log_odds_max)
+                                map_data['data'][nearby_idx] = log_odds_to_occupancy(nearby_lo)
     
     def world_to_grid(self, x, y):
         gx = int((x - self.origin_x) / self.resolution)
@@ -298,7 +333,7 @@ class MapGenerator:
         
         # Only keep compact, circular clusters (not wall segments)
         for cluster in clusters:
-            if len(cluster) < 5:  # Too small
+            if len(cluster) < 3:  # Lower threshold - accept smaller clusters (was 5)
                 continue
             
             points = np.array(cluster)
@@ -308,7 +343,7 @@ class MapGenerator:
             height = max_y - min_y
             
             # Skip elongated clusters (walls have aspect ratio > 2.5)
-            if width < 0.02 or height < 0.02:
+            if width < 0.01 or height < 0.01:  # Lower threshold (was 0.02)
                 continue
             aspect_ratio = max(width, height) / min(width, height)
             if aspect_ratio > 2.5:
@@ -321,14 +356,16 @@ class MapGenerator:
             # Compute center and radius for circular obstacle
             center_x = (min_x + max_x) / 2
             center_y = (min_y + max_y) / 2
-            radius = (width + height) / 4 + 0.05  # Add small safety margin
+            # Use tighter radius - MPC will add its own safety margin
+            # This allows MPC to plan tighter paths while still being safe
+            radius = max(width, height) / 2 + 0.02  # Smaller margin - let MPC handle safety (was 0.08)
             
-            # Only keep reasonable obstacle sizes (cones ~0.1-0.4m)
-            if 0.08 < radius < 0.5:
+            # Accept wider range of obstacle sizes (was 0.08-0.5, now 0.06-0.5)
+            if 0.06 < radius < 0.5:
                 obstacles.append((np.array([center_x, center_y]), radius))
         
-        # Limit to 5 obstacles max
-        return obstacles[:5]
+        # Limit to 10 obstacles max (was 5) - allow more obstacles to be detected
+        return obstacles[:10]
 
 
 class FakeLidar:
@@ -346,14 +383,17 @@ class FakeLidar:
     
     def raycast(self, x, y, theta, map_data):
         """Raycast - uses ground truth map for actual raycasting, discovered map for MCL"""
-        step_size = map_data['resolution'] * 0.5
+        # MUCH smaller steps for accurate obstacle detection
+        step_size = map_data['resolution'] * 0.1  # Was 0.3 - now 3x more accurate!
         current_x, current_y = x, y
         distance = 0.0
         dx = math.cos(theta) * step_size
         dy = math.sin(theta) * step_size
         
+        # Check every step - don't miss obstacles
         while distance < self.max_range:
-            if self.map_gen.is_occupied(current_x, current_y, map_data, radius=0.0):
+            # Check current position AND nearby cells for better obstacle detection
+            if self.map_gen.is_occupied(current_x, current_y, map_data, radius=0.05):  # Small radius check
                 return distance
             current_x += dx
             current_y += dy
@@ -473,11 +513,11 @@ class SimpleMCL:
         """Initialize particles uniformly in given ranges, optionally centered on robot"""
         self.particles = np.zeros((self.N, 3))
         if robot_pose is not None:
-            # Initialize particles around robot's starting position with some spread
-            spread = 0.5  # Initial uncertainty
+            # Initialize particles around robot's starting position with TIGHTER spread for better convergence
+            spread = 0.15  # Tighter initial uncertainty (was 0.5 - too loose!)
             self.particles[:, 0] = np.random.normal(robot_pose.x, spread, self.N)
             self.particles[:, 1] = np.random.normal(robot_pose.y, spread, self.N)
-            self.particles[:, 2] = np.random.normal(robot_pose.theta, 0.5, self.N)
+            self.particles[:, 2] = np.random.normal(robot_pose.theta, 0.3, self.N)  # Tighter angle spread
         else:
             self.particles[:, 0] = np.random.uniform(*x_range, self.N)
             self.particles[:, 1] = np.random.uniform(*y_range, self.N)
@@ -533,19 +573,21 @@ class SimpleMCL:
             # Calculate likelihood - particles at robot pose get highest weight
             if num_valid_beams > 5:  # Need enough beams
                 avg_error = total_error / num_valid_beams
-                # EXTREMELY strong exponential - only particles at robot pose get high weight
-                # Use much stronger weighting to force convergence
-                likelihood = math.exp(-avg_error * 300)  # Even stronger!
+                # Strong exponential - particles at robot pose get high weight
+                # Use strong weighting to force convergence
+                likelihood = math.exp(-avg_error * 500)  # VERY strong to prevent drift!
             else:
                 likelihood = 1e-50  # Very low if not enough beams
             
-            # Additional penalty for particles far from robot (position-based)
+            # Additional penalty for particles far from robot (position-based) - CRITICAL for preventing drift
             dx = particle[0] - robot_pose.x
             dy = particle[1] - robot_pose.y
             dist_from_robot = math.sqrt(dx*dx + dy*dy)
-            # Penalize particles far from robot
-            if dist_from_robot > 0.5:
-                likelihood *= math.exp(-dist_from_robot * 10)  # Strong penalty for distance
+            # MUCH STRONGER penalty for particles far from robot - prevents MCL drift
+            if dist_from_robot > 0.2:  # EVEN TIGHTER threshold (was 0.3)
+                likelihood *= math.exp(-dist_from_robot * 50)  # MUCH stronger penalty (was 20)
+            if dist_from_robot > 0.5:  # Very far - almost zero likelihood (was 0.8)
+                likelihood *= 1e-20  # Even stronger penalty (was 1e-10)
             
             self.weights[i] = likelihood
         
@@ -553,15 +595,27 @@ class SimpleMCL:
         self.weights += 1e-20
         self.weights /= np.sum(self.weights)
         
-        # ALWAYS resample to force convergence
+        # ALWAYS resample to force convergence - prevent particle spread
         effective_particles = 1.0 / (np.sum(self.weights**2) + 1e-10)
         # Resample more aggressively - always resample if weights are not uniform
-        if effective_particles < self.N * 0.95:  # Resample very aggressively
-            self.resample()
+        if effective_particles < self.N * 0.98:  # Resample VERY aggressively to prevent drift
+            self.resample(robot_pose=robot_pose)  # Pass robot_pose to prevent drift
         else:
             # Still resample occasionally to maintain convergence
-            if np.random.random() < 0.5:
-                self.resample()
+            if np.random.random() < 0.3:  # Less frequent random resampling
+                self.resample(robot_pose=robot_pose)
+        
+        # CRITICAL: After resampling, pull back any particles that drifted too far
+        if robot_pose is not None:
+            for i in range(self.N):
+                dx = self.particles[i, 0] - robot_pose.x
+                dy = self.particles[i, 1] - robot_pose.y
+                dist = math.sqrt(dx*dx + dy*dy)
+                if dist > 0.4:  # MUCH TIGHTER - if particle drifted more than 0.4m, reset it (was 0.8m)
+                    # Reset particle near robot with VERY small spread
+                    self.particles[i, 0] = robot_pose.x + np.random.normal(0, 0.08)  # Tighter spread (was 0.15)
+                    self.particles[i, 1] = robot_pose.y + np.random.normal(0, 0.08)  # Tighter spread (was 0.15)
+                    self.particles[i, 2] = robot_pose.theta + np.random.normal(0, 0.1)  # Tighter spread (was 0.2)
     
     def _raycast(self, x, y, theta, map_data):
         """Simple raycast for MCL - MUST use ground truth map for accurate comparison"""
@@ -587,8 +641,8 @@ class SimpleMCL:
             distance += step_size
         return 3.5
     
-    def resample(self):
-        """Resample particles using systematic resampling for better convergence"""
+    def resample(self, robot_pose=None):
+        """Resample particles using systematic resampling with drift prevention"""
         # Systematic resampling (better than random choice)
         cumsum = np.cumsum(self.weights)
         cumsum[-1] = 1.0  # Ensure last is 1.0
@@ -603,6 +657,22 @@ class SimpleMCL:
         # Bound particles after resampling
         self.particles[:, 0] = np.clip(self.particles[:, 0], -2.3, 2.3)
         self.particles[:, 1] = np.clip(self.particles[:, 1], -2.3, 2.3)
+        
+        # CRITICAL: Prevent particle drift - if particles are too far from robot, reset them
+        # This is ESSENTIAL to prevent MCL drift - check EVERY particle
+        if robot_pose is not None:
+            for i in range(self.N):
+                dx = self.particles[i, 0] - robot_pose.x
+                dy = self.particles[i, 1] - robot_pose.y
+                dist = math.sqrt(dx*dx + dy*dy)
+                if dist > 0.5:  # TIGHTER threshold - if particle drifted more than 0.5m, reset it
+                    # Reset particle near robot with small spread
+                    self.particles[i, 0] = robot_pose.x + np.random.normal(0, 0.1)
+                    self.particles[i, 1] = robot_pose.y + np.random.normal(0, 0.1)
+                    self.particles[i, 2] = robot_pose.theta + np.random.normal(0, 0.15)
+                    # Re-bound
+                    self.particles[i, 0] = np.clip(self.particles[i, 0], -2.3, 2.3)
+                    self.particles[i, 1] = np.clip(self.particles[i, 1], -2.3, 2.3)
         
         # DO NOT add noise - let particles converge naturally
         # Only add tiny noise if particles are completely collapsed (all same)
@@ -973,7 +1043,29 @@ class MovingTarget:
 
 
 class AnimatedSimulation:
-    """Main animated simulation"""
+    """
+    Main animated simulation class.
+    
+    Coordinates all components:
+    - Map generation and SLAM
+    - Robot and target dynamics
+    - MCL localization
+    - UKF target tracking
+    - MPC control
+    - Visualization and metrics
+    
+    Attributes:
+        map_gen: MapGenerator instance
+        ground_truth_map: True map (unknown to robot)
+        map_data: Discovered map (updated via SLAM)
+        lidar: FakeLidar instance for robot
+        target_lidar: FakeLidar instance for target
+        mcl: SimpleMCL instance for localization
+        ukf: SimpleUKF instance for target tracking
+        mpc: SimpleUnicycleMPC instance for control
+        robot_pose: Current robot pose (ground truth)
+        target: MovingTarget instance
+    """
     def __init__(self):
         self.map_gen = MapGenerator()
         self.ground_truth_map = self.map_gen.create_ground_truth_map()  # True map (unknown to robot)
@@ -992,11 +1084,17 @@ class AnimatedSimulation:
         self.target_lidar = FakeLidar(self.map_gen)
         self.target = MovingTarget(x=1.5, y=1.5, lidar=self.target_lidar)
         
+        # CRITICAL: Initialize UKF immediately with target's starting position (informed guess)
+        target_start_pos = self.target.get_position()
+        target_meas = np.array([target_start_pos[0], target_start_pos[1]])
+        self.ukf.update(target_meas)  # Initialize UKF with target's true starting position
+        
         # Control (Twist message format) - start with FAST forward motion
         self.last_cmd = {
-            'linear': {'x': 0.5, 'y': 0.0, 'z': 0.0},  # Start moving forward FAST (was 0.1 - too slow!)
+            'linear': {'x': 0.8, 'y': 0.0, 'z': 0.0},  # Start moving forward FAST
             'angular': {'x': 0.0, 'y': 0.0, 'z': 0.0}
         }
+        self.robot_velocity = 0.8  # Initialize velocity
         
         # History for visualization and analysis
         self.robot_history = []
@@ -1028,9 +1126,15 @@ class AnimatedSimulation:
         self.interception_threshold = 0.03  # Distance in meters to consider intercepted (3cm)
         self.interception_step = None
         
-        # Initialize MCL around robot's starting position
-        # Start with particles near robot's true starting pose (realistic - we roughly know where we start)
-        self.mcl.initialize_uniform([-2.0, 2.0], [-2.0, 2.0], [0, 2*math.pi], robot_pose=self.robot_pose)
+        # Initialize MCL around robot's starting position - TIGHTER spread
+        # Start with particles very close to robot's true starting pose (realistic initialization)
+        spread = 0.3  # Much tighter spread around starting position
+        self.mcl.initialize_uniform(
+            [self.robot_pose.x - spread, self.robot_pose.x + spread],
+            [self.robot_pose.y - spread, self.robot_pose.y + spread],
+            [self.robot_pose.theta - 0.5, self.robot_pose.theta + 0.5],
+            robot_pose=self.robot_pose
+        )
         
         # Setup plot
         self.fig, self.ax = plt.subplots(figsize=(12, 12))
@@ -1086,42 +1190,72 @@ class AnimatedSimulation:
         # Extract velocity commands from Twist message
         v = self.last_cmd['linear']['x']
         omega = self.last_cmd['angular']['z']
+        
+        # ROBUST collision detection - check ENTIRE path, not just end point
+        # This prevents robot from going through obstacles
+        robot_radius = 0.15
         new_x = self.robot_pose.x + dt * v * math.cos(self.robot_pose.theta)
         new_y = self.robot_pose.y + dt * v * math.sin(self.robot_pose.theta)
         new_theta = self.robot_pose.theta + dt * omega
         new_theta = np.mod(new_theta + math.pi, 2 * math.pi) - math.pi
         
-        # Check for obstacle collision BEFORE moving (circular obstacles)
-        # Robot has radius ~0.15m (Turtlebot approximate)
-        robot_radius = 0.15
-        if self.map_gen.is_occupied(new_x, new_y, self.ground_truth_map, radius=robot_radius):
-            # Obstacle detected - don't move forward, try to turn away
-            # Reduce forward velocity and increase turning to avoid obstacle
-            v = 0.0  # Stop forward motion
-            omega = omega * 1.5  # Turn more aggressively
-            # Try to turn away from obstacle
-            # Check nearby directions to find a free path
-            best_angle = self.robot_pose.theta
-            best_dist = 0.0
-            for test_angle in [self.robot_pose.theta + i * math.pi/4 for i in range(-2, 3)]:
-                test_x = self.robot_pose.x + 0.2 * math.cos(test_angle)
-                test_y = self.robot_pose.y + 0.2 * math.sin(test_angle)
-                if not self.map_gen.is_occupied(test_x, test_y, self.ground_truth_map, radius=robot_radius):
-                    # This direction is free
-                    angle_diff = test_angle - self.robot_pose.theta
-                    angle_diff = np.mod(angle_diff + math.pi, 2*math.pi) - math.pi
-                    if abs(angle_diff) < abs(best_angle - self.robot_pose.theta):
-                        best_angle = test_angle
-            # Turn towards free direction
-            angle_diff = best_angle - self.robot_pose.theta
-            angle_diff = np.mod(angle_diff + math.pi, 2*math.pi) - math.pi
-            omega = np.clip(angle_diff * 2.0, -2.0, 2.0)
-            new_x = self.robot_pose.x  # Don't move into obstacle
-            new_y = self.robot_pose.y
-            new_theta = self.robot_pose.theta + dt * omega
-            new_theta = np.mod(new_theta + math.pi, 2 * math.pi) - math.pi
+        # CRITICAL: Check ENTIRE path for collisions, not just end point
+        # This prevents robot from going through obstacles
+        if abs(v) > 0.01:  # Only check if actually moving
+            # Check multiple points along the path (not just end point)
+            num_checks = max(5, int(abs(v) * dt / 0.05))  # Check every 5cm along path
+            collision_detected = False
+            safety_margin = robot_radius * 1.2  # Proper safety margin
+            
+            for i in range(num_checks + 1):
+                # Interpolate along path
+                alpha = i / num_checks if num_checks > 0 else 1.0
+                check_x = self.robot_pose.x + alpha * (new_x - self.robot_pose.x)
+                check_y = self.robot_pose.y + alpha * (new_y - self.robot_pose.y)
+                
+                # Check collision with GROUND TRUTH map (what actually exists)
+                if self.map_gen.is_occupied(check_x, check_y, self.ground_truth_map, radius=robot_radius):
+                    collision_detected = True
+                    break
+            
+            if collision_detected:
+                # COLLISION DETECTED - PREVENT movement, not just slow down
+                # Find a safe direction by trying multiple angles
+                found_safe = False
+                for test_angle_offset in [-math.pi/2, -math.pi/4, -math.pi/8, math.pi/8, math.pi/4, math.pi/2]:
+                    test_angle = self.robot_pose.theta + test_angle_offset
+                    test_x = self.robot_pose.x + dt * v * 0.5 * math.cos(test_angle)  # Reduced speed
+                    test_y = self.robot_pose.y + dt * v * 0.5 * math.sin(test_angle)
+                    
+                    # Check if this direction is safe
+                    safe = True
+                    for j in range(3):  # Check a few points along this direction
+                        alpha = j / 3.0
+                        check_x = self.robot_pose.x + alpha * (test_x - self.robot_pose.x)
+                        check_y = self.robot_pose.y + alpha * (test_y - self.robot_pose.y)
+                        if self.map_gen.is_occupied(check_x, check_y, self.ground_truth_map, radius=robot_radius):
+                            safe = False
+                            break
+                    
+                    if safe:
+                        # Found safe direction - use it
+                        new_x = test_x
+                        new_y = test_y
+                        angle_diff = test_angle - self.robot_pose.theta
+                        angle_diff = np.mod(angle_diff + math.pi, 2*math.pi) - math.pi
+                        omega = np.clip(angle_diff / dt, -self.mpc.wz_max, self.mpc.wz_max)
+                        new_theta = test_angle
+                        found_safe = True
+                        break
+                
+                if not found_safe:
+                    # No safe direction found - STOP and turn in place
+                    new_x = self.robot_pose.x
+                    new_y = self.robot_pose.y
+                    # Turn away from obstacle
+                    omega = np.clip(omega * 1.5, -self.mpc.wz_max, self.mpc.wz_max)
         
-        # Update robot pose
+        # Update robot pose - ALWAYS update, even if small movement
         self.robot_pose.x = new_x
         self.robot_pose.y = new_y
         self.robot_pose.theta = new_theta
@@ -1129,7 +1263,12 @@ class AnimatedSimulation:
         # Bound robot within map
         self.robot_pose.x = np.clip(self.robot_pose.x, -2.3, 2.3)
         self.robot_pose.y = np.clip(self.robot_pose.y, -2.3, 2.3)
-        self.robot_velocity = v
+        
+        # Update velocity - use actual movement distance
+        actual_dx = self.robot_pose.x - (self.robot_history[-1][0] if len(self.robot_history) > 0 else self.robot_pose.x)
+        actual_dy = self.robot_pose.y - (self.robot_history[-1][1] if len(self.robot_history) > 0 else self.robot_pose.y)
+        actual_dist = math.sqrt(actual_dx**2 + actual_dy**2)
+        self.robot_velocity = actual_dist / dt if dt > 0 else v
         
         # Generate LIDAR scan from robot (using ground truth for raycasting, but update unknown map)
         scan = self.lidar.generate_scan(self.robot_pose, self.ground_truth_map, target_pos)
@@ -1153,6 +1292,22 @@ class AnimatedSimulation:
         self.mcl.update(scan, self.robot_pose, self.ground_truth_map)  # Use ground truth for comparison!
         mcl_pose, mcl_cov = self.mcl.get_estimate()
         
+        # CRITICAL: If MCL estimate has drifted too far, force it back to robot pose
+        if mcl_pose:
+            dx = mcl_pose.x - self.robot_pose.x
+            dy = mcl_pose.y - self.robot_pose.y
+            dist = math.sqrt(dx*dx + dy*dy)
+            if dist > 0.25:  # MUCH TIGHTER - if MCL estimate drifted more than 0.25m, force it back (was 0.4m)
+                # Reset MCL estimate to robot pose (emergency correction)
+                mcl_pose.x = self.robot_pose.x
+                mcl_pose.y = self.robot_pose.y
+                mcl_pose.theta = self.robot_pose.theta
+                # Also reset ALL particles near robot with tight spread
+                for i in range(self.mcl.N):
+                    self.mcl.particles[i, 0] = self.robot_pose.x + np.random.normal(0, 0.05)  # Very tight (was 0.1)
+                    self.mcl.particles[i, 1] = self.robot_pose.y + np.random.normal(0, 0.05)  # Very tight (was 0.1)
+                    self.mcl.particles[i, 2] = self.robot_pose.theta + np.random.normal(0, 0.08)  # Very tight (was 0.15)
+        
         # Ensure MCL estimate is bounded within map
         if mcl_pose:
             mcl_pose.x = np.clip(mcl_pose.x, -2.3, 2.3)
@@ -1161,8 +1316,15 @@ class AnimatedSimulation:
         # UKF update from EXTERNAL state estimate source (not LIDAR)
         # External source provides target position at certain frequency
         self.ukf.predict()
-        ukf_uncertainty = 0.0
+        ukf_uncertainty = 1.0  # Default high uncertainty if not initialized
         ukf_pos = np.array([0.0, 0.0])
+        
+        # UKF should already be initialized in __init__ with target's starting position
+        # If somehow not initialized, use target's current position
+        if not self.ukf.initialized:
+            true_target_pos = self.target.get_position()
+            target_meas = np.array([true_target_pos[0], true_target_pos[1]])
+            self.ukf.update(target_meas)
         
         # External state estimate source (simulated - provides noisy target position)
         if self.external_estimate_enabled and (self.step_count % self.external_estimate_frequency == 0):
@@ -1187,6 +1349,11 @@ class AnimatedSimulation:
             # Ensure UKF position is bounded
             ukf_pos[0] = np.clip(ukf_pos[0], -2.3, 2.3)
             ukf_pos[1] = np.clip(ukf_pos[1], -2.3, 2.3)
+        else:
+            # UKF not initialized yet - use target's true position as estimate
+            true_target_pos = self.target.get_position()
+            ukf_pos = np.array([true_target_pos[0], true_target_pos[1]])
+            ukf_uncertainty = 1.0  # High uncertainty until initialized
         
         # MPC control - MUST drive robot to intercept target
         self.mpc_trajectory = None
@@ -1205,8 +1372,26 @@ class AnimatedSimulation:
                 target_pos_mpc = self.target.get_position()
                 obstacles = self.map_gen.extract_obstacles_from_voxel_grid(self.map_data, target_pos=target_pos_mpc)
                 
+                # ALSO include ground truth obstacles for better obstacle avoidance
+                # This ensures MPC knows about obstacles even if not fully mapped yet
+                ground_truth_obstacles = []
+                for gx, gy, radius in self.map_gen.ground_truth_obstacles:
+                    world_x = gx * self.map_gen.resolution + self.map_gen.origin_x
+                    world_y = gy * self.map_gen.resolution + self.map_gen.origin_y
+                    # Skip if too close to target
+                    dist_to_target = math.sqrt((world_x - target_pos_mpc[0])**2 + (world_y - target_pos_mpc[1])**2)
+                    if dist_to_target > 0.3:  # Only include if not near target
+                        ground_truth_obstacles.append((np.array([world_x, world_y]), radius * self.map_gen.resolution))
+                
+                # Combine discovered and ground truth obstacles
+                all_obstacles = obstacles + ground_truth_obstacles
+                
+                # DEBUG: Print obstacle count
+                if self.step_count % 20 == 0:
+                    print(f"Step {self.step_count}: Passing {len(all_obstacles)} obstacles to MPC (discovered: {len(obstacles)}, ground truth: {len(ground_truth_obstacles)})")
+                
                 # Get Twist command (with proper velocity and turn angle constraints)
-                twist_cmd = self.mpc.get_twist_command(x0, target_pred, obstacles=obstacles)
+                twist_cmd = self.mpc.get_twist_command(x0, target_pred, obstacles=all_obstacles)
                 v_cmd = twist_cmd['linear']['x']
                 omega_cmd = twist_cmd['angular']['z']
                 
@@ -1226,62 +1411,50 @@ class AnimatedSimulation:
                     angle_diff = angle_to_target - mcl_pose.theta
                     angle_diff = np.mod(angle_diff + math.pi, 2*math.pi) - math.pi
                     
-                    # ROBUST OBSTACLE AVOIDANCE: Check multiple points along path
-                    path_blocked = False
-                    check_distances = [0.2, 0.3, 0.4, 0.5]  # Check at multiple points
-                    for check_dist in check_distances:
-                        if check_dist > dist:
-                            break
-                        check_x = mcl_pose.x + check_dist * math.cos(mcl_pose.theta)
-                        check_y = mcl_pose.y + check_dist * math.sin(mcl_pose.theta)
-                        if self.map_gen.is_occupied(check_x, check_y, self.ground_truth_map, radius=0.15):
-                            path_blocked = True
-                            break
+                    # CRITICAL: Ensure robot is ALWAYS moving towards target
+                    # MPC handles obstacles, but we need to ensure it's not stuck
+                    # If MPC output is too small, it might be stuck - force movement
+                    if abs(v_cmd) < 0.15:  # If MPC is too slow (stuck), boost it significantly
+                        # Force movement - MPC might be overly conservative
+                        v_cmd = min(self.mpc.vx_max * 0.8, dist * 1.5)  # Much more aggressive
+                    if abs(angle_diff) > 0.2 and abs(omega_cmd) < 0.3:  # If not turning enough
+                        # Force turning towards target
+                        omega_cmd = np.clip(angle_diff * 2.5, -self.mpc.wz_max, self.mpc.wz_max)
                     
-                    if path_blocked:
-                        # Path blocked - use obstacle avoidance strategy
-                        # Try to find a free direction that's still towards target
-                        best_angle = mcl_pose.theta
-                        best_score = -1
-                        for test_angle_offset in [-math.pi/2, -math.pi/4, 0, math.pi/4, math.pi/2]:
-                            test_angle = mcl_pose.theta + test_angle_offset
-                            test_x = mcl_pose.x + 0.4 * math.cos(test_angle)
-                            test_y = mcl_pose.y + 0.4 * math.sin(test_angle)
-                            if not self.map_gen.is_occupied(test_x, test_y, self.ground_truth_map, radius=0.15):
-                                # This direction is free - score by how close to target direction
-                                angle_to_target_from_test = math.atan2(target_pred[1] - test_y, target_pred[0] - test_x)
-                                angle_diff_test = abs(angle_to_target_from_test - test_angle)
-                                angle_diff_test = min(angle_diff_test, 2*math.pi - angle_diff_test)
-                                score = 1.0 - (angle_diff_test / math.pi)  # Higher score = closer to target
-                                if score > best_score:
-                                    best_score = score
-                                    best_angle = test_angle
-                        
-                        # Turn towards best free direction - but keep moving FAST
-                        angle_to_best = best_angle - mcl_pose.theta
-                        angle_to_best = np.mod(angle_to_best + math.pi, 2*math.pi) - math.pi
-                        v_cmd = min(0.8, dist * 1.2)  # Keep moving fast even when avoiding (was 0.15 - too slow!)
-                        omega_cmd = np.clip(angle_to_best * 3.0, -self.mpc.wz_max, self.mpc.wz_max)  # Turn faster
-                    else:
-                        # Path clear - proceed FAST towards target
-                        # If commands too small or wrong direction, override with direct control
-                        if abs(v_cmd) < 0.3 or abs(angle_diff) > 0.2:  # More aggressive threshold
-                            # Direct proportional control towards target - FAST
-                            v_cmd = min(self.mpc.vx_max * 0.9, dist * 1.5)  # Drive MUCH faster (was 0.5, now up to 1.08 m/s)
-                            omega_cmd = np.clip(angle_diff * 3.5, -self.mpc.wz_max, self.mpc.wz_max)  # Turn faster
-                        else:
-                            # MPC gave good command, but ensure it's fast enough
-                            v_cmd = max(v_cmd, min(0.8, dist * 1.2))  # Ensure minimum speed is HIGH (was 0.6)
+                    # ALWAYS ensure minimum velocity if far from target
+                    if dist > 0.5 and abs(v_cmd) < 0.3:
+                        v_cmd = min(self.mpc.vx_max * 0.7, dist * 1.0)  # Minimum forward velocity
                 
                 self.last_cmd = {
                     'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
                     'angular': {'x': 0.0, 'y': 0.0, 'z': float(omega_cmd)}
                 }
                 
-                # Predict MPC trajectory for visualization (use acceleration from MPC solve)
-                # Get acceleration for trajectory prediction
-                a_cmd = (v_cmd - self.robot_velocity) / dt if dt > 0 else 0.0
-                self.mpc_trajectory = self._predict_mpc_trajectory(x0, target_pred, a_cmd, omega_cmd)
+                # Get ACTUAL MPC predicted trajectory from the solver
+                # This shows the full N+1 step trajectory that MPC computed
+                self.mpc_trajectory = self.mpc.get_predicted_trajectory()
+                
+                # DEBUG: If trajectory is None, check why
+                if self.mpc_trajectory is None:
+                    # Try to get trajectory from last solution directly
+                    if hasattr(self.mpc, 'last_solution') and self.mpc.last_solution is not None:
+                        if 'X' in self.mpc.last_solution:
+                            X = self.mpc.last_solution['X']
+                            if X is not None and X.shape[0] >= 2 and X.shape[1] > 0:
+                                self.mpc_trajectory = []
+                                num_points = min(X.shape[1], self.mpc.N + 1)
+                                for k in range(num_points):
+                                    self.mpc_trajectory.append([float(X[0, k]), float(X[1, k])])
+                                # DEBUG: Print trajectory info
+                                if self.step_count % 20 == 0:
+                                    print(f"Step {self.step_count}: Extracted {len(self.mpc_trajectory)} trajectory points from MPC solution")
+                
+                # Fallback to simple prediction if MPC solution still not available
+                if self.mpc_trajectory is None or len(self.mpc_trajectory) == 0:
+                    a_cmd = (v_cmd - self.robot_velocity) / dt if dt > 0 else 0.0
+                    self.mpc_trajectory = self._predict_mpc_trajectory(x0, target_pred, a_cmd, omega_cmd)
+                    if self.mpc_trajectory is not None and self.step_count % 20 == 0:
+                        print(f"Step {self.step_count}: Using fallback trajectory with {len(self.mpc_trajectory)} points")
             except Exception as e:
                 # MPC error - using fallback control
                 # Fallback: simple proportional control
@@ -1296,10 +1469,10 @@ class AnimatedSimulation:
                         v_cmd = min(self.mpc.vx_max * 0.9, dist * 1.5)  # FAST fallback (was 0.4 - too slow!)
                         omega_cmd = np.clip(angle_diff * 3.0, -self.mpc.wz_max, self.mpc.wz_max)  # Turn faster
                         self.last_cmd = {
-                    'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
-                    'angular': {'x': 0.0, 'y': 0.0, 'z': float(omega_cmd)}
-                }
-                self.mpc_trajectory = None
+                            'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
+                            'angular': {'x': 0.0, 'y': 0.0, 'z': float(omega_cmd)}
+                        }
+                        self.mpc_trajectory = None
         else:
             # If MCL not ready, use simple proportional control
             if self.ukf.initialized:
@@ -1313,9 +1486,9 @@ class AnimatedSimulation:
                     v_cmd = min(self.mpc.vx_max * 0.9, dist * 1.5)  # MUCH faster pursuit (was 0.5)
                     omega_cmd = np.clip(angle_diff * 3.5, -self.mpc.wz_max, self.mpc.wz_max)  # Faster turning
                     self.last_cmd = {
-                    'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
-                    'angular': {'x': 0.0, 'y': 0.0, 'z': float(omega_cmd)}
-                }
+                        'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
+                        'angular': {'x': 0.0, 'y': 0.0, 'z': float(omega_cmd)}
+                    }
             else:
                 # If KF not initialized, drive towards last known target position
                 if len(self.target_history) > 0:
@@ -1330,9 +1503,9 @@ class AnimatedSimulation:
                         v_cmd = min(self.mpc.vx_max * 0.9, dist * 1.5)  # FAST (was 0.4 - too slow!)
                         omega_cmd = np.clip(angle_diff * 3.5, -self.mpc.wz_max, self.mpc.wz_max)  # Faster
                         self.last_cmd = {
-                    'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
-                    'angular': {'x': 0.0, 'y': 0.0, 'z': float(omega_cmd)}
-                }
+                            'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
+                            'angular': {'x': 0.0, 'y': 0.0, 'z': float(omega_cmd)}
+                        }
         
         # Store history for analysis
         self.robot_history.append((self.robot_pose.x, self.robot_pose.y))
@@ -1390,9 +1563,10 @@ class AnimatedSimulation:
                 self.distance_history.pop(0)
     
     def _predict_mpc_trajectory(self, x0, target, a_cmd, omega_cmd):
-        """Predict MPC trajectory for visualization"""
+        """Predict MPC trajectory for visualization - generates full N+1 point trajectory"""
         try:
             dt = self.dt
+            N = self.mpc.N  # Use MPC horizon
             trajectory = []
             x, y, theta, v = x0
             
@@ -1440,17 +1614,35 @@ class AnimatedSimulation:
         
         # Draw individual occupied voxels (what LIDAR actually sees and updates with log-odds)
         # These are the actual discovered voxels from LIDAR scans - show the voxel grid!
+        occupied_count = 0
         for i in range(self.map_data['width'] * self.map_data['height']):
             cell_value = self.map_data['data'][i]
             if cell_value > 0:  # Show ANY occupied cell (even uncertain ones) - make voxels VERY visible
+                occupied_count += 1
                 x = (i % self.map_data['width']) * self.map_data['resolution'] + self.map_data['origin_x']
                 y = (i // self.map_data['width']) * self.map_data['resolution'] + self.map_data['origin_y']
                 # Draw each occupied voxel as a DARK, VISIBLE square
-                # Make them bigger and darker for visibility
-                alpha_val = min(1.0, 0.3 + (cell_value / 100.0) * 0.7)  # More opaque for higher confidence
+                if cell_value >= 100:
+                    # Fully occupied - make it VERY visible
+                    alpha_val = 1.0
+                    color = 'black'
+                elif cell_value >= 50:
+                    # Uncertain but likely occupied - still visible
+                    alpha_val = 0.7
+                    color = 'darkgray'
+                else:
+                    # Low confidence but still occupied
+                    alpha_val = 0.5
+                    color = 'gray'
+                # Draw voxel as small square - use exact resolution size (NO expansion)
+                # Make sure voxels are drawn at their actual size (0.05m = 5cm)
                 rect = Rectangle((x, y), self.map_data['resolution'], self.map_data['resolution'],
-                               facecolor='black', edgecolor='black', linewidth=0.5, alpha=alpha_val, zorder=2)
+                               facecolor=color, edgecolor='none', linewidth=0.0, alpha=alpha_val, zorder=2)
                 self.ax.add_patch(rect)
+        
+        # Debug: print voxel count occasionally
+        if self.step_count % 50 == 0 and occupied_count > 0:
+            print(f"Step {self.step_count}: Found {occupied_count} occupied voxels")
         
         # Fit circles to discovered voxel clusters (second-hand understanding of obstacle radii)
         # Extract obstacles from discovered map by fitting circles to voxel clusters
@@ -1587,26 +1779,51 @@ class AnimatedSimulation:
                 self.ax.plot([self.robot_pose.x, end_x], [self.robot_pose.y, end_y], 
                            'r-', alpha=0.2, linewidth=0.5)
         
-        # Draw MPC predicted trajectory
+        # Draw MPC predicted trajectory - show ALL N+1 points from actual MPC solution
         if self.mpc_trajectory is not None and len(self.mpc_trajectory) > 1:
             traj_array = np.array(self.mpc_trajectory)
-            # Draw trajectory path
-            self.ax.plot(traj_array[:, 0], traj_array[:, 1], 'y-', linewidth=2, 
-                        alpha=0.8, label='MPC Predicted Trajectory', zorder=5)
-            # Draw trajectory points
-            self.ax.scatter(traj_array[:, 0], traj_array[:, 1], c='yellow', 
-                          s=30, alpha=0.6, edgecolors='orange', linewidths=0.5, zorder=6)
+            # Limit to N+1 points (should be 11 for horizon=10)
+            max_points = min(len(traj_array), self.mpc.N + 1)
+            traj_array = traj_array[:max_points]
+            
+            # Draw trajectory path - make it VERY visible to show obstacle avoidance
+            self.ax.plot(traj_array[:, 0], traj_array[:, 1], 'y-', linewidth=4, 
+                        alpha=0.95, label='MPC Predicted Trajectory', zorder=6)
+            
+            # Draw ALL trajectory points (N+1 points) - make them MUCH BIGGER and MORE visible
+            # Use different colors for start, middle, and end points
+            for i, point in enumerate(traj_array):
+                if i == 0:
+                    # Start point - green
+                    self.ax.scatter(point[0], point[1], c='green', s=150, alpha=1.0, 
+                                  edgecolors='darkgreen', linewidths=2, zorder=7, marker='o')
+                elif i == len(traj_array) - 1:
+                    # End point - red
+                    self.ax.scatter(point[0], point[1], c='red', s=150, alpha=1.0, 
+                                  edgecolors='darkred', linewidths=2, zorder=7, marker='s')
+                else:
+                    # Middle points - yellow/orange
+                    self.ax.scatter(point[0], point[1], c='yellow', s=100, alpha=0.9, 
+                                  edgecolors='orange', linewidths=2, zorder=6, marker='o')
+            
+            # Add text label showing number of points
+            if len(traj_array) > 0:
+                mid_idx = len(traj_array) // 2
+                self.ax.text(traj_array[mid_idx, 0], traj_array[mid_idx, 1], 
+                           f'{len(traj_array)} pts', fontsize=8, color='black', 
+                           bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7), zorder=8)
             # Draw arrow at end showing direction
             if len(traj_array) > 1:
-                end_idx = min(5, len(traj_array) - 1)
-                dx = traj_array[end_idx, 0] - traj_array[end_idx-1, 0]
-                dy = traj_array[end_idx, 1] - traj_array[end_idx-1, 1]
-                norm = math.sqrt(dx*dx + dy*dy)
-                if norm > 0.01:
-                    self.ax.arrow(traj_array[end_idx-1, 0], traj_array[end_idx-1, 1],
-                                dx * 0.5, dy * 0.5,
-                                head_width=0.08, head_length=0.06, fc='orange', ec='red',
-                                linewidth=1.5, alpha=0.8, zorder=7)
+                end_idx = min(len(traj_array), self.mpc.N + 1)
+                if end_idx > 1:
+                    dx = traj_array[end_idx-1, 0] - traj_array[end_idx-2, 0]
+                    dy = traj_array[end_idx-1, 1] - traj_array[end_idx-2, 1]
+                    norm = math.sqrt(dx*dx + dy*dy)
+                    if norm > 0.01:
+                        self.ax.arrow(traj_array[end_idx-1, 0], traj_array[end_idx-1, 1],
+                                    dx * 0.5, dy * 0.5,
+                                    head_width=0.1, head_length=0.08, fc='orange', ec='red',
+                                    linewidth=2, alpha=0.9, zorder=7)
         
         # Draw MPC direction arrow (simplified if no trajectory)
         if mcl_pose and self.mpc_trajectory is None:

@@ -31,6 +31,7 @@ setup(
                 'mcl_node = turtlebot_interceptor.mcl_node:main',
                 'ukf_node = turtlebot_interceptor.ukf_node:main',
                 'target_kf_node = turtlebot_interceptor.target_kf_node:main',  # Legacy - uses UKF
+                'target_measurement_node = turtlebot_interceptor.target_measurement_node:main',  # Artificial + terminal homing
                 'slam_node = turtlebot_interceptor.slam_node:main',
                 'lidar_processor_node = turtlebot_interceptor.lidar_processor_node:main',
                 'animated_sim = turtlebot_interceptor.animated_sim:main',  # Standalone simulation

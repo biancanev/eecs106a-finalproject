@@ -20,33 +20,37 @@ class SLAMNode(Node):
     def __init__(self):
         super().__init__('slam_node')
         
-        # Map parameters
-        self.map_width = 100  # cells
-        self.map_height = 100  # cells
-        self.resolution = 0.05  # 5cm per cell
-        self.origin_x = -2.5
-        self.origin_y = -2.5
+        # Declare parameters (lab4 pattern)
+        self.declare_parameter('map_width', 100)
+        self.declare_parameter('map_height', 100)
+        self.declare_parameter('resolution', 0.05)
+        self.declare_parameter('origin_x', -2.5)
+        self.declare_parameter('origin_y', -2.5)
+        self.declare_parameter('log_odds_free', -0.6)
+        self.declare_parameter('log_odds_occupied', 0.8)
+        self.declare_parameter('log_odds_min', -3.0)
+        self.declare_parameter('log_odds_max', 3.0)
+        self.declare_parameter('occupancy_threshold', 0.25)
         
-        # Initialize map as unknown (-1)
+        # Get parameters
+        self.map_width = self.get_parameter('map_width').get_parameter_value().integer_value
+        self.map_height = self.get_parameter('map_height').get_parameter_value().integer_value
+        self.resolution = self.get_parameter('resolution').get_parameter_value().double_value
+        self.origin_x = self.get_parameter('origin_x').get_parameter_value().double_value
+        self.origin_y = self.get_parameter('origin_y').get_parameter_value().double_value
+        
+        # Initialize map as unknown (-1) - use internal log-odds representation
         self.map_data = np.full((self.map_height, self.map_width), -1, dtype=np.int8)
         
-        # Log-odds parameters
-        self.log_odds_free = -0.6
-        self.log_odds_occupied = 0.5
-        self.log_odds_min = -3.0
-        self.log_odds_max = 3.0
+        # Internal log-odds map for more accurate updates (lab6 pattern)
+        self.log_odds_data = np.zeros((self.map_height, self.map_width), dtype=np.float32)
         
-        # Convert occupancy to log-odds lookup
-        self.log_odds_map = np.zeros(256, dtype=np.float32)
-        for i in range(256):
-            if i == -1 or i == 255:  # Unknown
-                self.log_odds_map[i] = 0.0
-            elif i == 0:  # Free
-                self.log_odds_map[i] = -1.5
-            elif i >= 100:  # Occupied
-                self.log_odds_map[i] = 1.5
-            else:
-                self.log_odds_map[i] = 0.0
+        # Log-odds parameters (from parameters)
+        self.log_odds_free = self.get_parameter('log_odds_free').get_parameter_value().double_value
+        self.log_odds_occupied = self.get_parameter('log_odds_occupied').get_parameter_value().double_value
+        self.log_odds_min = self.get_parameter('log_odds_min').get_parameter_value().double_value
+        self.log_odds_max = self.get_parameter('log_odds_max').get_parameter_value().double_value
+        self.occupancy_threshold = self.get_parameter('occupancy_threshold').get_parameter_value().double_value
         
         # Subscriptions
         self.scan_sub = self.create_subscription(
@@ -97,9 +101,39 @@ class SLAMNode(Node):
         self.update_map_from_scan(x, y, yaw, msg)
     
     def update_map_from_scan(self, x, y, theta, scan):
-        """Update map using LIDAR scan with log-odds occupancy grid mapping"""
+        """
+        Update map using LIDAR scan with log-odds occupancy grid mapping.
+        Based on lab6 mapping implementation patterns:
+        - Direct log-odds updates (no conversion overhead)
+        - Small step size for accurate free space marking
+        - Neighborhood expansion for obstacles with distance weighting
+        - Intermediate occupancy values (50) for uncertain cells
+        """
         min_range = scan.range_min if scan.range_min > 0 else 0.25
         max_range = scan.range_max if scan.range_max > 0 else 3.5
+        
+        # Helper functions for log-odds conversion (lab6 pattern)
+        def occupancy_to_log_odds(val):
+            """Convert occupancy value to log-odds"""
+            if val == -1:  # Unknown
+                return 0.0
+            elif val == 0:  # Free
+                return -1.5
+            elif val == 100:  # Occupied
+                return 1.5
+            else:  # Intermediate value (0-100)
+                return (val - 50) / 33.0  # Scale to [-1.5, 1.5]
+        
+        def log_odds_to_occupancy(lo):
+            """Convert log-odds to occupancy value"""
+            if lo < -self.occupancy_threshold:  # Free space
+                return 0
+            elif lo > self.occupancy_threshold:  # Occupied
+                return 100
+            else:  # Unknown/uncertain
+                if lo > 0.1:  # Some evidence for occupied
+                    return 50  # Uncertain but likely occupied
+                return -1  # Unknown
         
         # Process each beam
         for i, range_val in enumerate(scan.ranges):
@@ -113,15 +147,20 @@ class SLAMNode(Node):
             # Clamp range
             range_val = max(min_range, min(range_val, max_range))
             
-            # Raycast to update cells along beam
-            step_size = self.resolution * 0.5
-            max_steps = int(max_range / step_size)
+            # Skip if range is at max (no obstacle detected) or too close (self-detection)
+            if range_val >= max_range - 0.1:
+                continue
+            if range_val <= min_range + 0.05:  # Too close - likely self-detection
+                continue
             
-            hit_obstacle = False
+            # Raycast to update cells along beam (lab6 pattern - smaller step size)
+            step_size = self.resolution * 0.05  # Very small steps for accuracy
+            max_steps = int(range_val / step_size)
+            
+            # Update free space along beam
             for step in range(max_steps):
                 dist = step * step_size
-                if dist >= range_val:
-                    hit_obstacle = True
+                if dist >= range_val - 0.05:  # Stop just before obstacle
                     break
                 
                 # Calculate cell position
@@ -132,45 +171,62 @@ class SLAMNode(Node):
                 gx, gy = self.world_to_grid(cell_x, cell_y)
                 
                 if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
-                    # Update log-odds for free space
-                    self.update_cell_log_odds(gx, gy, self.log_odds_free)
+                    # Update log-odds for free space (direct update to log_odds_data)
+                    current_lo = self.log_odds_data[gy, gx]
+                    new_lo = current_lo + self.log_odds_free
+                    new_lo = np.clip(new_lo, self.log_odds_min, self.log_odds_max)
+                    self.log_odds_data[gy, gx] = new_lo
+                    # Update occupancy value
+                    self.map_data[gy, gx] = log_odds_to_occupancy(new_lo)
             
-            # Update obstacle cell at end of beam
-            if hit_obstacle and range_val < max_range:
-                obstacle_x = x + range_val * math.cos(beam_angle)
-                obstacle_y = y + range_val * math.sin(beam_angle)
-                gx, gy = self.world_to_grid(obstacle_x, obstacle_y)
-                
-                if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
-                    # Update log-odds for occupied space
-                    self.update_cell_log_odds(gx, gy, self.log_odds_occupied)
+            # Update obstacle cell at end of beam (lab6 pattern - neighborhood expansion)
+            obstacle_x = x + range_val * math.cos(beam_angle)
+            obstacle_y = y + range_val * math.sin(beam_angle)
+            gx, gy = self.world_to_grid(obstacle_x, obstacle_y)
+            
+            if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
+                # Update obstacle cell and neighbors (5x5 neighborhood with distance weighting)
+                for dx in range(-2, 3):
+                    for dy in range(-2, 3):
+                        ngx, ngy = gx + dx, gy + dy
+                        if 0 <= ngx < self.map_width and 0 <= ngy < self.map_height:
+                            # Distance weighting (lab6 pattern)
+                            dist_from_center = math.sqrt(dx*dx + dy*dy)
+                            if dist_from_center <= 1.0:
+                                # Stronger evidence for immediate neighbors
+                                weight = 0.5
+                            else:
+                                # Weaker evidence for outer ring
+                                weight = 0.2
+                            
+                            # Update log-odds
+                            current_lo = self.log_odds_data[ngy, ngx]
+                            new_lo = current_lo + self.log_odds_occupied * weight
+                            new_lo = np.clip(new_lo, self.log_odds_min, self.log_odds_max)
+                            self.log_odds_data[ngy, ngx] = new_lo
+                            # Update occupancy value
+                            self.map_data[ngy, ngx] = log_odds_to_occupancy(new_lo)
     
     def update_cell_log_odds(self, gx, gy, log_odds_update):
-        """Update log-odds for a single cell"""
-        # Get current occupancy value
-        current_val = self.map_data[gy, gx]
-        
-        # Convert to log-odds
-        if current_val == -1:  # Unknown
-            current_log_odds = 0.0
-        elif current_val == 0:  # Free
-            current_log_odds = -1.5
-        elif current_val >= 100:  # Occupied
-            current_log_odds = 1.5
-        else:
-            current_log_odds = 0.0
-        
-        # Update log-odds
-        new_log_odds = current_log_odds + log_odds_update
-        new_log_odds = np.clip(new_log_odds, self.log_odds_min, self.log_odds_max)
-        
-        # Convert back to occupancy value
-        if new_log_odds < -0.2:
-            self.map_data[gy, gx] = 0  # Free
-        elif new_log_odds > 0.2:
-            self.map_data[gy, gx] = 100  # Occupied
-        else:
-            self.map_data[gy, gx] = -1  # Unknown
+        """Update log-odds for a single cell (legacy method - now handled directly in update_map_from_scan)"""
+        # This method is kept for compatibility but log-odds are now updated directly
+        # in update_map_from_scan for better performance
+        if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
+            current_lo = self.log_odds_data[gy, gx]
+            new_lo = current_lo + log_odds_update
+            new_lo = np.clip(new_lo, self.log_odds_min, self.log_odds_max)
+            self.log_odds_data[gy, gx] = new_lo
+            
+            # Convert back to occupancy
+            if new_lo < -self.occupancy_threshold:
+                self.map_data[gy, gx] = 0  # Free
+            elif new_lo > self.occupancy_threshold:
+                self.map_data[gy, gx] = 100  # Occupied
+            else:
+                if new_lo > 0.1:
+                    self.map_data[gy, gx] = 50  # Uncertain but likely occupied
+                else:
+                    self.map_data[gy, gx] = -1  # Unknown
     
     def world_to_grid(self, x, y):
         """Convert world coordinates to grid coordinates"""

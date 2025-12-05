@@ -173,8 +173,21 @@ class UKFNode(Node):
     def __init__(self):
         super().__init__('ukf_node')
         
-        # UKF instance
-        self.ukf = SimpleUKF(dt=0.1)
+        # Declare parameters (lab4 pattern)
+        self.declare_parameter('dt', 0.1)
+        self.declare_parameter('process_noise', 0.02)
+        self.declare_parameter('measurement_noise', 0.03)
+        self.declare_parameter('use_sim_time', False)
+        
+        # Get parameters
+        dt = self.get_parameter('dt').get_parameter_value().double_value
+        process_noise = self.get_parameter('process_noise').get_parameter_value().double_value
+        measurement_noise = self.get_parameter('measurement_noise').get_parameter_value().double_value
+        
+        # UKF instance with parameters
+        self.ukf = SimpleUKF(dt=dt)
+        self.ukf.Q = np.eye(4) * process_noise
+        self.ukf.R = np.eye(2) * measurement_noise
         
         # Subscriptions
         self.target_meas_sub = self.create_subscription(
@@ -192,7 +205,7 @@ class UKFNode(Node):
         )
         
         # Timer for prediction (UKF always predicts, even without measurements)
-        self.prediction_timer = self.create_timer(0.1, self.prediction_timer_callback)
+        self.prediction_timer = self.create_timer(dt, self.prediction_timer_callback)
         
         self.get_logger().info('UKF node initialized - ready for hardware')
     

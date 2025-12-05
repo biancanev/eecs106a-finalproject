@@ -6,18 +6,38 @@ from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 import transforms3d.euler as euler
+import math
 
 class MCL(Node):
     """
-    Minimal Monte Carlo Localization implementation.
+    Monte Carlo Localization implementation with proper raycasting.
     State = [x, y, theta]
+    Based on lab4 hardware implementation patterns.
     """
 
     def __init__(self, N=300, motion_noise=[0.02, 0.02, 0.01], use_sim=False):
         super().__init__('mcl_node')
 
-        self.N = N
-        self.motion_noise = np.array(motion_noise)
+        # Declare parameters (lab4 pattern)
+        self.declare_parameter('num_particles', N)
+        self.declare_parameter('motion_noise_x', motion_noise[0])
+        self.declare_parameter('motion_noise_y', motion_noise[1])
+        self.declare_parameter('motion_noise_theta', motion_noise[2])
+        self.declare_parameter('use_sim_time', use_sim)
+        self.declare_parameter('max_range', 3.5)
+        self.declare_parameter('min_range', 0.25)
+        self.declare_parameter('resample_threshold', 0.98)
+        
+        # Get parameters
+        self.N = self.get_parameter('num_particles').get_parameter_value().integer_value
+        noise_x = self.get_parameter('motion_noise_x').get_parameter_value().double_value
+        noise_y = self.get_parameter('motion_noise_y').get_parameter_value().double_value
+        noise_theta = self.get_parameter('motion_noise_theta').get_parameter_value().double_value
+        self.motion_noise = np.array([noise_x, noise_y, noise_theta])
+        self.max_range = self.get_parameter('max_range').get_parameter_value().double_value
+        self.min_range = self.get_parameter('min_range').get_parameter_value().double_value
+        self.resample_threshold = self.get_parameter('resample_threshold').get_parameter_value().double_value
+        
         self.particles = None
         self.weights = None
         self.map = None
@@ -139,17 +159,85 @@ class MCL(Node):
         self.particles[:, 2] = np.mod(self.particles[:, 2] + np.pi, 2 * np.pi) - np.pi  # Wrap to [-pi, pi]
 
     def compute_likelihood(self, particle, lidar_scan):
-        """Compute likelihood of particle given lidar scan"""
+        """Compute likelihood of particle given lidar scan using raycasting"""
         if self.map is None:
             return 1e-10
         
-        # Simple likelihood: compare expected vs actual ranges
-        # This is a simplified version - full implementation would raycast
         px, py, ptheta = particle
+        likelihood = 1.0
+        num_valid_beams = 0
+        total_error = 0.0
         
-        # For now, return uniform likelihood (will be improved)
-        # TODO: Implement proper raycasting likelihood
-        return 1.0 / self.N
+        # Use every Nth beam for efficiency (adjust based on scan density)
+        step = max(1, len(lidar_scan.ranges) // 60)  # Use ~60 beams
+        
+        for i in range(0, len(lidar_scan.ranges), step):
+            # Calculate beam angle
+            angle = lidar_scan.angle_min + i * lidar_scan.angle_increment
+            beam_angle = ptheta + angle
+            
+            # Raycast to get expected range
+            expected_range = self._raycast(px, py, beam_angle)
+            actual_range = lidar_scan.ranges[i]
+            
+            # Skip invalid readings
+            if math.isnan(actual_range) or math.isinf(actual_range):
+                continue
+            if actual_range < self.min_range or actual_range > self.max_range:
+                continue
+            
+            num_valid_beams += 1
+            # Normalized error
+            error = abs(expected_range - actual_range) / (actual_range + 0.05)
+            total_error += error * error  # Squared error
+        
+        # Calculate likelihood - exponential of negative error
+        if num_valid_beams > 5:
+            avg_error = total_error / num_valid_beams
+            likelihood = math.exp(-avg_error * 500)  # Strong weighting
+        else:
+            likelihood = 1e-50  # Very low if not enough beams
+        
+        return likelihood
+    
+    def _raycast(self, x, y, theta):
+        """Raycast from position in direction theta, return range to obstacle"""
+        if self.map is None:
+            return self.max_range
+        
+        width = self.map.info.width
+        height = self.map.info.height
+        resolution = self.map.info.resolution
+        origin_x = self.map.info.origin.position.x
+        origin_y = self.map.info.origin.position.y
+        
+        # Step size for raycasting
+        step_size = resolution * 0.5
+        current_x, current_y = x, y
+        distance = 0.0
+        dx = math.cos(theta) * step_size
+        dy = math.sin(theta) * step_size
+        
+        # Raycast until hit obstacle or max range
+        while distance < self.max_range:
+            # Convert to grid coordinates
+            gx = int((current_x - origin_x) / resolution)
+            gy = int((current_y - origin_y) / resolution)
+            
+            # Check bounds
+            if gx < 0 or gx >= width or gy < 0 or gy >= height:
+                return self.max_range
+            
+            # Check if cell is occupied
+            idx = gy * width + gx
+            if self.map.data[idx] > 50:  # Occupied
+                return distance
+            
+            current_x += dx
+            current_y += dy
+            distance += step_size
+        
+        return self.max_range
 
     def lidar_callback(self, msg: LaserScan):
         """Update step when new lidar scan arrives"""
@@ -170,16 +258,30 @@ class MCL(Node):
         self.weights += 1e-12
         self.weights /= np.sum(self.weights)
         
-        # Resample
-        self.resample()
+        # Resample based on effective number of particles
+        effective_particles = 1.0 / (np.sum(self.weights**2) + 1e-10)
+        if effective_particles < self.N * self.resample_threshold:
+            self.resample()
         
         # Publish pose estimate
         self.publish_pose()
 
     def resample(self):
-        """Resample particles based on weights"""
-        idx = np.random.choice(self.N, self.N, p=self.weights)
-        self.particles = self.particles[idx]
+        """Resample particles based on weights (systematic resampling)"""
+        # Systematic resampling (more stable than random choice)
+        cumsum = np.cumsum(self.weights)
+        cumsum[-1] = 1.0  # Ensure last is exactly 1.0
+        
+        indices = np.zeros(self.N, dtype=np.int32)
+        u = np.random.random() / self.N
+        j = 0
+        for i in range(self.N):
+            while u > cumsum[j]:
+                j += 1
+            indices[i] = j
+            u += 1.0 / self.N
+        
+        self.particles = self.particles[indices]
         self.weights = np.ones(self.N) / self.N
 
     def mean_and_covariance(self):

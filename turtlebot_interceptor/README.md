@@ -87,9 +87,21 @@ ros2 launch turtlebot_interceptor simulation.launch.py
 
 For real hardware deployment:
 
+**Quick Start (5 minutes):**
 ```bash
+# See HARDWARE_QUICK_START.md for quick setup
 ros2 launch turtlebot_interceptor hardware.launch.py
 ```
+
+**Full Step-by-Step Guide:**
+See **[HARDWARE_DEPLOYMENT.md](HARDWARE_DEPLOYMENT.md)** for complete instructions including:
+- Prerequisites and installation
+- Hardware setup (LIDAR, robot base, target tracking)
+- Configuration and parameter tuning
+- Launch procedures
+- Verification and testing
+- Troubleshooting guide
+- Advanced configuration
 
 This launches all nodes:
 - LIDAR processor (filters raw LIDAR data)
@@ -97,8 +109,6 @@ This launches all nodes:
 - MCL node (localization)
 - UKF node (target tracking)
 - MPC node (control)
-
-See `HARDWARE_DEPLOYMENT.md` for detailed hardware setup instructions.
 
 ### Individual Nodes
 
