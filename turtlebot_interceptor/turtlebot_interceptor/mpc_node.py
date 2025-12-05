@@ -350,12 +350,12 @@ class MPCNode(Node):
     
     def compute_obstacles(self):
         """Extract obstacles from map - use occupied cells directly for guaranteed avoidance"""
-        if self.robot_pose is None:
+        if self.seeker_state is None:
             return []
         
-        # Get robot position
-        robot_x = self.robot_pose.pose.pose.position.x
-        robot_y = self.robot_pose.pose.pose.position.y
+        # Get robot position from seeker_state [px, py, theta, v]
+        robot_x = self.seeker_state[0]
+        robot_y = self.seeker_state[1]
         
         # Get all occupied cells as obstacles
         return self.get_occupied_cells_as_obstacles((robot_x, robot_y), lookahead_dist=3.0)
