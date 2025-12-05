@@ -176,23 +176,43 @@ class SimpleUnicycleMPC:
 
     # --- linearize unicycle model around x0 ---
     def linearize(self, x0):
-        px,py,th,v = x0
+        """
+        Linearize unicycle dynamics: x = [px, py, theta, v], u = [a, omega]
+        Dynamics: 
+          px' = v*cos(theta)
+          py' = v*sin(theta)
+          theta' = omega
+          v' = a
+        """
+        px, py, th, v = x0
         dt = self.dt
+        
+        # State transition matrix A = I + dt * df/dx
         A = np.eye(4)
-        B = np.zeros((4,2))
+        # d(px')/d(theta) = -v*sin(theta)
+        A[0, 2] = -dt * v * np.sin(th)
+        # d(px')/d(v) = cos(theta)
+        A[0, 3] = dt * np.cos(th)
+        # d(py')/d(theta) = v*cos(theta)
+        A[1, 2] = dt * v * np.cos(th)
+        # d(py')/d(v) = sin(theta)
+        A[1, 3] = dt * np.sin(th)
+        # theta and v don't depend on other states (for this step)
 
-        A[0,2] = -dt*v*np.sin(th)
-        A[0,3] =  dt*np.cos(th)
-        A[1,2] =  dt*v*np.cos(th)
-        A[1,3] =  dt*np.sin(th)
+        # Control input matrix B = dt * df/du
+        B = np.zeros((4, 2))
+        # d(theta')/d(omega) = 1
+        B[2, 1] = dt
+        # d(v')/d(a) = 1
+        B[3, 0] = dt
 
-        B[2,1] = dt  # dtheta/domega
-        B[3,0] = dt  # dv/da
-
-        # constant term
-        f = np.array([v*np.cos(th), v*np.sin(th), 0.0, 0.0])
-        c = x0 + dt*f - A@x0
-        return A,B,c
+        # Constant term: c = f(x0, u0=0) - A*x0
+        # f(x0, 0) = [v*cos(th), v*sin(th), 0, 0]
+        f_x0 = np.array([v * np.cos(th), v * np.sin(th), 0.0, 0.0])
+        # c = x0 + dt*f(x0) - A*x0
+        c = x0 + dt * f_x0 - A @ x0
+        
+        return A, B, c
 
     def compute_time_to_go(self, x0, target):
         """
@@ -272,6 +292,14 @@ class SimpleUnicycleMPC:
             T = np.array(target)
             if T.shape != (2, self.N + 1):
                 raise ValueError(f"target must be shape (2, {self.N+1}), got {T.shape}")
+        
+        # CRITICAL DEBUG: Verify inputs
+        if not hasattr(self, '_solve_debug_count'):
+            self._solve_debug_count = 0
+        self._solve_debug_count += 1
+        if self._solve_debug_count % 50 == 0:
+            print(f"MPC solve DEBUG: x0=[{x0[0]:.3f}, {x0[1]:.3f}, {np.degrees(x0[2]):.1f}°, {x0[3]:.3f}], "
+                  f"target=[{T[0,0]:.3f}, {T[1,0]:.3f}], dx={T[0,0]-x0[0]:.3f}, dy={T[1,0]-x0[1]:.3f}")
 
         # Compute time-to-go and adapt weights (Boyd's fast MPC)
         if self.use_time_to_go:
@@ -395,14 +423,31 @@ class SimpleUnicycleMPC:
         """
         a_cmd, omega_cmd = self.solve(x0, target, obstacles)
         
+        # CRITICAL DEBUG: Log what MPC is solving
+        if not hasattr(self, '_twist_debug_count'):
+            self._twist_debug_count = 0
+        self._twist_debug_count += 1
+        if self._twist_debug_count % 50 == 0:
+            if isinstance(target, np.ndarray) and target.ndim == 2:
+                tgt = target[:, 0]
+            else:
+                tgt = np.array(target)[:2]
+            dx = tgt[0] - x0[0]
+            dy = tgt[1] - x0[1]
+            dist = np.sqrt(dx**2 + dy**2)
+            print(f"MPC get_twist: x0=[{x0[0]:.3f}, {x0[1]:.3f}, {np.degrees(x0[2]):.1f}°, {x0[3]:.3f}], "
+                  f"target=[{tgt[0]:.3f}, {tgt[1]:.3f}], dx={dx:.3f}, dy={dy:.3f}, dist={dist:.3f}, "
+                  f"a_cmd={a_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°")
+        
         # Convert acceleration to velocity command
         current_v = x0[3] if len(x0) > 3 else 0.0
         v_cmd = np.clip(current_v + a_cmd * self.dt, self.vx_min, self.vx_max)
         
-        # Apply additional safety constraints on turn rate at high speeds
-        if abs(v_cmd) > 0.3:
-            max_turn_at_speed = 1.0  # Reduce turn rate at higher speeds
-            omega_cmd = np.clip(omega_cmd, -max_turn_at_speed, max_turn_at_speed)
+        # REMOVED: Don't limit turn rate - this was preventing MPC from working correctly
+        # The MPC should handle turn rate limits through its constraints
+        # if abs(v_cmd) > 0.3:
+        #     max_turn_at_speed = 1.0  # Reduce turn rate at higher speeds
+        #     omega_cmd = np.clip(omega_cmd, -max_turn_at_speed, max_turn_at_speed)
 
         return {
             'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
