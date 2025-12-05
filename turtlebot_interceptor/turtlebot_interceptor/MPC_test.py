@@ -47,11 +47,12 @@ class SimpleUnicycleMPC:
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - SIMPLIFIED for straight-line-then-turn behavior
-        self.Qp_base = 50.0  # Position weight - high enough to prioritize reaching target
+        # Base weights - CRITICAL FIX: Position weight must be MUCH higher than control penalties
+        # If control penalties are too high relative to position, MPC will minimize control instead of position
+        self.Qp_base = 200.0  # MUCH higher position weight - prioritize reaching target
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.1  # Control penalty - moderate to allow movement but prevent excessive acceleration
-        self.Rw_base = 0.1  # Turn penalty - moderate to allow turning but prevent excessive spinning
+        self.Ra_base = 0.01  # MUCH lower control penalty - allow movement
+        self.Rw_base = 0.01  # MUCH lower turn penalty - allow turning (but MPC constraints will limit it)
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -126,11 +127,12 @@ class SimpleUnicycleMPC:
             # 3. No theta penalty → robot can orient freely to minimize position error
             
             # Simple cost: minimize position error and control effort
-            # No time-varying weights - keep it simple for now
-            # Heavy position penalty will naturally make robot turn to face target, then go straight
+            # CRITICAL: Position error must dominate cost function
+            # If control penalties are too high, MPC will minimize control instead of position
+            # Make position error cost MUCH larger than control costs
             cost += self.Qp_param * (px_err**2 + py_err**2)
-            # Control penalties prevent excessive acceleration/turning
-            cost += self.Ra_param*(a**2) + self.Rw_param*(omega**2)
+            # Control penalties - keep VERY small so position error dominates
+            cost += self.Ra_param * (a**2) + self.Rw_param * (omega**2)
 
             # Velocity constraints (Twist message format)
             # Linear velocity constraints
@@ -157,11 +159,11 @@ class SimpleUnicycleMPC:
             # Already handled by effective_wz_max above, but we can add explicit constraint
             # The angular velocity constraint already limits turn rate, which limits turn angle per step
 
-        # terminal cost
+        # terminal cost - CRITICAL: Make terminal cost MUCH heavier to ensure convergence
         pxN = self.X[0,N] - self.T[0,N]
         pyN = self.X[1,N] - self.T[1,N]
-        # Heavy terminal position penalty - robot will naturally align to minimize this
-        cost += self.Qp_param*(pxN**2 + pyN**2)
+        # Terminal position penalty - make it 10x heavier than stage cost to ensure robot reaches goal
+        cost += 10.0 * self.Qp_param * (pxN**2 + pyN**2)
 
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
         self.original_cost = cost  # Store original cost expression
@@ -478,8 +480,19 @@ class SimpleUnicycleMPC:
         Update the cost function weight parameters (Boyd's fast MPC).
         Uses CVXPY parameters for efficient weight updates without rebuilding QP.
         """
+        # CRITICAL: Ensure position weight is ALWAYS much larger than control penalties
+        # If control penalties are too high, MPC will minimize control instead of position
         self.Qp_param.value = self.Qp
         self.Qtheta_param.value = self.Qtheta
-        self.Ra_param.value = self.Ra
-        self.Rw_param.value = self.Rw
+        # Force control penalties to be very small relative to position weight
+        self.Ra_param.value = max(self.Ra, 0.001)  # Minimum 0.001 to avoid numerical issues
+        self.Rw_param.value = max(self.Rw, 0.001)  # Minimum 0.001 to avoid numerical issues
         self.alpha_progress_param.value = self.alpha_progress
+        
+        # DEBUG: Log weights periodically
+        if not hasattr(self, '_weight_debug_count'):
+            self._weight_debug_count = 0
+        self._weight_debug_count += 1
+        if self._weight_debug_count % 50 == 0:
+            print(f"MPC weights: Qp={self.Qp:.2f}, Ra={self.Ra:.4f}, Rw={self.Rw:.4f}, "
+                  f"ratio={self.Qp/max(self.Ra, 0.001):.1f}")
