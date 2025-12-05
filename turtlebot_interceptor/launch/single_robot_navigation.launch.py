@@ -31,6 +31,20 @@ def generate_launch_description():
             description='Goal Y position (meters)'
         ),
         
+        # Simple pose publisher (for SLAM node - uses odometry or static pose)
+        # This provides pose until MCL initializes and takes over
+        Node(
+            package='turtlebot_interceptor',
+            executable='simple_pose_publisher',
+            name='simple_pose_publisher',
+            parameters=[{
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'use_odom': True,  # Use /odom if available, else static pose
+                'static_pose': False,
+            }],
+            output='screen'
+        ),
+        
         # LIDAR processor node (processes raw LIDAR data)
         # Based on lab4 patterns
         Node(
