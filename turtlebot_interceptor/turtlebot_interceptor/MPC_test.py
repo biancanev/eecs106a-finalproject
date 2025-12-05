@@ -117,22 +117,13 @@ class SimpleUnicycleMPC:
             a       = self.U[0,k]
             omega   = self.U[1,k]
             
-            # CRITICAL FIX: Penalize heading alignment using cross-product approximation
-            # Instead of penalizing theta itself (which tries to keep theta=0),
-            # we penalize misalignment: sin(theta - desired_heading) ≈ cross product
-            # For small angles: sin(theta_err) ≈ theta_err
-            # We can approximate: desired_heading = atan2(py_err, px_err)
-            # Alignment error = sin(theta) * cos(desired_heading) - cos(theta) * sin(desired_heading)
-            # But simpler: penalize the component of velocity NOT pointing toward target
-            # If robot is at (px, py) with heading theta, velocity direction is (cos(theta), sin(theta))
-            # Desired direction is (px_err, py_err) normalized
-            # Misalignment = 1 - dot(velocity_dir, desired_dir) = 1 - (cos(theta)*px_err + sin(theta)*py_err)/dist
-            # For CVXPY: use cross product approximation: sin(theta_err) ≈ (sin(theta)*px_err - cos(theta)*py_err)/dist
-            dist_to_target = cp.sqrt(px_err**2 + py_err**2 + 1e-6)  # Add small epsilon for numerical stability
-            # Alignment: robot should point in direction of target
-            # Cross product: sin(theta_err) = (sin(theta)*px_err - cos(theta)*py_err) / dist
-            # This is CVXPY-compatible and penalizes misalignment
-            alignment_error = (cp.sin(theta) * px_err - cp.cos(theta) * py_err) / dist_to_target
+            # CRITICAL FIX: Don't penalize theta itself - that tries to keep theta=0
+            # Instead, heavily penalize position error - this naturally encourages alignment
+            # The robot will naturally turn to face the target to minimize position error
+            # For straight-line-then-turn behavior, we want:
+            # 1. Large position weight → robot wants to get to target fast
+            # 2. Small control penalty → robot can turn quickly
+            # 3. No theta penalty → robot can orient freely to minimize position error
             
             # Minimum time-to-go behavior: use time-varying weights (already handled by adaptive weights)
             # The adaptive Qp weight based on time-to-go already encourages faster convergence
@@ -141,9 +132,9 @@ class SimpleUnicycleMPC:
             time_weight = 1.0 + (self.N - k) * 0.1  # Earlier steps weighted more
             
             # cost with adaptive weights and time-varying position weight
-            # CRITICAL: Penalize alignment error, not theta itself
-            # This encourages robot to point toward target
-            cost += self.Qp_param * time_weight * (px_err**2 + py_err**2) + self.Qtheta_param * (alignment_error**2)
+            # Position error heavily weighted → robot will naturally align and go straight
+            cost += self.Qp_param * time_weight * (px_err**2 + py_err**2)
+            # Small control penalty → allows quick turns and fast movement
             cost += self.Ra_param*(a**2) + self.Rw_param*(omega**2)
 
             # Velocity constraints (Twist message format)
@@ -174,10 +165,8 @@ class SimpleUnicycleMPC:
         # terminal cost
         pxN = self.X[0,N] - self.T[0,N]
         pyN = self.X[1,N] - self.T[1,N]
-        distN = cp.sqrt(pxN**2 + pyN**2 + 1e-6)
-        # Terminal alignment error (CVXPY-compatible)
-        alignment_error_N = (cp.sin(self.X[2,N]) * pxN - cp.cos(self.X[2,N]) * pyN) / distN
-        cost += self.Qp_param*(pxN**2 + pyN**2) + self.Qtheta_param * (alignment_error_N**2)
+        # Heavy terminal position penalty - robot will naturally align to minimize this
+        cost += self.Qp_param*(pxN**2 + pyN**2)
 
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
         self.original_cost = cost  # Store original cost expression
