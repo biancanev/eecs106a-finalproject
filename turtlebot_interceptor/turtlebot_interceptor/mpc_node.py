@@ -368,11 +368,63 @@ class MPCNode(Node):
         return obstacles
     
     def compute_obstacles(self):
-        """Extract obstacles from map - use cone extraction like animated_sim"""
-        # CRITICAL: Use cone extraction (clusters cells into circles) NOT individual cells
-        # This matches animated_sim.py which uses clean circular obstacles
-        # Passing individual cells creates too many obstacles and massive repulsive field
-        return self.extract_cones_from_map()
+        """Extract obstacles - EVERY occupied cell within range"""
+        if self.seeker_state is None or self.map is None:
+            return []
+        
+        robot_x = self.seeker_state[0]
+        robot_y = self.seeker_state[1]
+        
+        # Extract ALL occupied cells within range as individual obstacles
+        obstacles = []
+        width = self.map.info.width
+        height = self.map.info.height
+        resolution = self.map.info.resolution
+        origin_x = self.map.info.origin.position.x
+        origin_y = self.map.info.origin.position.y
+        
+        # CRITICAL: Large obstacle radius to ensure avoidance
+        obstacle_radius = 0.4  # 40cm - very large to ensure no collisions
+        
+        for i in range(width * height):
+            if self.map.data[i] > 30:  # Occupied
+                gx = i % width
+                gy = i // width
+                world_x = gx * resolution + origin_x + resolution / 2  # Cell center
+                world_y = gy * resolution + origin_y + resolution / 2
+                
+                # Distance from robot
+                dx = world_x - robot_x
+                dy = world_y - robot_y
+                dist = np.sqrt(dx*dx + dy*dy)
+                
+                # Only within 1.5m of robot (reduced range for performance)
+                if dist < 1.5 and dist > 0.02:
+                    obstacles.append((np.array([world_x, world_y]), obstacle_radius))
+        
+        # Limit to closest 30 obstacles (for performance)
+        if len(obstacles) > 30:
+            obstacles.sort(key=lambda obs: np.sqrt((obs[0][0]-robot_x)**2 + (obs[0][1]-robot_y)**2))
+            obstacles = obstacles[:30]
+        
+        # DEBUG
+        if not hasattr(self, '_obstacle_count'):
+            self._obstacle_count = 0
+        self._obstacle_count += 1
+        if self._obstacle_count % 20 == 0:
+            self.get_logger().error(
+                f"OBSTACLE CELLS: Found {len(obstacles)} occupied cells within 1.5m, "
+                f"robot=({robot_x:.3f}, {robot_y:.3f})"
+            )
+            if len(obstacles) > 0:
+                closest = min(obstacles, key=lambda obs: np.sqrt((obs[0][0]-robot_x)**2 + (obs[0][1]-robot_y)**2))
+                dist_closest = np.sqrt((closest[0][0]-robot_x)**2 + (closest[0][1]-robot_y)**2)
+                self.get_logger().error(
+                    f"  Closest cell: ({closest[0][0]:.3f}, {closest[0][1]:.3f}), "
+                    f"dist={dist_closest:.3f}m, radius={closest[1]:.3f}m"
+                )
+        
+        return obstacles
 
     def predict_target_trajectory(self):
         """Predict target trajectory over MPC horizon (lab8 pattern - improved prediction)"""
