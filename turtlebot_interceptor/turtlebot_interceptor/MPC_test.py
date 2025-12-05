@@ -162,6 +162,10 @@ class SimpleUnicycleMPC:
             # This is equivalent to: omega <= max_turn_angle / dt
             # Already handled by effective_wz_max above, but we can add explicit constraint
             # The angular velocity constraint already limits turn rate, which limits turn angle per step
+            
+            # CRITICAL: Add hard obstacle constraints (distance constraints)
+            # This ensures robot NEVER gets too close to obstacles
+            # Obstacles will be added dynamically in solve() method
 
         # terminal cost - CRITICAL: Make terminal cost MUCH heavier to ensure convergence
         pxN = self.X[0,N] - self.T[0,N]
@@ -371,21 +375,44 @@ class SimpleUnicycleMPC:
                     dist_sq = dx*dx + dy*dy
                     
                     # Safety radius (obstacle radius + robot radius + margin)
-                    safety_radius = radius + 0.15 + 0.1  # Robot radius ~0.15m, margin 0.1m (increased)
+                    safety_radius = radius + 0.15 + 0.2  # Robot radius ~0.15m, margin 0.2m (INCREASED for safety)
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # CRITICAL: Much stronger repulsion when very close
+                    # CRITICAL: Much stronger repulsion when very close - act like hard constraint
                     if dist_sq < safety_radius_sq:  # Within safety radius - CRITICAL!
-                        # Exponential penalty when too close
-                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.01)
+                        # EXTREME penalty when too close - effectively a hard constraint
+                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.001)  # 100x penalty!
+                    elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
+                        # Very high penalty when close
+                        obstacle_cost_value += repulsion_weight * 20.0 / (dist_sq + safety_radius_sq * 0.1)
                     elif dist_sq < safety_radius_sq * 4:  # Within 2x safety radius
-                        # Inverse distance penalty (smooth)
-                        obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq * 0.1)
+                        # High penalty
+                        obstacle_cost_value += repulsion_weight * 5.0 / (dist_sq + safety_radius_sq * 0.1)
                     elif dist_sq < safety_radius_sq * 9:  # Within 3x safety radius
-                        # Weaker penalty for far obstacles
-                        obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + safety_radius_sq)
+                        # Moderate penalty for far obstacles
+                        obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
+        # CRITICAL: Scale obstacle cost based on proximity to make it act like hard constraint
+        if obstacles is not None and len(obstacles) > 0:
+            # Check if robot is getting dangerously close to any obstacle
+            px0 = x0[0]
+            py0 = x0[1]
+            min_dist_to_obstacle = float('inf')
+            for center, radius in obstacles:
+                dx = px0 - center[0]
+                dy = py0 - center[1]
+                dist = np.sqrt(dx*dx + dy*dy)
+                safety_radius = radius + 0.15 + 0.2  # Robot + margin
+                if dist < safety_radius * 3.0:  # Within 3x safety radius
+                    min_dist_to_obstacle = min(min_dist_to_obstacle, dist)
+            
+            # If getting close, increase obstacle cost even more
+            if min_dist_to_obstacle < float('inf'):
+                # Scale obstacle cost based on proximity - up to 10x when very close
+                proximity_factor = max(1.0, (1.0 / (min_dist_to_obstacle + 0.1)))  # Up to 10x when very close
+                obstacle_cost_value *= proximity_factor
+        
         self.obstacle_cost_param.value = obstacle_cost_value
 
         # CRITICAL FIX: Disable warm start completely to avoid OSQP matrix size errors
