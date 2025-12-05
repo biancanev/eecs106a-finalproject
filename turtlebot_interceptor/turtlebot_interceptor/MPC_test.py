@@ -47,11 +47,11 @@ class SimpleUnicycleMPC:
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights (will be adapted based on time-to-go) - OPTIMIZED for tight optimal paths
-        self.Qp_base = 100.0  # MUCH higher position weight = prioritize reaching target fast (was 50.0)
-        self.Qtheta_base = 0.3  # Lower theta weight = allow more aggressive turning (was 0.5)
-        self.Ra_base = 0.02  # MUCH lower control penalty = allow very aggressive control (was 0.05)
-        self.Rw_base = 0.02  # MUCH lower turn penalty = allow very fast turning (was 0.05)
+        # Base weights - SIMPLIFIED for straight-line-then-turn behavior
+        self.Qp_base = 50.0  # Position weight - high enough to prioritize reaching target
+        self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
+        self.Ra_base = 0.1  # Control penalty - moderate to allow movement but prevent excessive acceleration
+        self.Rw_base = 0.1  # Turn penalty - moderate to allow turning but prevent excessive spinning
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -125,16 +125,11 @@ class SimpleUnicycleMPC:
             # 2. Small control penalty → robot can turn quickly
             # 3. No theta penalty → robot can orient freely to minimize position error
             
-            # Minimum time-to-go behavior: use time-varying weights (already handled by adaptive weights)
-            # The adaptive Qp weight based on time-to-go already encourages faster convergence
-            # Additional: penalize distance more heavily in early steps to encourage progress
-            # Use a decreasing weight factor: earlier steps have higher weight (encourages progress)
-            time_weight = 1.0 + (self.N - k) * 0.1  # Earlier steps weighted more
-            
-            # cost with adaptive weights and time-varying position weight
-            # Position error heavily weighted → robot will naturally align and go straight
-            cost += self.Qp_param * time_weight * (px_err**2 + py_err**2)
-            # Small control penalty → allows quick turns and fast movement
+            # Simple cost: minimize position error and control effort
+            # No time-varying weights - keep it simple for now
+            # Heavy position penalty will naturally make robot turn to face target, then go straight
+            cost += self.Qp_param * (px_err**2 + py_err**2)
+            # Control penalties prevent excessive acceleration/turning
             cost += self.Ra_param*(a**2) + self.Rw_param*(omega**2)
 
             # Velocity constraints (Twist message format)
