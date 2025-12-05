@@ -277,6 +277,16 @@ class MPCNode(Node):
 
         # Build initial state
         x0 = self.seeker_state.copy()
+        
+        # CRITICAL DEBUG: Log state and goal
+        if not hasattr(self, '_debug_count'):
+            self._debug_count = 0
+        self._debug_count += 1
+        if self._debug_count % 20 == 0:  # Every 2 seconds
+            self.get_logger().error(
+                f"DEBUG: x0=[{x0[0]:.3f}, {x0[1]:.3f}, {np.degrees(x0[2]):.1f}°, {x0[3]:.3f}m/s], "
+                f"goal_x={self.goal_x}, goal_y={self.goal_y}"
+            )
 
         # Get target/goal position
         if use_goal:
@@ -286,6 +296,13 @@ class MPCNode(Node):
             target_seq = np.zeros((2, self.N + 1))
             target_seq[0, :] = target_pos[0]
             target_seq[1, :] = target_pos[1]
+            
+            # CRITICAL DEBUG: Verify target sequence
+            if self._debug_count % 20 == 0:
+                self.get_logger().error(
+                    f"DEBUG: target_seq[0,0]={target_seq[0,0]:.3f}, target_seq[1,0]={target_seq[1,0]:.3f}, "
+                    f"dx={target_seq[0,0]-x0[0]:.3f}, dy={target_seq[1,0]-x0[1]:.3f}"
+                )
         else:
             # Predict target trajectory
             target_seq = self.predict_target_trajectory()
@@ -318,20 +335,24 @@ class MPCNode(Node):
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
             
-            # Debug: Log MPC commands periodically
+            # CRITICAL DEBUG: Log everything to find the bug
             if not hasattr(self, '_mpc_cmd_count'):
                 self._mpc_cmd_count = 0
             self._mpc_cmd_count += 1
-            if self._mpc_cmd_count % 20 == 0:  # Every 2 seconds at 10Hz
+            if self._mpc_cmd_count % 10 == 0:  # Every 1 second - MORE FREQUENT
                 angle_to_goal = np.arctan2(target_seq[1,0] - x0[1], target_seq[0,0] - x0[0])
                 angle_err = angle_to_goal - x0[2]
                 angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
                 dist = np.sqrt((target_seq[0,0] - x0[0])**2 + (target_seq[1,0] - x0[1])**2)
-                self.get_logger().info(
-                    f"MPC: robot=({x0[0]:.2f}, {x0[1]:.2f}, {np.degrees(x0[2]):.1f}°), "
-                    f"goal=({target_seq[0,0]:.2f}, {target_seq[1,0]:.2f}), "
-                    f"dist={dist:.2f}m, angle_err={np.degrees(angle_err):.1f}°, "
-                    f"v_cmd={v_cmd:.2f}m/s, omega_cmd={np.degrees(omega_cmd):.1f}°/s"
+                dx = target_seq[0,0] - x0[0]
+                dy = target_seq[1,0] - x0[1]
+                # Check if commands make sense
+                self.get_logger().error(  # ERROR level so it's visible
+                    f"MPC: robot=({x0[0]:.3f}, {x0[1]:.3f}, {np.degrees(x0[2]):.1f}°), v={x0[3]:.3f}, "
+                    f"goal=({target_seq[0,0]:.3f}, {target_seq[1,0]:.3f}), "
+                    f"dx={dx:.3f}, dy={dy:.3f}, dist={dist:.3f}m, "
+                    f"angle_to_goal={np.degrees(angle_to_goal):.1f}°, angle_err={np.degrees(angle_err):.1f}°, "
+                    f"v_cmd={v_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°"
                 )
             
             # Clip commands to safe limits
