@@ -35,6 +35,7 @@ setup(
                 'slam_node = turtlebot_interceptor.slam_node:main',
                 'lidar_processor_node = turtlebot_interceptor.lidar_processor_node:main',
                 'simple_pose_publisher = turtlebot_interceptor.simple_pose_publisher:main',  # For LIDAR validation
+                'navigation_visualizer = turtlebot_interceptor.navigation_visualizer_node:main',  # RViz visualization
                 'animated_sim = turtlebot_interceptor.animated_sim:main',  # Standalone simulation
             ],
         },
