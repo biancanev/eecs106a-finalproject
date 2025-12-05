@@ -310,9 +310,7 @@ class MPCNode(Node):
                 return
 
         # Compute obstacles with uncertainty inflation
-        # TEMPORARY: Disable obstacles to get MPC working
-        # The obstacle cost rebuilding causes solver issues
-        obstacles = None  # self.compute_obstacles()  # Disabled for now
+        obstacles = self.compute_obstacles()  # Enable obstacle avoidance
 
         # Adjust speed limit based on uncertainty (from paper)
         if self.seeker_cov is not None:
