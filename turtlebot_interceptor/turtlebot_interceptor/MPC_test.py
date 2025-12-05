@@ -340,11 +340,12 @@ class SimpleUnicycleMPC:
                             obstacle_cost += 5000.0 / (dist_sq + 0.001)  # Strong but not excessive
             
             # Add obstacle cost to the problem
+            # CRITICAL: Don't rebuild problem - CVXPY doesn't like dynamic constraint changes
+            # Instead, rebuild with exact same constraint structure to avoid strict inequality errors
             if obstacle_cost != 0:
-                # Rebuild problem with obstacle cost
-                # Use the existing constraints list, not self.prob.constraints (which might have issues)
+                # Rebuild problem with obstacle cost, using exact same constraint structure
                 new_cost = self.original_cost + obstacle_cost
-                # Rebuild constraints list from scratch to avoid strict inequality issues
+                # Rebuild constraints exactly as in _build_qp to avoid any strict inequality issues
                 constraints = []
                 constraints += [self.X[:,0] == self.x0]
                 for k in range(self.N):
@@ -352,13 +353,14 @@ class SimpleUnicycleMPC:
                         self.X[:,k+1] == self.A @ self.X[:,k] + self.B @ self.U[:,k] + self.c
                     ]
                     constraints += [
-                        self.vx_min <= self.X[3,k],
-                        self.X[3,k] <= self.vx_max,
-                        self.a_min <= self.U[0,k],
-                        self.U[0,k] <= self.a_max,
-                        self.wz_min <= self.U[1,k],
-                        self.U[1,k] <= self.wz_max,
+                        self.vx_min <= self.X[3,k],  # Use <= not <
+                        self.X[3,k] <= self.vx_max,  # Use <= not <
+                        self.a_min <= self.U[0,k],    # Use <= not <
+                        self.U[0,k] <= self.a_max,   # Use <= not <
+                        self.wz_min <= self.U[1,k],   # Use <= not <
+                        self.U[1,k] <= self.wz_max,  # Use <= not <
                     ]
+                # Create new problem with same structure
                 self.prob = cp.Problem(cp.Minimize(new_cost), constraints)
 
         # Disable warm start in solver if obstacles present
