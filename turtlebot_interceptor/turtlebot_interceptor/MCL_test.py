@@ -19,11 +19,12 @@ class MCL(Node):
         super().__init__('mcl_node')
 
         # Declare parameters (lab4 pattern)
+        # Use ignore_override=True to allow launch file parameters to override
         self.declare_parameter('num_particles', N)
         self.declare_parameter('motion_noise_x', motion_noise[0])
         self.declare_parameter('motion_noise_y', motion_noise[1])
         self.declare_parameter('motion_noise_theta', motion_noise[2])
-        self.declare_parameter('use_sim_time', use_sim)
+        self.declare_parameter('use_sim_time', use_sim, ignore_override=True)
         self.declare_parameter('max_range', 3.5)
         self.declare_parameter('min_range', 0.25)
         self.declare_parameter('resample_threshold', 0.98)
@@ -45,21 +46,30 @@ class MCL(Node):
         self.use_sim = use_sim
 
         # Subscriptions
+        # Use BEST_EFFORT QoS to match hardware LIDAR publishers
+        from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
+        scan_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT
+        )
+        
         if use_sim:
             # For simulation: use fake lidar or voxel grid
+            # Simulation might use RELIABLE, but use BEST_EFFORT for compatibility
             self.lidar_sub = self.create_subscription(
                 LaserScan,
                 '/scan',  # Standard ROS2 topic
                 self.lidar_callback,
-                10
+                scan_qos
             )
         else:
-            # For hardware: use actual lidar
+            # For hardware: use actual lidar (BEST_EFFORT matches hardware)
             self.lidar_sub = self.create_subscription(
                 LaserScan,
                 '/scan',
                 self.lidar_callback,
-                10
+                scan_qos
             )
         
         self.map_sub = self.create_subscription(
