@@ -159,6 +159,7 @@ class SimpleUnicycleMPC:
 
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
         self.original_cost = cost  # Store original cost expression
+        self.original_constraints = constraints  # Store original constraints
         
         # Initialize weight parameters
         self.Qp_param.value = self.Qp_base
@@ -300,6 +301,8 @@ class SimpleUnicycleMPC:
         # Obstacle repulsion will be added in solve() method dynamically
 
         # Add obstacle repulsion cost if provided
+        # CRITICAL FIX: Use simple smooth penalty function (no conditionals)
+        # Python if statements with CVXPY expressions can cause "Strict inequalities" errors
         obstacle_cost = 0
         if obstacles is not None and len(obstacles) > 0:
             # Add repulsion cost for each obstacle at each time step
@@ -311,57 +314,26 @@ class SimpleUnicycleMPC:
                     dx = px - center[0]
                     dy = py - center[1]
                     dist_sq = dx*dx + dy*dy
-                    # Safety radius (obstacle radius + robot radius + TIGHT margin for faster paths)
-                    safety_radius = radius + 0.15 + 0.03  # robot radius + TIGHT margin (was 0.1, now 0.03)
+                    
+                    # Safety radius (obstacle radius + robot radius + margin)
+                    safety_radius = radius + 0.15 + 0.03
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # Minimum safe distance (hard constraint - must stay outside this)
-                    min_safe_dist = radius + 0.15 + 0.01  # Just robot radius + tiny margin
-                    min_safe_dist_sq = min_safe_dist * min_safe_dist
-                    
-                    # Repulsion cost: high when very close, decays quickly with distance
-                    # Only penalize if within 1.5x safety radius (tighter range for faster paths)
-                    if dist_sq < safety_radius_sq * 2.25:  # 1.5x safety radius (was 4 = 2x)
-                        # Distance-dependent repulsion: stronger only when very close
-                        dist = np.sqrt(dist_sq + 1e-6)
-                        dist_to_safety = dist - safety_radius
-                        
-                        # Soft repulsion: only when getting close to safety radius
-                        if dist_to_safety < 0.1:  # Within 10cm of safety radius
-                            # Exponential repulsion - very strong when close, weak when far
-                            repulsion_weight = 50.0  # Moderate repulsion (was 200.0 - too strong)
-                            # Use exponential decay: stronger penalty as we approach safety radius
-                            obstacle_cost += repulsion_weight * np.exp(-dist_to_safety * 20)
-                        
-                        # HARD CONSTRAINT: robot must stay outside minimum safe distance
-                        # This prevents actual collision but allows tight paths
-                        if dist_sq < min_safe_dist_sq:
-                            # Very large penalty if inside minimum safe distance
-                            obstacle_cost += 5000.0 / (dist_sq + 0.001)  # Strong but not excessive
+                    # Simple smooth repulsion: 1/(distance^2) penalty
+                    # This is always computed (no if statements) and is CVXPY-compatible
+                    # The penalty is large when close, small when far
+                    repulsion_weight = 100.0
+                    # Use smooth inverse distance penalty (no conditionals)
+                    obstacle_cost += repulsion_weight / (dist_sq + safety_radius_sq * 0.1)
             
             # Add obstacle cost to the problem
-            # CRITICAL: Don't rebuild problem - CVXPY doesn't like dynamic constraint changes
-            # Instead, rebuild with exact same constraint structure to avoid strict inequality errors
+            # CRITICAL: CVXPY doesn't allow modifying problems in-place
+            # We must rebuild the problem completely, but use the EXACT same constraint structure
             if obstacle_cost != 0:
-                # Rebuild problem with obstacle cost, using exact same constraint structure
+                # Rebuild problem with obstacle cost added
                 new_cost = self.original_cost + obstacle_cost
-                # Rebuild constraints exactly as in _build_qp to avoid any strict inequality issues
-                constraints = []
-                constraints += [self.X[:,0] == self.x0]
-                for k in range(self.N):
-                    constraints += [
-                        self.X[:,k+1] == self.A @ self.X[:,k] + self.B @ self.U[:,k] + self.c
-                    ]
-                    constraints += [
-                        self.vx_min <= self.X[3,k],  # Use <= not <
-                        self.X[3,k] <= self.vx_max,  # Use <= not <
-                        self.a_min <= self.U[0,k],    # Use <= not <
-                        self.U[0,k] <= self.a_max,   # Use <= not <
-                        self.wz_min <= self.U[1,k],   # Use <= not <
-                        self.U[1,k] <= self.wz_max,  # Use <= not <
-                    ]
-                # Create new problem with same structure
-                self.prob = cp.Problem(cp.Minimize(new_cost), constraints)
+                # Use stored original constraints (exact same structure, no modifications)
+                self.prob = cp.Problem(cp.Minimize(new_cost), self.original_constraints)
 
         # Disable warm start in solver if obstacles present
         solver_settings = self.solver_settings.copy()
@@ -372,8 +344,9 @@ class SimpleUnicycleMPC:
             self.prob.solve(**solver_settings)
             
             # Restore original problem after solve (for next iteration)
+            # Use stored original constraints to avoid any corruption
             if obstacle_cost != 0:
-                self.prob = cp.Problem(cp.Minimize(self.original_cost), self.prob.constraints)
+                self.prob = cp.Problem(cp.Minimize(self.original_cost), self.original_constraints)
             
             # Store solution for warm start
             if self.prob.status in ["optimal", "optimal_inaccurate"]:
