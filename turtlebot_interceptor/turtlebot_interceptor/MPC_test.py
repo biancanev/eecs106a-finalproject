@@ -342,8 +342,24 @@ class SimpleUnicycleMPC:
             # Add obstacle cost to the problem
             if obstacle_cost != 0:
                 # Rebuild problem with obstacle cost
+                # Use the existing constraints list, not self.prob.constraints (which might have issues)
                 new_cost = self.original_cost + obstacle_cost
-                self.prob = cp.Problem(cp.Minimize(new_cost), self.prob.constraints)
+                # Rebuild constraints list from scratch to avoid strict inequality issues
+                constraints = []
+                constraints += [self.X[:,0] == self.x0]
+                for k in range(self.N):
+                    constraints += [
+                        self.X[:,k+1] == self.A @ self.X[:,k] + self.B @ self.U[:,k] + self.c
+                    ]
+                    constraints += [
+                        self.vx_min <= self.X[3,k],
+                        self.X[3,k] <= self.vx_max,
+                        self.a_min <= self.U[0,k],
+                        self.U[0,k] <= self.a_max,
+                        self.wz_min <= self.U[1,k],
+                        self.U[1,k] <= self.wz_max,
+                    ]
+                self.prob = cp.Problem(cp.Minimize(new_cost), constraints)
 
         # Disable warm start in solver if obstacles present
         solver_settings = self.solver_settings.copy()

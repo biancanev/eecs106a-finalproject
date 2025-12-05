@@ -132,5 +132,13 @@ def generate_launch_description():
             }],
             output='screen'
         ),
+        
+        # RViz for visualization
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            output='screen'
+        ),
     ])
 
