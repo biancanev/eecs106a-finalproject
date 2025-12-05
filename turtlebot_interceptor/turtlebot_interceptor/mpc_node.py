@@ -86,6 +86,7 @@ class MPCNode(Node):
         self.seeker_state = None  # [px, py, theta, v]
         self.prev_state = None  # Previous state for velocity estimation
         self.prev_velocity = 0.0  # Previous velocity (lab8 pattern)
+        self.prev_time = None  # Previous timestamp for accurate velocity estimation
 
         # Initialize MPC
         self.mpc = SimpleUnicycleMPC(horizon=self.N, dt=self.dt)
@@ -118,16 +119,24 @@ class MPCNode(Node):
         
         # Estimate velocity from previous state (lab8 pattern - more robust)
         if self.prev_state is not None:
-            dt = self.dt
+            # Use actual time difference from message timestamps for more accurate velocity
+            current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if hasattr(self, 'prev_time') and self.prev_time is not None:
+                dt_actual = current_time - self.prev_time
+            else:
+                dt_actual = self.dt  # Fallback to nominal dt
+            
             dx = msg.pose.pose.position.x - self.prev_state[0]
             dy = msg.pose.pose.position.y - self.prev_state[1]
             # Use velocity in direction of motion (more accurate)
-            v = np.sqrt(dx**2 + dy**2) / dt if dt > 0 else 0.0
-            # Smooth velocity estimate (exponential moving average)
-            v = 0.7 * v + 0.3 * self.prev_velocity
+            v = np.sqrt(dx**2 + dy**2) / dt_actual if dt_actual > 0.01 else 0.0  # Min dt to avoid division by zero
+            # Smooth velocity estimate (exponential moving average) - more aggressive smoothing
+            v = 0.5 * v + 0.5 * self.prev_velocity  # More smoothing to reduce noise
             v = np.clip(v, self.v_min, self.v_max_base)
+            self.prev_time = current_time
         else:
             v = 0.0
+            self.prev_time = None
         
         # Store previous state for next iteration
         self.prev_state = np.array([
