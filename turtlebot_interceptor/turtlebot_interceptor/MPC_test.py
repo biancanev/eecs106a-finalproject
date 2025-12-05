@@ -30,8 +30,8 @@ class SimpleUnicycleMPC:
         self.wx_max = 0.0
         self.wy_min = 0.0  # Unicycle: no pitch
         self.wy_max = 0.0
-        self.wz_min = -2.5  # MUCH higher turn rate for optimal tight trajectories (was 1.5)
-        self.wz_max = 2.5
+        self.wz_min = -1.0  # REDUCE max turn rate - too high causes spinning
+        self.wz_max = 1.0
         
         # Acceleration constraints (for MPC internal use)
         self.a_min = -0.4
@@ -49,10 +49,10 @@ class SimpleUnicycleMPC:
 
         # Base weights - CRITICAL FIX: Position weight must be MUCH higher than control penalties
         # If control penalties are too high relative to position, MPC will minimize control instead of position
-        self.Qp_base = 200.0  # MUCH higher position weight - prioritize reaching target
+        self.Qp_base = 1000.0  # EXTREMELY high position weight - prioritize reaching target
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.01  # MUCH lower control penalty - allow movement
-        self.Rw_base = 0.01  # MUCH lower turn penalty - allow turning (but MPC constraints will limit it)
+        self.Ra_base = 0.001  # EXTREMELY low control penalty - allow movement
+        self.Rw_base = 0.5  # Higher turn penalty to prevent excessive spinning
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -162,8 +162,8 @@ class SimpleUnicycleMPC:
         # terminal cost - CRITICAL: Make terminal cost MUCH heavier to ensure convergence
         pxN = self.X[0,N] - self.T[0,N]
         pyN = self.X[1,N] - self.T[1,N]
-        # Terminal position penalty - make it 10x heavier than stage cost to ensure robot reaches goal
-        cost += 10.0 * self.Qp_param * (pxN**2 + pyN**2)
+        # Terminal position penalty - make it 50x heavier than stage cost to ensure robot reaches goal
+        cost += 50.0 * self.Qp_param * (pxN**2 + pyN**2)
 
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
         self.original_cost = cost  # Store original cost expression
