@@ -208,7 +208,23 @@ class MPCNode(Node):
                 
                 occupied_cells.append((world_x, world_y))
         
+        # Count total occupied cells for debugging
+        total_occupied = sum(1 for i in range(width * height) if self.map.data[i] > 50)
+        
+        # DEBUG: Log occupied cell count
+        if not hasattr(self, '_occupied_cells_logged'):
+            self.get_logger().info(
+                f"Map has {total_occupied} occupied cells out of {width * height} total cells, "
+                f"{len(occupied_cells)} non-wall occupied cells"
+            )
+            self._occupied_cells_logged = True
+        
         if len(occupied_cells) == 0:
+            if total_occupied > 0:
+                self.get_logger().warn(
+                    f"All {total_occupied} occupied cells are near walls (wall_margin={wall_margin}m). "
+                    f"Consider reducing wall_margin or checking map origin."
+                )
             return obstacles
         
         # Cluster nearby cells (cones are compact circular clusters)
@@ -330,19 +346,26 @@ class MPCNode(Node):
         # Compute obstacles with uncertainty inflation
         obstacles = self.compute_obstacles()  # Enable obstacle avoidance
         
-        # DEBUG: Log obstacles periodically
+        # DEBUG: Log obstacles periodically - MORE FREQUENT
         if not hasattr(self, '_obstacle_debug_count'):
             self._obstacle_debug_count = 0
         self._obstacle_debug_count += 1
-        if self._obstacle_debug_count % 20 == 0 and obstacles:
-            self.get_logger().info(
-                f"Found {len(obstacles)} obstacles in map frame. "
-                f"Map frame_id: {self.map.header.frame_id if self.map else 'None'}, "
-                f"Robot pose frame: map (from /amcl_pose)"
-            )
-            for i, (center, radius) in enumerate(obstacles[:3]):  # Log first 3
-                self.get_logger().info(
-                    f"  Obstacle {i+1}: center=({center[0]:.3f}, {center[1]:.3f}), radius={radius:.3f}m"
+        if self._obstacle_debug_count % 10 == 0:  # Every 1 second
+            if obstacles and len(obstacles) > 0:
+                self.get_logger().error(  # ERROR level so it's visible
+                    f"OBSTACLES: Found {len(obstacles)} obstacles in map frame. "
+                    f"Map frame_id: {self.map.header.frame_id if self.map else 'None'}, "
+                    f"Robot pose: ({x0[0]:.3f}, {x0[1]:.3f})"
+                )
+                for i, (center, radius) in enumerate(obstacles[:5]):  # Log first 5
+                    dist_to_robot = np.sqrt((center[0] - x0[0])**2 + (center[1] - x0[1])**2)
+                    self.get_logger().error(
+                        f"  Obstacle {i+1}: center=({center[0]:.3f}, {center[1]:.3f}), "
+                        f"radius={radius:.3f}m, dist_to_robot={dist_to_robot:.3f}m"
+                    )
+            else:
+                self.get_logger().warn(
+                    f"NO OBSTACLES DETECTED! Map has {np.sum(np.array(self.map.data) > 50) if self.map else 0} occupied cells"
                 )
 
         # Adjust speed limit based on uncertainty (from paper)

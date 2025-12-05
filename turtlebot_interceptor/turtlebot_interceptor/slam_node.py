@@ -84,8 +84,8 @@ class SLAMNode(Node):
         # State
         self.current_pose = None
         
-        # Timer for map publishing - faster rate for real-time visualization
-        self.map_timer = self.create_timer(0.01, self.publish_map)  # 10Hz update rate
+        # Timer for map publishing - 10Hz for real-time visualization
+        self.map_timer = self.create_timer(0.1, self.publish_map)  # 10Hz update rate (0.1s = 10Hz)
         
         self.get_logger().info('SLAM node initialized - log-odds occupancy grid mapping')
     
@@ -249,26 +249,30 @@ class SLAMNode(Node):
         return gx, gy
     
     def publish_map(self):
-        """Publish occupancy grid map"""
+        """Publish occupancy grid map - ALWAYS publishes, even if empty"""
         map_msg = OccupancyGrid()
         map_msg.header.stamp = self.get_clock().now().to_msg()
-        map_msg.header.frame_id = 'map'
+        map_msg.header.frame_id = 'map'  # CRITICAL: Must be 'map' frame
         
         map_msg.info.resolution = self.resolution
         map_msg.info.width = self.map_width
         map_msg.info.height = self.map_height
         map_msg.info.origin.position.x = self.origin_x
         map_msg.info.origin.position.y = self.origin_y
-        map_msg.info.origin.orientation.w = 1.0
+        map_msg.info.origin.position.z = 0.0
+        map_msg.info.origin.orientation.w = 1.0  # Identity quaternion
         
         # Flatten map data (row-major order)
-        map_msg.data = self.map_data.flatten().tolist()
+        # Convert to int8 list (OccupancyGrid expects -1 to 100)
+        map_data_int = self.map_data.flatten().astype(np.int8).tolist()
+        map_msg.data = map_data_int
         
         # Count occupied cells for debugging
-        occupied_count = sum(1 for x in map_msg.data if x > 0)
+        occupied_count = sum(1 for x in map_msg.data if x > 50)  # >50 is occupied
         unknown_count = sum(1 for x in map_msg.data if x == -1)
         free_count = sum(1 for x in map_msg.data if x == 0)
         
+        # ALWAYS publish map (even if empty) so RViz can display it
         self.map_pub.publish(map_msg)
         
         # Log map status periodically
