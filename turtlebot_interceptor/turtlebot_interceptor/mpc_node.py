@@ -5,6 +5,7 @@ Based on the paper implementation
 """
 import rclpy
 from rclpy.node import Node
+from rclpy.exceptions import ParameterAlreadyDeclaredException
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
@@ -18,13 +19,16 @@ class MPCNode(Node):
         super().__init__('mpc_node')
 
         # Declare parameters (lab4 + lab8 pattern)
-        # Use ignore_override=True to allow launch file parameters to override
         self.declare_parameter('mpc_horizon', 15)
         self.declare_parameter('dt', 0.1)
         self.declare_parameter('v_max_base', 0.6)
         self.declare_parameter('v_min', 0.0)
         self.declare_parameter('omega_max', 1.5)
-        self.declare_parameter('use_sim_time', False, ignore_override=True)
+        # use_sim_time may be passed from launch file - declare only if not already set
+        try:
+            self.declare_parameter('use_sim_time', False)
+        except ParameterAlreadyDeclaredException:
+            pass  # Parameter already declared by launch file
         # Fallback control gains (lab8 pattern)
         self.declare_parameter('Kp_v', 2.0)
         self.declare_parameter('Kp_w', 0.8)

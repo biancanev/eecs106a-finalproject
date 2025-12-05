@@ -34,6 +34,7 @@ setup(
                 'target_measurement_node = turtlebot_interceptor.target_measurement_node:main',  # Artificial + terminal homing
                 'slam_node = turtlebot_interceptor.slam_node:main',
                 'lidar_processor_node = turtlebot_interceptor.lidar_processor_node:main',
+                'simple_pose_publisher = turtlebot_interceptor.simple_pose_publisher:main',  # For LIDAR validation
                 'animated_sim = turtlebot_interceptor.animated_sim:main',  # Standalone simulation
             ],
         },
