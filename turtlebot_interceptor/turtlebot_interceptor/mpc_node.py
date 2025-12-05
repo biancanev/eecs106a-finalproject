@@ -159,16 +159,34 @@ class MPCNode(Node):
         self.target_cov = np.array(msg.pose.covariance).reshape((6, 6))
 
     def extract_cones_from_map(self):
-        """Extract circular obstacles (cones) from occupancy grid - based on lab6 patterns"""
+        """Extract circular obstacles (cones) from occupancy grid - based on lab6 patterns
+        Returns obstacles in map frame (same frame as robot pose and goal)
+        """
         obstacles = []
         if self.map is None:
             return obstacles
+        
+        # CRITICAL: Verify map is in 'map' frame
+        if self.map.header.frame_id != 'map':
+            self.get_logger().warn(
+                f"Map frame_id is '{self.map.header.frame_id}', expected 'map'. "
+                f"Obstacles may be in wrong coordinate frame!"
+            )
         
         width = self.map.info.width
         height = self.map.info.height
         resolution = self.map.info.resolution
         origin_x = self.map.info.origin.position.x
         origin_y = self.map.info.origin.position.y
+        
+        # DEBUG: Log map origin once
+        if not hasattr(self, '_map_origin_logged'):
+            self.get_logger().info(
+                f"Map origin: ({origin_x:.3f}, {origin_y:.3f}), "
+                f"resolution: {resolution:.3f}m, size: {width}x{height}, "
+                f"frame_id: {self.map.header.frame_id}"
+            )
+            self._map_origin_logged = True
         
         # Extract occupied cells (not walls)
         occupied_cells = []
@@ -311,6 +329,21 @@ class MPCNode(Node):
 
         # Compute obstacles with uncertainty inflation
         obstacles = self.compute_obstacles()  # Enable obstacle avoidance
+        
+        # DEBUG: Log obstacles periodically
+        if not hasattr(self, '_obstacle_debug_count'):
+            self._obstacle_debug_count = 0
+        self._obstacle_debug_count += 1
+        if self._obstacle_debug_count % 20 == 0 and obstacles:
+            self.get_logger().info(
+                f"Found {len(obstacles)} obstacles in map frame. "
+                f"Map frame_id: {self.map.header.frame_id if self.map else 'None'}, "
+                f"Robot pose frame: map (from /amcl_pose)"
+            )
+            for i, (center, radius) in enumerate(obstacles[:3]):  # Log first 3
+                self.get_logger().info(
+                    f"  Obstacle {i+1}: center=({center[0]:.3f}, {center[1]:.3f}), radius={radius:.3f}m"
+                )
 
         # Adjust speed limit based on uncertainty (from paper)
         if self.seeker_cov is not None:
