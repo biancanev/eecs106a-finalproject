@@ -309,6 +309,22 @@ class MPCNode(Node):
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
             
+            # Debug: Log MPC commands periodically
+            if not hasattr(self, '_mpc_cmd_count'):
+                self._mpc_cmd_count = 0
+            self._mpc_cmd_count += 1
+            if self._mpc_cmd_count % 20 == 0:  # Every 2 seconds at 10Hz
+                angle_to_goal = np.arctan2(target_seq[1,0] - x0[1], target_seq[0,0] - x0[0])
+                angle_err = angle_to_goal - x0[2]
+                angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
+                dist = np.sqrt((target_seq[0,0] - x0[0])**2 + (target_seq[1,0] - x0[1])**2)
+                self.get_logger().info(
+                    f"MPC: robot=({x0[0]:.2f}, {x0[1]:.2f}, {np.degrees(x0[2]):.1f}°), "
+                    f"goal=({target_seq[0,0]:.2f}, {target_seq[1,0]:.2f}), "
+                    f"dist={dist:.2f}m, angle_err={np.degrees(angle_err):.1f}°, "
+                    f"v_cmd={v_cmd:.2f}m/s, omega_cmd={np.degrees(omega_cmd):.1f}°/s"
+                )
+            
             # Clip commands to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
             omega_cmd = np.clip(omega_cmd, -self.omega_max, self.omega_max)
