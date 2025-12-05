@@ -10,6 +10,7 @@ For LIDAR validation, we can use:
 """
 import rclpy
 from rclpy.node import Node
+from rclpy.exceptions import ParameterAlreadyDeclaredException
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 import transforms3d.euler as euler
@@ -24,7 +25,11 @@ class SimplePosePublisher(Node):
         # Declare parameters
         self.declare_parameter('use_odom', True)  # Use odometry if available
         self.declare_parameter('static_pose', False)  # Use static pose at origin
-        self.declare_parameter('use_sim_time', False)
+        # use_sim_time may be passed from launch file - declare only if not already set
+        try:
+            self.declare_parameter('use_sim_time', False)
+        except ParameterAlreadyDeclaredException:
+            pass  # Parameter already declared by launch file
         
         use_odom = self.get_parameter('use_odom').get_parameter_value().bool_value
         static_pose = self.get_parameter('static_pose').get_parameter_value().bool_value
@@ -56,10 +61,20 @@ class SimplePosePublisher(Node):
     def odom_callback(self, msg: Odometry):
         """Convert odometry to PoseWithCovarianceStamped"""
         pose_msg = PoseWithCovarianceStamped()
-        pose_msg.header = msg.header
+        pose_msg.header.stamp = self.get_clock().now().to_msg()
         pose_msg.header.frame_id = 'map'  # SLAM expects map frame
         pose_msg.pose = msg.pose
         self.pose_pub.publish(pose_msg)
+        
+        # Log periodically
+        if not hasattr(self, '_pose_pub_count'):
+            self._pose_pub_count = 0
+        self._pose_pub_count += 1
+        if self._pose_pub_count % 50 == 0:  # Every 5 seconds at 10Hz
+            self.get_logger().info(
+                f'Published pose: ({msg.pose.pose.position.x:.2f}, '
+                f'{msg.pose.pose.position.y:.2f})'
+            )
     
     def publish_static_pose(self):
         """Publish static pose at origin (for testing)"""
