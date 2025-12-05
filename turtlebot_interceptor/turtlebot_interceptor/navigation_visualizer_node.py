@@ -12,7 +12,7 @@ Overlays on top of voxel grid map in RViz
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseWithCovarianceStamped, Point
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 import numpy as np
@@ -31,7 +31,11 @@ class NavigationVisualizerNode(Node):
         self.declare_parameter('goal_y', 1.5)
         self.declare_parameter('robot_radius', 0.15)  # Robot footprint radius
         self.declare_parameter('path_history_length', 100)  # Number of poses to keep
-        self.declare_parameter('use_sim_time', False)
+        # use_sim_time may be passed from launch file - declare only if not already set
+        try:
+            self.declare_parameter('use_sim_time', False)
+        except rclpy.exceptions.ParameterAlreadyDeclaredException:
+            pass  # Parameter already declared by launch file
         
         # Get parameters
         self.goal_x = self.get_parameter('goal_x').get_parameter_value().double_value
@@ -42,8 +46,17 @@ class NavigationVisualizerNode(Node):
         # Subscriptions
         self.pose_sub = self.create_subscription(
             PoseWithCovarianceStamped,
-            '/amcl_pose',
+            '/amcl_pose',  # MCL estimated pose
             self.pose_callback,
+            10
+        )
+        
+        # Subscribe to odometry for true robot pose (if available)
+        from nav_msgs.msg import Odometry
+        self.odom_sub = self.create_subscription(
+            Odometry,
+            '/odom',
+            self.odom_callback,
             10
         )
         
@@ -62,7 +75,9 @@ class NavigationVisualizerNode(Node):
         )
         
         # State
-        self.current_pose = None
+        self.current_pose = None  # MCL estimated pose
+        self.current_pose_cov = None  # MCL pose covariance
+        self.true_pose = None  # True robot pose from odometry
         self.path_history = []  # List of (x, y) tuples
         self.marker_id = 0
         
@@ -74,8 +89,10 @@ class NavigationVisualizerNode(Node):
         )
     
     def pose_callback(self, msg: PoseWithCovarianceStamped):
-        """Update current robot pose and path history"""
+        """Update MCL estimated pose and path history"""
         self.current_pose = msg.pose.pose
+        # Store covariance for uncertainty visualization
+        self.current_pose_cov = np.array(msg.pose.covariance).reshape((6, 6))
         
         # Add to path history
         x = msg.pose.pose.position.x
@@ -86,6 +103,11 @@ class NavigationVisualizerNode(Node):
         # Limit path history length
         if len(self.path_history) > self.path_history_length:
             self.path_history.pop(0)
+    
+    def odom_callback(self, msg):
+        """Update true robot pose from odometry"""
+        # Store true pose for comparison
+        self.true_pose = msg.pose.pose
     
     def map_callback(self, msg: OccupancyGrid):
         """Store map for reference (if needed)"""
@@ -122,6 +144,18 @@ class NavigationVisualizerNode(Node):
             text_marker = self.create_text_marker()
             if text_marker:
                 markers.markers.append(text_marker)
+        
+        # 6. MCL uncertainty ellipse
+        if self.current_pose is not None and self.current_pose_cov is not None:
+            uncertainty_marker = self.create_uncertainty_ellipse()
+            if uncertainty_marker:
+                markers.markers.append(uncertainty_marker)
+        
+        # 7. True robot pose (if available from odometry)
+        if self.true_pose is not None:
+            true_pose_marker = self.create_true_pose_marker()
+            if true_pose_marker:
+                markers.markers.append(true_pose_marker)
         
         # Publish all markers
         self.marker_pub.publish(markers)
