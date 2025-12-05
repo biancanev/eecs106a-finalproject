@@ -323,6 +323,86 @@ class NavigationVisualizerNode(Node):
         marker.lifetime.sec = 1
         
         return marker
+    
+    def create_uncertainty_ellipse(self):
+        """Create uncertainty ellipse from MCL covariance"""
+        # Extract 2D position covariance
+        cov_2d = self.current_pose_cov[:2, :2]
+        
+        # Compute eigenvalues and eigenvectors
+        eigenvals, eigenvecs = np.linalg.eig(cov_2d)
+        eigenvals = np.maximum(eigenvals, 1e-6)  # Ensure positive
+        
+        # Create ellipse as line strip
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'mcl_uncertainty'
+        marker.id = self.marker_id
+        self.marker_id += 1
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        
+        # Generate ellipse points
+        num_points = 30
+        angle = np.arctan2(eigenvecs[1, 0], eigenvecs[0, 0])
+        width = 2 * np.sqrt(eigenvals[0]) * 2.0  # 2-sigma
+        height = 2 * np.sqrt(eigenvals[1]) * 2.0
+        
+        marker.points = []
+        for i in range(num_points + 1):
+            theta = 2 * np.pi * i / num_points
+            x_local = width/2 * np.cos(theta)
+            y_local = height/2 * np.sin(theta)
+            
+            # Rotate
+            x_rot = x_local * np.cos(angle) - y_local * np.sin(angle)
+            y_rot = x_local * np.sin(angle) + y_local * np.cos(angle)
+            
+            point = Point()
+            point.x = float(self.current_pose.position.x + x_rot)
+            point.y = float(self.current_pose.position.y + y_rot)
+            point.z = 0.05
+            marker.points.append(point)
+        
+        # Scale (line width)
+        marker.scale.x = 0.02
+        
+        # Color (cyan for MCL uncertainty)
+        marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.5)
+        
+        # Lifetime
+        marker.lifetime.sec = 1
+        
+        return marker
+    
+    def create_true_pose_marker(self):
+        """Create marker for true robot pose (from odometry)"""
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'true_pose'
+        marker.id = self.marker_id
+        self.marker_id += 1
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+        
+        # Position
+        marker.pose.position = self.true_pose.position
+        marker.pose.orientation = self.true_pose.orientation
+        
+        # Scale (smaller than MCL estimate)
+        marker.scale.x = self.robot_radius * 1.5
+        marker.scale.y = 0.08
+        marker.scale.z = 0.08
+        
+        # Color (magenta for true pose)
+        marker.color = ColorRGBA(r=1.0, g=0.0, b=1.0, a=0.6)
+        
+        # Lifetime
+        marker.lifetime.sec = 1
+        
+        return marker
 
 
 def main(args=None):
