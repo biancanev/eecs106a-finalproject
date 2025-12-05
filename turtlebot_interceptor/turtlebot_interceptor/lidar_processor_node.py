@@ -35,6 +35,19 @@ class LidarProcessorNode(Node):
         )
         
         # Publishers
+        # Republish /scan with RELIABLE QoS for RViz and other tools
+        # This allows RViz to subscribe while we still use BEST_EFFORT for hardware
+        reliable_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.RELIABLE
+        )
+        self.scan_repub = self.create_publisher(
+            LaserScan,
+            '/scan',  # Republish with RELIABLE QoS for visualization
+            reliable_qos
+        )
+        
         self.processed_scan_pub = self.create_publisher(
             LaserScan,
             '/scan_processed',  # Processed scan for other nodes
@@ -51,6 +64,10 @@ class LidarProcessorNode(Node):
     
     def raw_scan_callback(self, msg: LaserScan):
         """Process raw LIDAR scan"""
+        # Republish original scan with RELIABLE QoS for RViz
+        self.scan_repub.publish(msg)
+        
+        # Also publish processed version
         processed_scan = self.process_scan(msg)
         if processed_scan is not None:
             self.processed_scan_pub.publish(processed_scan)
