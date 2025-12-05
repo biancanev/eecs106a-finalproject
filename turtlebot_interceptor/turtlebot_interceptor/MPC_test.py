@@ -68,7 +68,7 @@ class SimpleUnicycleMPC:
         self.last_solution = None
         self.solver_settings = {
             'solver': cp.OSQP,
-            'warm_start': True,
+            'warm_start': False,  # CRITICAL: Disabled to avoid OSQP matrix size errors
             'verbose': False,
             'eps_abs': 1e-4,
             'eps_rel': 1e-4,
@@ -285,18 +285,11 @@ class SimpleUnicycleMPC:
         self.c.value = c
         self.T.value = T
 
-        # Warm start from previous solution (Boyd's fast MPC)
-        # Disable warm start if obstacles present (OSQP doesn't handle dynamic constraints well)
-        use_warm_start = (self.last_solution is not None and self.use_time_to_go and obstacles is None)
-        if use_warm_start:
-            try:
-                # Shift previous solution
-                self.X.value[:, :-1] = self.last_solution['X'][:, 1:]
-                self.X.value[:, -1] = self.last_solution['X'][:, -1]
-                self.U.value[:, :-1] = self.last_solution['U'][:, 1:]
-                self.U.value[:, -1] = self.last_solution['U'][:, -1]
-            except:
-                pass  # If warm start fails, start fresh
+        # CRITICAL: Disable warm start completely to avoid OSQP matrix size errors
+        # OSQP caches matrix structure, and any problem changes cause mismatches
+        # Warm start is disabled in solver_settings below
+        # We can still use last_solution for initial guess, but OSQP warm_start must be False
+        # use_warm_start = False  # Always disabled now to avoid OSQP errors
 
         # Obstacle repulsion will be added in solve() method dynamically
 
@@ -331,18 +324,20 @@ class SimpleUnicycleMPC:
                 new_cost = self.original_cost + obstacle_cost
                 self.prob = cp.Problem(cp.Minimize(new_cost), self.original_constraints)
 
-        # Disable warm start in solver if obstacles present
+        # CRITICAL FIX: Disable warm start completely to avoid OSQP matrix size errors
+        # When we rebuild/restore the problem, OSQP's cached matrix structure doesn't match
+        # Solution: Always disable warm start, or rebuild problem from scratch each time
         solver_settings = self.solver_settings.copy()
-        if obstacles is not None:
-            solver_settings['warm_start'] = False
+        solver_settings['warm_start'] = False  # Always disable to avoid matrix size issues
 
         try:
             self.prob.solve(**solver_settings)
             
-            # Restore original problem after solve (for next iteration)
-            # Use stored original constraints to avoid any corruption
-            if obstacle_cost != 0:
-                self.prob = cp.Problem(cp.Minimize(self.original_cost), self.original_constraints)
+            # CRITICAL: Don't restore problem after solve - it causes OSQP matrix size errors
+            # OSQP caches the matrix structure, and restoring changes it
+            # Instead, just keep the current problem (it will be rebuilt next iteration if needed)
+            # if obstacle_cost != 0:
+            #     self.prob = cp.Problem(cp.Minimize(self.original_cost), self.original_constraints)
             
             # Debug: Log solve status
             if not hasattr(self, '_solve_count'):
