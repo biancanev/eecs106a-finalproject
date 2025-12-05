@@ -47,12 +47,12 @@ class SimpleUnicycleMPC:
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - CRITICAL FIX: Position weight must be MUCH higher than control penalties
-        # If control penalties are too high relative to position, MPC will minimize control instead of position
-        self.Qp_base = 1000.0  # EXTREMELY high position weight - prioritize reaching target
+        # Base weights - CRITICAL: Balance between reaching target and avoiding obstacles
+        # Position weight must be high but not so high that obstacle costs are ignored
+        self.Qp_base = 500.0  # High position weight - but allow obstacle avoidance to dominate when close
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.001  # EXTREMELY low control penalty - allow movement
-        self.Rw_base = 0.5  # Higher turn penalty to prevent excessive spinning
+        self.Ra_base = 0.1  # Allow movement but penalize excessive acceleration
+        self.Rw_base = 1.0  # Penalize spinning - encourage smooth turns
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -346,7 +346,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 2000.0  # MUCH higher weight to ensure obstacle avoidance
+            repulsion_weight = 100000.0  # CRITICAL: EXTREME weight - must avoid obstacles at ALL costs
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -378,19 +378,23 @@ class SimpleUnicycleMPC:
                     safety_radius = radius + 0.15 + 0.2  # Robot radius ~0.15m, margin 0.2m (INCREASED for safety)
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # CRITICAL: Much stronger repulsion when very close - act like hard constraint
-                    if dist_sq < safety_radius_sq:  # Within safety radius - CRITICAL!
-                        # EXTREME penalty when too close - effectively a hard constraint
-                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.001)  # 100x penalty!
+                    # CRITICAL: MASSIVE repulsion when close - make it impossible to hit obstacles
+                    # Use exponential/inverse distance penalty to force avoidance
+                    if dist_sq < safety_radius_sq * 0.5:  # VERY CLOSE - EMERGENCY!
+                        # Catastrophic cost - should NEVER happen
+                        obstacle_cost_value += repulsion_weight * 10000.0 / (dist_sq + 0.0001)
+                    elif dist_sq < safety_radius_sq:  # Within safety radius - CRITICAL!
+                        # EXTREME penalty when too close - act like hard constraint
+                        obstacle_cost_value += repulsion_weight * 1000.0 / (dist_sq + 0.001)
                     elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
-                        # Very high penalty when close
-                        obstacle_cost_value += repulsion_weight * 20.0 / (dist_sq + safety_radius_sq * 0.1)
-                    elif dist_sq < safety_radius_sq * 4:  # Within 2x safety radius
-                        # High penalty
-                        obstacle_cost_value += repulsion_weight * 5.0 / (dist_sq + safety_radius_sq * 0.1)
-                    elif dist_sq < safety_radius_sq * 9:  # Within 3x safety radius
-                        # Moderate penalty for far obstacles
-                        obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq)
+                        # Very high penalty - start avoiding aggressively
+                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.01)
+                    elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
+                        # High penalty - plan to avoid
+                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.1)
+                    elif dist_sq < safety_radius_sq * 9:  # Within 9x safety radius
+                        # Moderate penalty - be aware of obstacle
+                        obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq * 0.5)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
         # CRITICAL: Scale obstacle cost based on proximity to make it act like hard constraint
@@ -399,19 +403,36 @@ class SimpleUnicycleMPC:
             px0 = x0[0]
             py0 = x0[1]
             min_dist_to_obstacle = float('inf')
+            closest_obstacle = None
             for center, radius in obstacles:
                 dx = px0 - center[0]
                 dy = py0 - center[1]
                 dist = np.sqrt(dx*dx + dy*dy)
                 safety_radius = radius + 0.15 + 0.2  # Robot + margin
                 if dist < safety_radius * 3.0:  # Within 3x safety radius
-                    min_dist_to_obstacle = min(min_dist_to_obstacle, dist)
+                    if dist < min_dist_to_obstacle:
+                        min_dist_to_obstacle = dist
+                        closest_obstacle = (center, radius, dist)
             
             # If getting close, increase obstacle cost even more
             if min_dist_to_obstacle < float('inf'):
                 # Scale obstacle cost based on proximity - up to 10x when very close
                 proximity_factor = max(1.0, (1.0 / (min_dist_to_obstacle + 0.1)))  # Up to 10x when very close
                 obstacle_cost_value *= proximity_factor
+                
+                # DEBUG: Log obstacle cost
+                if not hasattr(self, '_obstacle_cost_log_count'):
+                    self._obstacle_cost_log_count = 0
+                self._obstacle_cost_log_count += 1
+                if self._obstacle_cost_log_count % 10 == 0:
+                    print(f"MPC OBSTACLE COST: {obstacle_cost_value:.2f}, "
+                          f"closest_dist={min_dist_to_obstacle:.3f}m, "
+                          f"proximity_factor={proximity_factor:.2f}x, "
+                          f"num_obstacles={len(obstacles)}")
+                    if closest_obstacle:
+                        center, radius, dist = closest_obstacle
+                        print(f"  Closest obstacle: center=({center[0]:.3f}, {center[1]:.3f}), "
+                              f"radius={radius:.3f}m, dist={dist:.3f}m")
         
         self.obstacle_cost_param.value = obstacle_cost_value
 
