@@ -219,22 +219,26 @@ class MPCNode(Node):
                 
                 occupied_cells.append((world_x, world_y))
         
-        # Count total occupied cells for debugging
-        total_occupied = sum(1 for i in range(width * height) if self.map.data[i] > 50)
+        # Count total occupied cells for debugging (use same threshold as extraction)
+        total_occupied = sum(1 for i in range(width * height) if self.map.data[i] > occupancy_threshold)
         
-        # DEBUG: Log occupied cell count
-        if not hasattr(self, '_occupied_cells_logged'):
-            self.get_logger().info(
-                f"Map has {total_occupied} occupied cells out of {width * height} total cells, "
-                f"{len(occupied_cells)} non-wall occupied cells"
+        # DEBUG: Log occupied cell count EVERY TIME to see what's happening
+        if not hasattr(self, '_occupied_debug_count'):
+            self._occupied_debug_count = 0
+        self._occupied_debug_count += 1
+        if self._occupied_debug_count % 20 == 0:  # Every 2 seconds
+            self.get_logger().error(
+                f"OBSTACLE EXTRACTION: Map has {total_occupied} occupied cells (threshold>{occupancy_threshold}), "
+                f"{len(occupied_cells)} non-wall cells, "
+                f"wall_margin={wall_margin}m"
             )
-            self._occupied_cells_logged = True
         
         if len(occupied_cells) == 0:
-            if total_occupied > 0:
-                self.get_logger().warn(
-                    f"All {total_occupied} occupied cells are near walls (wall_margin={wall_margin}m). "
-                    f"Consider reducing wall_margin or checking map origin."
+            if total_occupied > 0 and self._occupied_debug_count % 20 == 0:
+                self.get_logger().error(
+                    f"ALL {total_occupied} OCCUPIED CELLS ARE WALLS! wall_margin={wall_margin}m. "
+                    f"Map bounds: x=[{origin_x:.2f}, {origin_x + width*resolution:.2f}], "
+                    f"y=[{origin_y:.2f}, {origin_y + height*resolution:.2f}]"
                 )
             return obstacles
         
@@ -288,15 +292,30 @@ class MPCNode(Node):
             # Compute radius more accurately - use distance from center to farthest point
             distances_from_center = np.sqrt((points[:, 0] - center_x)**2 + (points[:, 1] - center_y)**2)
             max_dist = np.max(distances_from_center)
-            radius = max_dist + resolution * 2  # Add 2 cells margin for safety
+            radius = max_dist + resolution * 3  # Add 3 cells margin for safety (was 2)
             
             # Also use bounding box as fallback
-            radius_bbox = max(width_cluster, height_cluster) / 2 + resolution
+            radius_bbox = max(width_cluster, height_cluster) / 2 + resolution * 2
             radius = max(radius, radius_bbox)  # Use larger of the two
+            
+            # CRITICAL: Inflate obstacle radius significantly - robot keeps hitting them
+            radius = radius * 1.5  # 50% larger to account for uncertainty
             
             # Accept reasonable obstacle sizes (cones are typically 0.1-0.2m radius)
             if 0.05 < radius < 0.6:  # Expanded range - was 0.06-0.5
                 obstacles.append((np.array([center_x, center_y]), radius))
+                # DEBUG: Log each extracted obstacle
+                if self._occupied_debug_count % 20 == 0:
+                    self.get_logger().error(
+                        f"  Extracted obstacle: center=({center_x:.3f}, {center_y:.3f}), "
+                        f"radius={radius:.3f}m, cluster_size={len(cluster)}"
+                    )
+        
+        # DEBUG: Log final count
+        if self._occupied_debug_count % 20 == 0:
+            self.get_logger().error(
+                f"TOTAL EXTRACTED: {len(obstacles)} obstacles from {len(clusters)} clusters"
+            )
         
         return obstacles[:10]  # Limit to 10 cones max
     
