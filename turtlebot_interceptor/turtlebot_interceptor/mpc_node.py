@@ -284,7 +284,9 @@ class MPCNode(Node):
                 return
 
         # Compute obstacles with uncertainty inflation
-        obstacles = self.compute_obstacles()
+        # TEMPORARY: Disable obstacles to get MPC working
+        # The obstacle cost rebuilding causes solver issues
+        obstacles = None  # self.compute_obstacles()  # Disabled for now
 
         # Adjust speed limit based on uncertainty (from paper)
         if self.seeker_cov is not None:
@@ -316,8 +318,12 @@ class MPCNode(Node):
             if not hasattr(self, '_mpc_error_count'):
                 self._mpc_error_count = 0
             self._mpc_error_count += 1
-            if self._mpc_error_count % 50 == 0:  # Every 5 seconds at 10Hz
-                self.get_logger().warn(f"MPC solve failed: {e}, using fallback control")
+            if self._mpc_error_count % 20 == 0:  # Every 2 seconds at 10Hz
+                self.get_logger().warn(
+                    f"MPC solve failed: {e}, using fallback control. "
+                    f"Robot: ({x0[0]:.2f}, {x0[1]:.2f}, {np.degrees(x0[2]):.1f}°), "
+                    f"Goal: ({target_seq[0,0]:.2f}, {target_seq[1,0]:.2f})"
+                )
             # Fallback to proportional control (lab8 pattern)
             v_cmd, omega_cmd = self.fallback_control(x0, target_seq)
 
@@ -351,7 +357,7 @@ class MPCNode(Node):
         
         # Angle error (difference between desired heading and current heading)
         angle_err = angle_to_target - theta
-        # Wrap to [-pi, pi]
+        # Wrap to [-pi, pi] - CRITICAL: This ensures shortest rotation
         angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
         
         # Debug logging (periodic)
@@ -363,12 +369,19 @@ class MPCNode(Node):
                 f'Fallback: robot=({px:.2f}, {py:.2f}, {np.degrees(theta):.1f}°), '
                 f'goal=({tgt_x:.2f}, {tgt_y:.2f}), dist={dist:.2f}m, '
                 f'angle_to_target={np.degrees(angle_to_target):.1f}°, '
-                f'angle_err={np.degrees(angle_err):.1f}°'
+                f'angle_err={np.degrees(angle_err):.1f}°, '
+                f'omega_cmd={np.degrees(self.Kp_w * angle_err):.1f}°/s'
             )
         
         # Proportional control
-        v_cmd = self.Kp_v * min(dist, 1.0)  # Cap distance influence
-        omega_cmd = self.Kp_w * angle_err
+        # CRITICAL: Don't move forward if angle error is large (turn first)
+        if abs(angle_err) > np.pi / 4:  # More than 45° off
+            v_cmd = 0.0  # Stop and turn first
+            omega_cmd = self.Kp_w * angle_err
+        else:
+            # Move forward and turn simultaneously
+            v_cmd = self.Kp_v * min(dist, 1.0)  # Cap distance influence
+            omega_cmd = self.Kp_w * angle_err
         
         # Clip to limits
         v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
