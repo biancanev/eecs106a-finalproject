@@ -2,6 +2,7 @@
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.exceptions import ParameterAlreadyDeclaredException
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
@@ -19,12 +20,15 @@ class MCL(Node):
         super().__init__('mcl_node')
 
         # Declare parameters (lab4 pattern)
-        # Use ignore_override=True to allow launch file parameters to override
         self.declare_parameter('num_particles', N)
         self.declare_parameter('motion_noise_x', motion_noise[0])
         self.declare_parameter('motion_noise_y', motion_noise[1])
         self.declare_parameter('motion_noise_theta', motion_noise[2])
-        self.declare_parameter('use_sim_time', use_sim, ignore_override=True)
+        # use_sim_time may be passed from launch file - declare only if not already set
+        try:
+            self.declare_parameter('use_sim_time', use_sim)
+        except ParameterAlreadyDeclaredException:
+            pass  # Parameter already declared by launch file
         self.declare_parameter('max_range', 3.5)
         self.declare_parameter('min_range', 0.25)
         self.declare_parameter('resample_threshold', 0.98)
