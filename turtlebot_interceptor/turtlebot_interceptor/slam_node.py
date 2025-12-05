@@ -84,8 +84,8 @@ class SLAMNode(Node):
         # State
         self.current_pose = None
         
-        # Timer for map publishing
-        self.map_timer = self.create_timer(0.5, self.publish_map)
+        # Timer for map publishing - faster rate for real-time visualization
+        self.map_timer = self.create_timer(0.01, self.publish_map)  # 10Hz update rate
         
         self.get_logger().info('SLAM node initialized - log-odds occupancy grid mapping')
     
@@ -166,8 +166,8 @@ class SLAMNode(Node):
             if range_val <= min_range + 0.05:  # Too close - likely self-detection
                 continue
             
-            # Raycast to update cells along beam (lab6 pattern - smaller step size)
-            step_size = self.resolution * 0.05  # Very small steps for accuracy
+            # Raycast to update cells along beam (lab6 pattern - smaller step size for high resolution)
+            step_size = self.resolution * 0.03  # Even smaller steps for high-resolution accuracy
             max_steps = int(range_val / step_size)
             
             # Update free space along beam
@@ -192,25 +192,26 @@ class SLAMNode(Node):
                     # Update occupancy value
                     self.map_data[gy, gx] = log_odds_to_occupancy(new_lo)
             
-            # Update obstacle cell at end of beam (lab6 pattern - neighborhood expansion)
+            # Update obstacle cell at end of beam (lab6 pattern - optimized for high-res small objects)
             obstacle_x = x + range_val * math.cos(beam_angle)
             obstacle_y = y + range_val * math.sin(beam_angle)
             gx, gy = self.world_to_grid(obstacle_x, obstacle_y)
             
             if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
-                # Update obstacle cell and neighbors (5x5 neighborhood with distance weighting)
-                for dx in range(-2, 3):
-                    for dy in range(-2, 3):
+                # Update obstacle cell and neighbors (3x3 neighborhood for high-res maps)
+                # Smaller neighborhood prevents over-expansion with small voxels
+                for dx in range(-1, 2):
+                    for dy in range(-1, 2):
                         ngx, ngy = gx + dx, gy + dy
                         if 0 <= ngx < self.map_width and 0 <= ngy < self.map_height:
-                            # Distance weighting (lab6 pattern)
+                            # Distance weighting (stronger for center, weaker for neighbors)
                             dist_from_center = math.sqrt(dx*dx + dy*dy)
-                            if dist_from_center <= 1.0:
-                                # Stronger evidence for immediate neighbors
-                                weight = 0.5
+                            if dist_from_center <= 0.1:  # Center cell
+                                weight = 1.0  # Full evidence
+                            elif dist_from_center <= 1.0:  # Immediate neighbors
+                                weight = 0.4  # Reduced evidence
                             else:
-                                # Weaker evidence for outer ring
-                                weight = 0.2
+                                continue  # Skip outer ring for high-res
                             
                             # Update log-odds
                             current_lo = self.log_odds_data[ngy, ngx]
@@ -276,10 +277,11 @@ class SLAMNode(Node):
         else:
             self._map_pub_count = 0
         
-        if self._map_pub_count % 10 == 0:  # Every 5 seconds (0.5s * 10)
+        if self._map_pub_count % 50 == 0:  # Every 5 seconds (0.1s * 50)
             self.get_logger().info(
                 f'Map published: {occupied_count} occupied, {free_count} free, '
-                f'{unknown_count} unknown, pose={self.current_pose is not None}'
+                f'{unknown_count} unknown, pose={self.current_pose is not None}, '
+                f'resolution={self.resolution:.3f}m'
             )
 
 

@@ -56,23 +56,23 @@ def generate_launch_description():
         ),
         
         # SLAM node (log-odds occupancy grid mapping)
-        # Based on lab6/mapping patterns
+        # Based on lab6/mapping patterns - high resolution for small cone detection
         Node(
             package='turtlebot_interceptor',
             executable='slam_node',
             name='slam_node',
             parameters=[{
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'map_width': 100,
-                'map_height': 100,
-                'resolution': 0.05,  # 5cm resolution (standard for TurtleBot)
-                'origin_x': -2.5,
-                'origin_y': -2.5,
-                'log_odds_free': -0.6,
-                'log_odds_occupied': 0.8,
+                'map_width': 200,  # Increased for higher resolution coverage
+                'map_height': 200,  # Increased for higher resolution coverage
+                'resolution': 0.02,  # 2cm resolution (higher = smaller voxels, better for small cones)
+                'origin_x': -2.0,  # Adjusted for new map size
+                'origin_y': -2.0,  # Adjusted for new map size
+                'log_odds_free': -0.8,  # Stronger free space evidence
+                'log_odds_occupied': 1.2,  # Stronger occupied evidence (better for small objects)
                 'log_odds_min': -3.0,
                 'log_odds_max': 3.0,
-                'occupancy_threshold': 0.25,
+                'occupancy_threshold': 0.2,  # Lower threshold = more sensitive to obstacles
             }],
             output='screen'
         ),
