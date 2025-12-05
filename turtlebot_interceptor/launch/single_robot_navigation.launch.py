@@ -117,5 +117,20 @@ def generate_launch_description():
             }],
             output='screen'
         ),
+        
+        # Navigation visualizer (RViz markers for progress tracking)
+        Node(
+            package='turtlebot_interceptor',
+            executable='navigation_visualizer',
+            name='navigation_visualizer',
+            parameters=[{
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'goal_x': LaunchConfiguration('goal_x'),
+                'goal_y': LaunchConfiguration('goal_y'),
+                'robot_radius': 0.15,
+                'path_history_length': 200,  # Keep more history for better visualization
+            }],
+            output='screen'
+        ),
     ])
 
