@@ -108,6 +108,14 @@ class MPCNode(Node):
         q = msg.pose.pose.orientation
         roll, pitch, yaw = euler.quat2euler([q.w, q.x, q.y, q.z])
         
+        # Store pose for state update
+        self.seeker_state = np.array([
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            yaw,
+            0.0  # Velocity will be updated below
+        ])
+        
         # Estimate velocity from previous state (lab8 pattern - more robust)
         if self.prev_state is not None:
             dt = self.dt
@@ -304,7 +312,12 @@ class MPCNode(Node):
             omega_cmd = np.clip(omega_cmd, -self.omega_max, self.omega_max)
             
         except Exception as e:
-            self.get_logger().warn(f"MPC solve failed: {e}, using fallback control")
+            # Log error details for debugging (but not every time to avoid spam)
+            if not hasattr(self, '_mpc_error_count'):
+                self._mpc_error_count = 0
+            self._mpc_error_count += 1
+            if self._mpc_error_count % 50 == 0:  # Every 5 seconds at 10Hz
+                self.get_logger().warn(f"MPC solve failed: {e}, using fallback control")
             # Fallback to proportional control (lab8 pattern)
             v_cmd, omega_cmd = self.fallback_control(x0, target_seq)
 
@@ -330,18 +343,31 @@ class MPCNode(Node):
             tgt_x = target_seq[0]
             tgt_y = target_seq[1]
         
-        # Compute error in base frame (lab8 pattern)
+        # Compute error in world frame (map frame)
         dx = tgt_x - px
         dy = tgt_y - py
         dist = np.sqrt(dx**2 + dy**2)
         angle_to_target = np.arctan2(dy, dx)
         
-        # Angle error
+        # Angle error (difference between desired heading and current heading)
         angle_err = angle_to_target - theta
-        angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
+        # Wrap to [-pi, pi]
+        angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
+        
+        # Debug logging (periodic)
+        if not hasattr(self, '_fallback_log_count'):
+            self._fallback_log_count = 0
+        self._fallback_log_count += 1
+        if self._fallback_log_count % 20 == 0:  # Every 2 seconds at 10Hz
+            self.get_logger().info(
+                f'Fallback: robot=({px:.2f}, {py:.2f}, {np.degrees(theta):.1f}°), '
+                f'goal=({tgt_x:.2f}, {tgt_y:.2f}), dist={dist:.2f}m, '
+                f'angle_to_target={np.degrees(angle_to_target):.1f}°, '
+                f'angle_err={np.degrees(angle_err):.1f}°'
+            )
         
         # Proportional control
-        v_cmd = self.Kp_v * dist
+        v_cmd = self.Kp_v * min(dist, 1.0)  # Cap distance influence
         omega_cmd = self.Kp_w * angle_err
         
         # Clip to limits
