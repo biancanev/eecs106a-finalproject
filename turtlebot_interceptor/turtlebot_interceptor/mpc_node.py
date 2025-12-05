@@ -48,6 +48,13 @@ class MPCNode(Node):
             10
         )
 
+        # Optional: Target subscription (for interception mode)
+        # For single robot navigation, use goal point instead
+        self.declare_parameter('goal_x', 1.5)
+        self.declare_parameter('goal_y', 1.5)
+        self.goal_x = self.get_parameter('goal_x').get_parameter_value().double_value
+        self.goal_y = self.get_parameter('goal_y').get_parameter_value().double_value
+        
         self.target_sub = self.create_subscription(
             PoseWithCovarianceStamped,
             '/target_estimate',
@@ -129,37 +136,88 @@ class MPCNode(Node):
         self.target_pose = msg.pose.pose
         self.target_cov = np.array(msg.pose.covariance).reshape((6, 6))
 
-    def compute_obstacles(self):
-        """Extract obstacles from map and inflate based on uncertainty"""
+    def extract_cones_from_map(self):
+        """Extract circular obstacles (cones) from occupancy grid - based on lab6 patterns"""
         obstacles = []
         if self.map is None:
             return obstacles
         
-        # Get uncertainty measure
-        if self.seeker_cov is not None:
-            sigma_seek = np.sqrt(np.max(np.linalg.eigvals(self.seeker_cov[:2, :2])))
-        else:
-            sigma_seek = 0.1
-        
-        k_sigma = 2.0  # Tuning parameter from paper
-        inflation = k_sigma * sigma_seek
-        
-        # Extract obstacles from occupancy grid
         width = self.map.info.width
         height = self.map.info.height
         resolution = self.map.info.resolution
         origin_x = self.map.info.origin.position.x
         origin_y = self.map.info.origin.position.y
         
-        # Simple obstacle extraction: find occupied cells
+        # Extract occupied cells (not walls)
+        occupied_cells = []
+        wall_margin = 0.35  # Cells near boundaries are walls
+        
         for i in range(width * height):
             if self.map.data[i] > 50:  # Occupied
-                x = (i % width) * resolution + origin_x
-                y = (i // width) * resolution + origin_y
-                r_eff = resolution * np.sqrt(2) + inflation  # Base radius + inflation
-                obstacles.append((np.array([x, y]), r_eff))
+                gx = i % width
+                gy = i // width
+                world_x = gx * resolution + origin_x
+                world_y = gy * resolution + origin_y
+                
+                # Skip walls
+                if (world_x < origin_x + wall_margin or 
+                    world_x > origin_x + width * resolution - wall_margin or
+                    world_y < origin_y + wall_margin or 
+                    world_y > origin_y + height * resolution - wall_margin):
+                    continue
+                
+                occupied_cells.append((world_x, world_y))
         
-        return obstacles
+        if len(occupied_cells) == 0:
+            return obstacles
+        
+        # Cluster nearby cells (cones are compact circular clusters)
+        clusters = []
+        for x, y in occupied_cells:
+            assigned = False
+            for cluster in clusters:
+                for cx, cy in cluster:
+                    if np.sqrt((x - cx)**2 + (y - cy)**2) < resolution * 3:
+                        cluster.append((x, y))
+                        assigned = True
+                        break
+                if assigned:
+                    break
+            if not assigned:
+                clusters.append([(x, y)])
+        
+        # Extract circular obstacles from clusters
+        for cluster in clusters:
+            if len(cluster) < 3:  # Too small
+                continue
+            
+            points = np.array(cluster)
+            min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
+            min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
+            width_cluster = max_x - min_x
+            height_cluster = max_y - min_y
+            
+            # Skip elongated clusters (walls)
+            if width_cluster < 0.01 or height_cluster < 0.01:
+                continue
+            aspect_ratio = max(width_cluster, height_cluster) / min(width_cluster, height_cluster)
+            if aspect_ratio > 2.5:
+                continue
+            
+            # Compute center and radius
+            center_x = (min_x + max_x) / 2
+            center_y = (min_y + max_y) / 2
+            radius = max(width_cluster, height_cluster) / 2 + 0.02
+            
+            # Accept reasonable cone sizes
+            if 0.06 < radius < 0.5:
+                obstacles.append((np.array([center_x, center_y]), radius))
+        
+        return obstacles[:10]  # Limit to 10 cones max
+    
+    def compute_obstacles(self):
+        """Extract obstacles from map - use cone extraction for better detection"""
+        return self.extract_cones_from_map()
 
     def predict_target_trajectory(self):
         """Predict target trajectory over MPC horizon (lab8 pattern - improved prediction)"""
@@ -189,8 +247,11 @@ class MPCNode(Node):
 
     def timer_callback(self):
         """Main MPC control loop (lab8 pattern - with fallback control)"""
-        if self.seeker_state is None or self.target_pose is None:
+        if self.seeker_state is None:
             return
+        
+        # For single robot navigation, use goal point if target not available
+        use_goal = (self.target_pose is None)
 
         # Build initial state
         x0 = self.seeker_state.copy()
