@@ -91,10 +91,18 @@ class MPCNode(Node):
         # Initialize MPC
         self.mpc = SimpleUnicycleMPC(horizon=self.N, dt=self.dt)
 
+        # Startup delay: Wait 10 seconds for LIDAR, SLAM, and MCL to initialize
+        self.startup_time = self.get_clock().now()
+        self.startup_delay = 10.0  # 10 seconds delay
+
         # Timer for MPC updates
+        # Start timer immediately, but check startup delay in callback
         self.timer = self.create_timer(self.dt, self.timer_callback)
 
-        self.get_logger().info('MPC node initialized (lab8 control patterns)')
+        self.get_logger().info(
+            f'MPC node initialized (lab8 control patterns) - '
+            f'Waiting {self.startup_delay}s for LIDAR/SLAM/MCL initialization...'
+        )
 
     def map_callback(self, msg: OccupancyGrid):
         """Store map for obstacle avoidance"""
@@ -303,6 +311,20 @@ class MPCNode(Node):
 
     def timer_callback(self):
         """Main MPC control loop (lab8 pattern - with fallback control)"""
+        # Check startup delay - wait 10 seconds for initialization
+        elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
+        if elapsed < self.startup_delay:
+            # Log countdown every 2 seconds
+            if not hasattr(self, '_startup_log_count'):
+                self._startup_log_count = 0
+            self._startup_log_count += 1
+            if self._startup_log_count % 20 == 0:  # Every 2 seconds at 10Hz
+                remaining = self.startup_delay - elapsed
+                self.get_logger().info(
+                    f'MPC startup delay: {remaining:.1f}s remaining for LIDAR/SLAM/MCL initialization...'
+                )
+            return  # Don't run MPC until startup delay is over
+        
         if self.seeker_state is None:
             return
         
