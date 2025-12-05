@@ -1,0 +1,31 @@
+# Python Requirements for TurtleBot Interceptor Project
+# 
+# Installation:
+#   pip install -r requirements.txt
+#
+# Note: For ROS2 nodes, you also need ROS2 (Humble/Foxy) installed via apt.
+# ROS2 packages (rclpy, geometry_msgs, nav_msgs, sensor_msgs) are installed via apt, not pip.
+
+# Core Scientific Computing
+numpy>=1.21.0
+
+# Optimization (for MPC)
+cvxpy>=1.2.0
+osqp>=0.6.0  # OSQP solver backend for cvxpy (optional but recommended)
+
+# Visualization (for simulation)
+matplotlib>=3.5.0
+
+# 3D Transformations (for ROS2 nodes)
+transforms3d>=0.4.1
+
+# ROS2 Python Client Library
+# Note: rclpy is typically installed via apt on Ubuntu:
+#   sudo apt-get install -y python3-rosdep python3-colcon-common-extensions
+#   sudo apt-get install -y ros-humble-rclpy ros-humble-geometry-msgs ros-humble-nav-msgs ros-humble-sensor-msgs
+# If installing via pip (not recommended for ROS2), uncomment below:
+# rclpy>=3.3.0
+
+# Optional: For development and testing
+# pytest>=7.0.0  # Uncomment if running tests
+
