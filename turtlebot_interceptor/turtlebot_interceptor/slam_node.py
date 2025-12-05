@@ -184,8 +184,17 @@ class SLAMNode(Node):
                 gx, gy = self.world_to_grid(cell_x, cell_y)
                 
                 if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
-                    # Update log-odds for free space (direct update to log_odds_data)
+                    # CRITICAL FIX: Don't clear cells that are strongly occupied
+                    # If a cell is already strongly occupied (high log-odds), don't mark it as free
+                    # This prevents permanent obstacles from being erased when robot moves past them
                     current_lo = self.log_odds_data[gy, gx]
+                    
+                    # Only update free space if cell is not strongly occupied
+                    # Strongly occupied = log-odds > threshold (already confirmed as obstacle)
+                    if current_lo > self.occupancy_threshold * 2.0:  # Strongly occupied - don't clear!
+                        continue  # Skip this cell - it's a confirmed obstacle
+                    
+                    # Update log-odds for free space (direct update to log_odds_data)
                     new_lo = current_lo + self.log_odds_free
                     new_lo = np.clip(new_lo, self.log_odds_min, self.log_odds_max)
                     self.log_odds_data[gy, gx] = new_lo
@@ -213,9 +222,18 @@ class SLAMNode(Node):
                             else:
                                 continue  # Skip outer ring for high-res
                             
-                            # Update log-odds
+                            # Update log-odds for occupied cells
+                            # CRITICAL: Make occupied evidence stronger to prevent clearing
                             current_lo = self.log_odds_data[ngy, ngx]
-                            new_lo = current_lo + self.log_odds_occupied * weight
+                            
+                            # If already strongly occupied, make it even stronger (reinforce obstacle)
+                            if current_lo > self.occupancy_threshold:
+                                # Reinforce existing obstacle - add more occupied evidence
+                                new_lo = current_lo + self.log_odds_occupied * weight * 1.5  # 1.5x stronger
+                            else:
+                                # Normal update for new or uncertain cells
+                                new_lo = current_lo + self.log_odds_occupied * weight
+                            
                             new_lo = np.clip(new_lo, self.log_odds_min, self.log_odds_max)
                             self.log_odds_data[ngy, ngx] = new_lo
                             # Update occupancy value
