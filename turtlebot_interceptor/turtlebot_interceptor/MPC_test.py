@@ -375,7 +375,9 @@ class SimpleUnicycleMPC:
                     dist_sq = dx*dx + dy*dy
                     
                     # Safety radius (obstacle radius + robot radius + margin)
-                    safety_radius = radius + 0.15 + 0.2  # Robot radius ~0.15m, margin 0.2m (INCREASED for safety)
+                    # CRITICAL: Make safety radius MUCH larger - the robot is hitting obstacles
+                    # Robot is actually bigger than 0.15m, and we need more margin
+                    safety_radius = radius + 0.25 + 0.65  # Robot radius ~0.25m, margin 0.35m (MASSIVELY INCREASED)
                     safety_radius_sq = safety_radius * safety_radius
                     
                     # CRITICAL: MASSIVE repulsion when close - make it impossible to hit obstacles
@@ -408,7 +410,8 @@ class SimpleUnicycleMPC:
                 dx = px0 - center[0]
                 dy = py0 - center[1]
                 dist = np.sqrt(dx*dx + dy*dy)
-                safety_radius = radius + 0.15 + 0.2  # Robot + margin
+                safety_radius = radius + 0.25 + 0.35  # Robot + margin (SAME AS ABOVE)
+                actual_clearance = dist - radius  # Actual distance to obstacle surface
                 if dist < safety_radius * 3.0:  # Within 3x safety radius
                     if dist < min_dist_to_obstacle:
                         min_dist_to_obstacle = dist
@@ -431,8 +434,12 @@ class SimpleUnicycleMPC:
                           f"num_obstacles={len(obstacles)}")
                     if closest_obstacle:
                         center, radius, dist = closest_obstacle
+                        actual_clearance = dist - radius
+                        safety_radius_needed = radius + 0.25 + 0.35
                         print(f"  Closest obstacle: center=({center[0]:.3f}, {center[1]:.3f}), "
-                              f"radius={radius:.3f}m, dist={dist:.3f}m")
+                              f"radius={radius:.3f}m, dist_to_center={dist:.3f}m")
+                        print(f"    CLEARANCE: {actual_clearance:.3f}m (need {safety_radius_needed:.3f}m), "
+                              f"robot_pos=({px0:.3f}, {py0:.3f})")
         
         self.obstacle_cost_param.value = obstacle_cost_value
 
