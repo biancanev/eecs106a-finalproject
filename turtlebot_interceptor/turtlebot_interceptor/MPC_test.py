@@ -342,7 +342,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 500.0  # High weight to ensure obstacle avoidance
+            repulsion_weight = 2000.0  # MUCH higher weight to ensure obstacle avoidance
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -371,14 +371,19 @@ class SimpleUnicycleMPC:
                     dist_sq = dx*dx + dy*dy
                     
                     # Safety radius (obstacle radius + robot radius + margin)
-                    safety_radius = radius + 0.15 + 0.05  # Robot radius ~0.15m, margin 0.05m
+                    safety_radius = radius + 0.15 + 0.1  # Robot radius ~0.15m, margin 0.1m (increased)
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # Smooth repulsion: exponential penalty when close
-                    # Use inverse distance squared with saturation
-                    if dist_sq < safety_radius_sq * 4:  # Only penalize when reasonably close
+                    # CRITICAL: Much stronger repulsion when very close
+                    if dist_sq < safety_radius_sq:  # Within safety radius - CRITICAL!
+                        # Exponential penalty when too close
+                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.01)
+                    elif dist_sq < safety_radius_sq * 4:  # Within 2x safety radius
                         # Inverse distance penalty (smooth)
                         obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq * 0.1)
+                    elif dist_sq < safety_radius_sq * 9:  # Within 3x safety radius
+                        # Weaker penalty for far obstacles
+                        obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + safety_radius_sq)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
         self.obstacle_cost_param.value = obstacle_cost_value
