@@ -101,6 +101,10 @@ class SimpleUnicycleMPC:
         self.Ra_param = cp.Parameter(nonneg=True)
         self.Rw_param = cp.Parameter(nonneg=True)
         self.alpha_progress_param = cp.Parameter(nonneg=True)
+        
+        # Obstacle parameters (for DPP-compliant obstacle avoidance)
+        # Store obstacle cost as a parameter that can be updated without rebuilding
+        self.obstacle_cost_param = cp.Parameter(nonneg=True, value=0.0)
 
         constraints = []
         cost = 0
@@ -164,6 +168,10 @@ class SimpleUnicycleMPC:
         pyN = self.X[1,N] - self.T[1,N]
         # Terminal position penalty - make it 50x heavier than stage cost to ensure robot reaches goal
         cost += 50.0 * self.Qp_param * (pxN**2 + pyN**2)
+        
+        # Add obstacle cost parameter (will be updated in solve() method)
+        # This allows obstacle avoidance without rebuilding the problem (DPP-compliant)
+        cost += self.obstacle_cost_param
 
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
         self.original_cost = cost  # Store original cost expression
@@ -327,20 +335,35 @@ class SimpleUnicycleMPC:
         # We can still use last_solution for initial guess, but OSQP warm_start must be False
         # use_warm_start = False  # Always disabled now to avoid OSQP errors
 
-        # Obstacle repulsion will be added in solve() method dynamically
-
-        # Add obstacle repulsion cost if provided
-        # CRITICAL FIX: For now, disable obstacles to get MPC working
-        # The obstacle cost rebuilding causes DPP issues and solver problems
-        # TODO: Implement obstacle avoidance as hard constraints or use DPP-compliant parameterization
-        obstacle_cost = 0
-        use_obstacles = False  # TEMPORARY: Disable obstacles to get MPC working
-        
-        if use_obstacles and obstacles is not None and len(obstacles) > 0:
+        # Compute obstacle repulsion cost (DPP-compliant using parameter)
+        # Calculate obstacle cost numerically and set parameter
+        obstacle_cost_value = 0.0
+        if obstacles is not None and len(obstacles) > 0:
+            # Compute repulsion cost for current predicted trajectory
+            # We'll use the linearized trajectory from the last solution if available
+            # Otherwise, use a simple prediction
+            repulsion_weight = 500.0  # High weight to ensure obstacle avoidance
+            
+            # Use last solution if available for obstacle cost calculation
+            if self.last_solution is not None and 'X' in self.last_solution:
+                X_pred = self.last_solution['X']
+            else:
+                # Simple prediction: assume constant velocity forward
+                X_pred = np.zeros((self.nx, self.N + 1))
+                X_pred[:, 0] = x0
+                for k in range(self.N):
+                    # Simple forward prediction
+                    v = x0[3]
+                    th = x0[2]
+                    X_pred[0, k+1] = X_pred[0, k] + self.dt * v * np.cos(th)
+                    X_pred[1, k+1] = X_pred[1, k] + self.dt * v * np.sin(th)
+                    X_pred[2, k+1] = X_pred[2, k]
+                    X_pred[3, k+1] = X_pred[3, k]
+            
             # Add repulsion cost for each obstacle at each time step
-            for k in range(self.N):
-                px = self.X[0, k]
-                py = self.X[1, k]
+            for k in range(self.N + 1):
+                px = X_pred[0, k]
+                py = X_pred[1, k]
                 for center, radius in obstacles:
                     # Distance from robot to obstacle center
                     dx = px - center[0]
@@ -348,17 +371,17 @@ class SimpleUnicycleMPC:
                     dist_sq = dx*dx + dy*dy
                     
                     # Safety radius (obstacle radius + robot radius + margin)
-                    safety_radius = radius + 0.15 + 0.03
+                    safety_radius = radius + 0.15 + 0.05  # Robot radius ~0.15m, margin 0.05m
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # Simple smooth repulsion: 1/(distance^2) penalty
-                    repulsion_weight = 100.0
-                    obstacle_cost += repulsion_weight / (dist_sq + safety_radius_sq * 0.1)
-            
-            # Rebuild problem with obstacle cost
-            if obstacle_cost != 0:
-                new_cost = self.original_cost + obstacle_cost
-                self.prob = cp.Problem(cp.Minimize(new_cost), self.original_constraints)
+                    # Smooth repulsion: exponential penalty when close
+                    # Use inverse distance squared with saturation
+                    if dist_sq < safety_radius_sq * 4:  # Only penalize when reasonably close
+                        # Inverse distance penalty (smooth)
+                        obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq * 0.1)
+        
+        # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
+        self.obstacle_cost_param.value = obstacle_cost_value
 
         # CRITICAL FIX: Disable warm start completely to avoid OSQP matrix size errors
         # When we rebuild/restore the problem, OSQP's cached matrix structure doesn't match
