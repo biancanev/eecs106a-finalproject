@@ -346,7 +346,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 100000.0  # CRITICAL: EXTREME weight - must avoid obstacles at ALL costs
+            repulsion_weight = 1000000.0  # CRITICAL: CATASTROPHIC weight - MUST NEVER TOUCH OBSTACLES
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -375,15 +375,18 @@ class SimpleUnicycleMPC:
                     dist_sq = dx*dx + dy*dy
                     
                     # Safety radius (obstacle radius + robot radius + margin)
-                    # CRITICAL: Make safety radius MUCH larger - the robot is hitting obstacles
-                    # Robot is actually bigger than 0.15m, and we need more margin
-                    safety_radius = radius + 0.25 + 0.65  # Robot radius ~0.25m, margin 0.35m (MASSIVELY INCREASED)
+                    # CRITICAL: radius is already large (0.4m), just add robot center offset
+                    # The obstacle_radius in mpc_node already includes large margin
+                    safety_radius = radius + 0.2  # Obstacle already inflated, just add robot center
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # CRITICAL: MASSIVE repulsion when close - make it impossible to hit obstacles
-                    # Use exponential/inverse distance penalty to force avoidance
-                    if dist_sq < safety_radius_sq * 0.5:  # VERY CLOSE - EMERGENCY!
-                        # Catastrophic cost - should NEVER happen
+                    # CRITICAL: ABSOLUTELY MASSIVE repulsion - robot CANNOT touch obstacles
+                    # Make cost so high that optimizer will do ANYTHING to avoid
+                    if dist_sq < safety_radius_sq * 0.25:  # EMERGENCY - TOO CLOSE!
+                        # Absolutely catastrophic - this should NEVER EVER happen
+                        obstacle_cost_value += repulsion_weight * 100000.0 / (dist_sq + 0.00001)
+                    elif dist_sq < safety_radius_sq * 0.5:  # VERY CLOSE - EMERGENCY!
+                        # Catastrophic cost - extreme danger
                         obstacle_cost_value += repulsion_weight * 10000.0 / (dist_sq + 0.0001)
                     elif dist_sq < safety_radius_sq:  # Within safety radius - CRITICAL!
                         # EXTREME penalty when too close - act like hard constraint
@@ -394,9 +397,9 @@ class SimpleUnicycleMPC:
                     elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
                         # High penalty - plan to avoid
                         obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.1)
-                    elif dist_sq < safety_radius_sq * 9:  # Within 9x safety radius
-                        # Moderate penalty - be aware of obstacle
-                        obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq * 0.5)
+                    else:  # Far away
+                        # Still add some cost so optimizer is aware
+                        obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
         # CRITICAL: Scale obstacle cost based on proximity to make it act like hard constraint
@@ -410,7 +413,7 @@ class SimpleUnicycleMPC:
                 dx = px0 - center[0]
                 dy = py0 - center[1]
                 dist = np.sqrt(dx*dx + dy*dy)
-                safety_radius = radius + 0.25 + 0.35  # Robot + margin (SAME AS ABOVE)
+                safety_radius = radius + 0.2  # Obstacle already inflated (SAME AS ABOVE)
                 actual_clearance = dist - radius  # Actual distance to obstacle surface
                 if dist < safety_radius * 3.0:  # Within 3x safety radius
                     if dist < min_dist_to_obstacle:
