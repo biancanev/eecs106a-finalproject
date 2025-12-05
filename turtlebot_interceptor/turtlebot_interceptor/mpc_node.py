@@ -324,7 +324,7 @@ class MPCNode(Node):
         
         # Robot safety radius (robot radius + margin)
         robot_radius = 0.15  # Robot radius
-        safety_margin = 0.1  # Additional safety margin
+        safety_margin = 0.25  # INCREASED safety margin (was 0.1) - stay further away
         cell_radius = resolution * np.sqrt(2) / 2  # Half diagonal of cell (worst case)
         min_obstacle_radius = robot_radius + safety_margin + cell_radius
         
@@ -349,16 +349,11 @@ class MPCNode(Node):
         return obstacles
     
     def compute_obstacles(self):
-        """Extract obstacles from map - use occupied cells directly for guaranteed avoidance"""
-        if self.seeker_state is None:
-            return []
-        
-        # Get robot position from seeker_state [px, py, theta, v]
-        robot_x = self.seeker_state[0]
-        robot_y = self.seeker_state[1]
-        
-        # Get all occupied cells as obstacles
-        return self.get_occupied_cells_as_obstacles((robot_x, robot_y), lookahead_dist=3.0)
+        """Extract obstacles from map - use cone extraction like animated_sim"""
+        # CRITICAL: Use cone extraction (clusters cells into circles) NOT individual cells
+        # This matches animated_sim.py which uses clean circular obstacles
+        # Passing individual cells creates too many obstacles and massive repulsive field
+        return self.extract_cones_from_map()
 
     def predict_target_trajectory(self):
         """Predict target trajectory over MPC horizon (lab8 pattern - improved prediction)"""
