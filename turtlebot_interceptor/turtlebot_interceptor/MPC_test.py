@@ -30,28 +30,28 @@ class SimpleUnicycleMPC:
         self.wx_max = 0.0
         self.wy_min = 0.0  # Unicycle: no pitch
         self.wy_max = 0.0
-        self.wz_min = -1.5  # Maximum turn rate (rad/s)
-        self.wz_max = 1.5
+        self.wz_min = -2.5  # MUCH higher turn rate for optimal tight trajectories (was 1.5)
+        self.wz_max = 2.5
         
         # Acceleration constraints (for MPC internal use)
         self.a_min = -0.4
         self.a_max = 0.4
-        self.alpha_min = -2.0  # Angular acceleration (rad/s^2)
-        self.alpha_max = 2.0
+        self.alpha_min = -4.0  # Higher angular acceleration for faster turning (was 2.0)
+        self.alpha_max = 4.0
         
         # Turn angle constraint (maximum change in heading per step)
-        self.max_turn_angle = 0.3  # Maximum 0.3 rad (~17 degrees) per step
+        self.max_turn_angle = 0.5  # MUCH higher for tight optimal paths (was 0.3, ~17 deg, now ~29 deg)
         
         # Legacy constraints for backward compatibility
         self.v_min = self.vx_min
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights (will be adapted based on time-to-go) - INCREASED for faster movement
-        self.Qp_base = 50.0  # Higher position weight = move faster (was 20.0)
-        self.Qtheta_base = 0.5
-        self.Ra_base = 0.05  # Lower control penalty = allow more aggressive control (was 0.1)
-        self.Rw_base = 0.05  # Lower turn penalty = allow faster turning (was 0.1)
+        # Base weights (will be adapted based on time-to-go) - OPTIMIZED for tight optimal paths
+        self.Qp_base = 100.0  # MUCH higher position weight = prioritize reaching target fast (was 50.0)
+        self.Qtheta_base = 0.3  # Lower theta weight = allow more aggressive turning (was 0.5)
+        self.Ra_base = 0.02  # MUCH lower control penalty = allow very aggressive control (was 0.05)
+        self.Rw_base = 0.02  # MUCH lower turn penalty = allow very fast turning (was 0.05)
         
         # Current adaptive weights
         self.Qp = self.Qp_base

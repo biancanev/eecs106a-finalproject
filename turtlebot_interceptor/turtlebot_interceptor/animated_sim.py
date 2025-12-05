@@ -1372,34 +1372,27 @@ class AnimatedSimulation:
                 target_pos_mpc = self.target.get_position()
                 obstacles = self.map_gen.extract_obstacles_from_voxel_grid(self.map_data, target_pos=target_pos_mpc)
                 
-                # ALSO include ground truth obstacles for better obstacle avoidance
-                # This ensures MPC knows about obstacles even if not fully mapped yet
-                ground_truth_obstacles = []
-                for gx, gy, radius in self.map_gen.ground_truth_obstacles:
+                # CRITICAL: Always use ground truth obstacles directly (they're known cones)
+                # The voxel grid detection is unreliable - use ground truth for all 5 obstacles
+                all_obstacles = []
+                for gx, gy, radius_cells in self.map_gen.ground_truth_obstacles:
                     world_x = gx * self.map_gen.resolution + self.map_gen.origin_x
                     world_y = gy * self.map_gen.resolution + self.map_gen.origin_y
-                    # Skip if too close to target
-                    dist_to_target = math.sqrt((world_x - target_pos_mpc[0])**2 + (world_y - target_pos_mpc[1])**2)
-                    if dist_to_target > 0.3:  # Only include if not near target
-                        ground_truth_obstacles.append((np.array([world_x, world_y]), radius * self.map_gen.resolution))
-                
-                # Combine discovered and ground truth obstacles
-                all_obstacles = obstacles + ground_truth_obstacles
+                    world_radius = radius_cells * self.map_gen.resolution
+                    # Add all 5 obstacles - they're the actual cones
+                    all_obstacles.append((np.array([world_x, world_y]), world_radius))
                 
                 # DEBUG: Print obstacle count
                 if self.step_count % 20 == 0:
-                    print(f"Step {self.step_count}: Passing {len(all_obstacles)} obstacles to MPC (discovered: {len(obstacles)}, ground truth: {len(ground_truth_obstacles)})")
+                    print(f"Step {self.step_count}: Using {len(all_obstacles)} ground truth obstacles (should be 5)")
                 
                 # Get Twist command (with proper velocity and turn angle constraints)
                 twist_cmd = self.mpc.get_twist_command(x0, target_pred, obstacles=all_obstacles)
                 v_cmd = twist_cmd['linear']['x']
                 omega_cmd = twist_cmd['angular']['z']
                 
-                # Apply additional safety constraints
-                # Limit turn rate based on current velocity (safer turning at high speed)
-                if abs(v_cmd) > 0.3:
-                    max_turn_at_speed = 1.0  # Reduce turn rate at higher speeds
-                    omega_cmd = np.clip(omega_cmd, -max_turn_at_speed, max_turn_at_speed)
+                # REMOVED: Don't limit turn rate - allow optimal tight trajectories
+                # The MPC already handles constraints, trust it for optimality
                 
                 # ALWAYS ensure we're moving towards target
                 dx = target_pred[0] - mcl_pose.x
