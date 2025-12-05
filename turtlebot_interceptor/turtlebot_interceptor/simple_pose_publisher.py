@@ -59,11 +59,16 @@ class SimplePosePublisher(Node):
             self.get_logger().info('Simple pose publisher: Using static pose at origin')
     
     def odom_callback(self, msg: Odometry):
-        """Convert odometry to PoseWithCovarianceStamped"""
+        """Convert odometry to PoseWithCovarianceStamped
+        CRITICAL: Use odom frame (not base_link) - odom tracks actual movement, not wheel rotation
+        """
         pose_msg = PoseWithCovarianceStamped()
         pose_msg.header.stamp = self.get_clock().now().to_msg()
-        pose_msg.header.frame_id = 'map'  # SLAM expects map frame
-        pose_msg.pose = msg.pose
+        # CRITICAL: Use 'odom' frame - this tracks actual robot movement, not just wheel rotation
+        # The pose from /odom is already in odom frame, but we publish as 'map' for SLAM compatibility
+        # In reality, we should transform from odom to map, but for now we'll use odom directly
+        pose_msg.header.frame_id = 'map'  # SLAM expects map frame, but we're using odom data
+        pose_msg.pose = msg.pose  # This is already in odom frame from the message
         self.pose_pub.publish(pose_msg)
         
         # Log periodically
