@@ -311,16 +311,33 @@ class SimpleUnicycleMPC:
                     dx = px - center[0]
                     dy = py - center[1]
                     dist_sq = dx*dx + dy*dy
-                    # Safety radius (obstacle radius + robot radius + margin)
-                    safety_radius = radius + 0.15 + 0.1  # robot radius + margin
+                    # Safety radius (obstacle radius + robot radius + TIGHT margin for faster paths)
+                    safety_radius = radius + 0.15 + 0.03  # robot radius + TIGHT margin (was 0.1, now 0.03)
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # Repulsion cost: high when close, decays with distance
-                    if dist_sq < safety_radius_sq * 4:  # Only penalize if within 2x safety radius
-                        # Repulsion cost: inverse distance squared (stronger when closer)
-                        repulsion_weight = 50.0  # Strong repulsion
-                        epsilon = 0.05  # Prevent division by zero
-                        obstacle_cost += repulsion_weight / (dist_sq + epsilon)
+                    # Minimum safe distance (hard constraint - must stay outside this)
+                    min_safe_dist = radius + 0.15 + 0.01  # Just robot radius + tiny margin
+                    min_safe_dist_sq = min_safe_dist * min_safe_dist
+                    
+                    # Repulsion cost: high when very close, decays quickly with distance
+                    # Only penalize if within 1.5x safety radius (tighter range for faster paths)
+                    if dist_sq < safety_radius_sq * 2.25:  # 1.5x safety radius (was 4 = 2x)
+                        # Distance-dependent repulsion: stronger only when very close
+                        dist = np.sqrt(dist_sq + 1e-6)
+                        dist_to_safety = dist - safety_radius
+                        
+                        # Soft repulsion: only when getting close to safety radius
+                        if dist_to_safety < 0.1:  # Within 10cm of safety radius
+                            # Exponential repulsion - very strong when close, weak when far
+                            repulsion_weight = 50.0  # Moderate repulsion (was 200.0 - too strong)
+                            # Use exponential decay: stronger penalty as we approach safety radius
+                            obstacle_cost += repulsion_weight * np.exp(-dist_to_safety * 20)
+                        
+                        # HARD CONSTRAINT: robot must stay outside minimum safe distance
+                        # This prevents actual collision but allows tight paths
+                        if dist_sq < min_safe_dist_sq:
+                            # Very large penalty if inside minimum safe distance
+                            obstacle_cost += 5000.0 / (dist_sq + 0.001)  # Strong but not excessive
             
             # Add obstacle cost to the problem
             if obstacle_cost != 0:
@@ -364,6 +381,7 @@ class SimpleUnicycleMPC:
         """
         Solves MPC and returns commands in Twist message format.
         Returns: {'linear': {'x': float, 'y': 0.0, 'z': 0.0}, 'angular': {'x': 0.0, 'y': 0.0, 'z': float}}
+        Also stores the full MPC solution in self.last_solution for trajectory visualization
         """
         a_cmd, omega_cmd = self.solve(x0, target, obstacles)
         
@@ -380,6 +398,25 @@ class SimpleUnicycleMPC:
             'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
             'angular': {'x': 0.0, 'y': 0.0, 'z': float(omega_cmd)}
         }
+    
+    def get_predicted_trajectory(self):
+        """
+        Get the full MPC predicted trajectory from the last solve.
+        Returns: list of [x, y] positions for N+1 steps, or None if no solution
+        """
+        if self.last_solution is None or 'X' not in self.last_solution:
+            return None
+        
+        X = self.last_solution['X']
+        if X is None or X.shape[0] < 2:
+            return None
+        
+        # Extract position trajectory [px, py] for all N+1 steps
+        trajectory = []
+        for k in range(X.shape[1]):
+            trajectory.append([float(X[0, k]), float(X[1, k])])
+        
+        return trajectory
     
     def _update_cost_weights(self):
         """
