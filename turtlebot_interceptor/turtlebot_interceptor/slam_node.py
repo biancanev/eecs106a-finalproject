@@ -12,6 +12,7 @@ from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import math
 import transforms3d.euler as euler
+import tf2_ros
 
 
 class SLAMNode(Node):
