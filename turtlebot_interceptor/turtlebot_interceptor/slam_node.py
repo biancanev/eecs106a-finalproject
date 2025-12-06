@@ -125,6 +125,25 @@ class SLAMNode(Node):
         min_range = scan.range_min if scan.range_min > 0 else 0.25
         max_range = scan.range_max if scan.range_max > 0 else 3.5
         
+        node = rclpy.create_node('turtlebot_slam_controller')
+        tf_buffer = tf2_ros.Buffer()
+        tf_listener = tf2_ros.TransformListener(tf_buffer, node)
+
+        while rclpy.ok():
+            try:
+                trans = tf_buffer.lookup_transform('odom', 'base_link', rclpy.time.Time())
+                break
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+                node.get_logger().warn('TF lookup failed, retrying')
+                rclpy.spin_once(node, timeout_sec=0.1)
+        
+        x1 = trans.transform.translation.x
+        y1 = trans.transform.translation.y
+        q = trans.transform.rotation
+
+        roll, pitch, yaw = euler.quat2euler([q.w, q.x, q.y, q.z])
+
+        node.destroy_node()
         # Helper functions for log-odds conversion (lab6 pattern)
         def occupancy_to_log_odds(val):
             """Convert occupancy value to log-odds"""
