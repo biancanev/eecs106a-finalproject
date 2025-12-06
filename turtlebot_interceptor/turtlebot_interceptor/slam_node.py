@@ -174,7 +174,8 @@ class SLAMNode(Node):
             
             # Calculate beam angle
             angle = scan.angle_min + i * scan.angle_increment
-            beam_angle = theta + angle
+            print(yaw, theta, angle)
+            beam_angle = yaw + angle
             
             # Clamp range
             range_val = max(min_range, min(range_val, max_range))
