@@ -98,6 +98,17 @@ class MPCNode(Node):
             self.lidar_callback,
             lidar_qos
         )
+        
+        # CRITICAL: Subscribe to Cartographer's scan-matched points
+        # These are already in map frame and aligned - no rotation needed!
+        from sensor_msgs.msg import PointCloud2
+        self.matched_points_sub = self.create_subscription(
+            PointCloud2,
+            '/scan_matched_points2',
+            self.matched_points_callback,
+            10
+        )
+        self.matched_points = None
 
         # Publishers
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -119,9 +130,19 @@ class MPCNode(Node):
         self.persistent_obstacles = []
         self.obstacle_timeout = 5.0  # Keep obstacles for 5 seconds
         
-        # CRITICAL: LIDAR frame offset (MUST MATCH fast_local_grid.py!)
-        # Set to same value as fast_local_grid.py
-        self.lidar_angle_offset = np.pi  # 180° - LIDAR backwards
+        # CRITICAL: LIDAR frame offset - AUTO-DETECTION enabled!
+        # System will try different offsets and pick the best match
+        self.lidar_angle_offset = 0.0  # Current offset
+        self.lidar_offset_candidates = [0.0, np.pi/2, np.pi, -np.pi/2]  # Test these
+        self.lidar_offset_scores = {offset: 0.0 for offset in self.lidar_offset_candidates}
+        self.frame_calibration_samples = 0
+        self.frame_calibration_needed = 100  # Collect 100 samples
+        self.frame_calibrated = False
+        
+        self.get_logger().info(
+            '🔧 LIDAR frame auto-calibration starting...\n'
+            '   Move robot near obstacles for calibration'
+        )
         
         # Emergency recovery state machine
         self.emergency_state = 'NORMAL'  # NORMAL, BACKUP, ROTATE, RECOVERY
@@ -182,6 +203,10 @@ class MPCNode(Node):
     def lidar_callback(self, msg: LaserScan):
         """Store latest LIDAR scan for immediate obstacle detection"""
         self.latest_scan = msg
+    
+    def matched_points_callback(self, msg):
+        """Store Cartographer's scan-matched points (already in map frame!)"""
+        self.matched_points = msg
     
     def local_map_callback(self, msg: OccupancyGrid):
         """Store fast local grid (updates at 5-10 Hz)"""
@@ -447,26 +472,129 @@ class MPCNode(Node):
         return obstacles
     
     def compute_obstacles(self):
-        """Extract obstacles from Local Grid (fast) + LIDAR (immediate)"""
+        """Extract obstacles - PRIMARY SOURCE: Cartographer scan-matched points!"""
         if self.seeker_state is None:
             return []
         
         obstacles = []
         
-        # PART 1: Fast Local Grid (PRIMARY SOURCE - 5-10 Hz updates!)
-        # This is the key to dynamic navigation - updates at LIDAR rate
-        if self.local_map is not None:
-            obstacles.extend(self.extract_map_obstacles_from_grid(self.local_map))
+        # PART 1: Cartographer scan-matched points (PRIMARY - already in correct frame!)
+        # These are LIDAR points that Cartographer has aligned with the map
+        # NO frame offset needed - Cartographer handles all transforms!
+        if self.matched_points is not None:
+            obstacles.extend(self.extract_scan_matched_obstacles())
         
-        # PART 2: LIDAR obstacles (BACKUP - for anything the grid misses)
-        # Also useful for very close obstacles
-        if self.latest_scan is not None:
+        # PART 2: Raw LIDAR (BACKUP - if scan-matched not available yet)
+        # Use raw LIDAR with auto-calibrated offset
+        if self.latest_scan is not None and len(obstacles) < 5:
             obstacles.extend(self.extract_lidar_obstacles())
+        
+        # PART 3: Fast Local Grid (TERTIARY - for persistent memory)
+        if self.local_map is not None and len(obstacles) < 10:
+            grid_obstacles = self.extract_map_obstacles_from_grid(self.local_map)
+            obstacles.extend(grid_obstacles)
         
         # Remove duplicates and limit total
         obstacles = self.merge_obstacles(obstacles)
         
+        # AUTO-CALIBRATE frame offset by comparing LIDAR vs grid
+        if not self.frame_calibrated and self.local_map is not None and self.latest_scan is not None:
+            self.calibrate_lidar_frame()
+        
         return obstacles
+    
+    def extract_scan_matched_obstacles(self):
+        """Extract obstacles from Cartographer's scan-matched point cloud"""
+        if self.matched_points is None or self.seeker_state is None:
+            return []
+        
+        from sensor_msgs_py import point_cloud2
+        
+        obstacles = []
+        robot_x = self.seeker_state[0]
+        robot_y = self.seeker_state[1]
+        
+        obstacle_radius = 0.25  # 25cm for point cloud obstacles
+        
+        try:
+            # Extract points from PointCloud2
+            for point in point_cloud2.read_points(self.matched_points, 
+                                                  field_names=("x", "y", "z"), 
+                                                  skip_nans=True):
+                px, py, pz = point
+                
+                # Distance from robot
+                dx = px - robot_x
+                dy = py - robot_y
+                dist = np.sqrt(dx*dx + dy*dy)
+                
+                # Only within 2m
+                if 0.1 < dist < 2.0:
+                    obstacles.append((np.array([px, py]), obstacle_radius))
+        except Exception as e:
+            # Point cloud parsing can fail, fall back to LIDAR
+            if not hasattr(self, '_pointcloud_error_logged'):
+                self.get_logger().warn(f'PointCloud2 parsing error: {e}')
+                self._pointcloud_error_logged = True
+        
+        return obstacles
+    
+    def calibrate_lidar_frame(self):
+        """Auto-detect correct LIDAR frame offset by comparing with grid"""
+        if self.latest_scan is None or self.seeker_state is None:
+            return
+        
+        self.frame_calibration_samples += 1
+        
+        # For each candidate offset, compute how well LIDAR matches grid
+        for offset in self.lidar_offset_candidates:
+            # Temporarily use this offset
+            old_offset = self.lidar_angle_offset
+            self.lidar_angle_offset = offset
+            
+            # Extract LIDAR obstacles with this offset
+            lidar_obs = self.extract_lidar_obstacles()
+            
+            # Extract grid obstacles
+            grid_obs = self.extract_map_obstacles_from_grid(self.local_map)
+            
+            # Restore offset
+            self.lidar_angle_offset = old_offset
+            
+            # Score: how many LIDAR obstacles are close to grid obstacles?
+            matches = 0
+            for lidar_pos, lidar_r in lidar_obs:
+                for grid_pos, grid_r in grid_obs:
+                    dist = np.sqrt((lidar_pos[0] - grid_pos[0])**2 + (lidar_pos[1] - grid_pos[1])**2)
+                    if dist < 0.3:  # Within 30cm = match
+                        matches += 1
+                        break
+            
+            # Normalize by number of obstacles
+            if len(lidar_obs) > 0:
+                score = matches / len(lidar_obs)
+                self.lidar_offset_scores[offset] += score
+        
+        # After enough samples, pick best offset
+        if self.frame_calibration_samples >= self.frame_calibration_needed:
+            best_offset = max(self.lidar_offset_scores, key=self.lidar_offset_scores.get)
+            best_score = self.lidar_offset_scores[best_offset]
+            
+            self.lidar_angle_offset = best_offset
+            self.frame_calibrated = True
+            
+            self.get_logger().info(
+                f'✅ LIDAR FRAME CALIBRATED!\n'
+                f'   Best offset: {np.degrees(best_offset):.1f}° (score: {best_score:.2f})\n'
+                f'   Scores: ' + ', '.join([
+                    f'{np.degrees(o):.0f}°={self.lidar_offset_scores[o]:.1f}' 
+                    for o in self.lidar_offset_candidates
+                ])
+            )
+        elif self.frame_calibration_samples % 20 == 0:
+            self.get_logger().info(
+                f'🔧 Frame calibration: {self.frame_calibration_samples}/{self.frame_calibration_needed} samples'
+            )
     
     def extract_lidar_obstacles(self):
         """Convert LIDAR scan to immediate obstacles AND store persistently"""
@@ -486,7 +614,7 @@ class MPCNode(Node):
         range_max = self.latest_scan.range_max
         
         # Convert LIDAR points to obstacles
-        obstacle_radius = 0.5  # 50cm radius - DOUBLED for safety margin!
+        obstacle_radius = 0.3  # 30cm radius - reasonable safety margin
         
         for i, r in enumerate(ranges):
             # Skip invalid readings
@@ -554,7 +682,7 @@ class MPCNode(Node):
         # Second pass: cluster nearby cells into single obstacles
         obstacles = []
         cluster_dist = 0.15  # 15cm clustering
-        obstacle_radius = 0.5  # 50cm radius - DOUBLED for safety!
+        obstacle_radius = 0.3  # 30cm radius - reasonable
         
         used = set()
         for i, (cx, cy) in enumerate(occupied_cells):
@@ -596,8 +724,8 @@ class MPCNode(Node):
         origin_x = self.map.info.origin.position.x
         origin_y = self.map.info.origin.position.y
         
-        # CRITICAL: MASSIVE obstacle radius to ensure avoidance
-        obstacle_radius = 0.6  # 60cm - HUGE margin!
+        # CRITICAL: Large obstacle radius to ensure avoidance
+        obstacle_radius = 0.35  # 35cm - reasonable margin
         
         for i in range(width * height):
             if self.map.data[i] > 30:  # Occupied
@@ -729,7 +857,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.6  # 60cm emergency threshold - INCREASED!
+        emergency_dist = 0.45  # 45cm emergency threshold
         front_range = np.pi / 6  # ±30 degrees
         
         for i, r in enumerate(ranges):
@@ -1063,7 +1191,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        safety_dist = 0.5  # 50cm safety threshold - INCREASED!
+        safety_dist = 0.4  # 40cm safety threshold
         
         # Check direction we're moving
         move_direction = np.arctan2(new_y - y, new_x - x) - theta
