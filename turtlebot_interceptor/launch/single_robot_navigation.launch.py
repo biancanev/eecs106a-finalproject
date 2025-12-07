@@ -27,7 +27,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'goal_y',
-            default_value='0',
+            default_value='0.0',
             description='Goal Y position (meters)'
         ),
         
