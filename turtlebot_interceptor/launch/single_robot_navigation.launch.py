@@ -46,10 +46,10 @@ def generate_launch_description():
             output='screen'
         ),
         
-        # EKF Pose Estimator (HIGH-PRECISION STATE ESTIMATION)
+        # EKF Pose Estimator (HIGH-PRECISION STATE ESTIMATION FOR MPC)
         # Fuses IMU + Magnetometer + Wheel Encoders for true robot dynamics
-        # This is the SOURCE OF TRUTH for robot pose/velocity
-        # Cartographer will use this pose for mapping
+        # Publishes /amcl_pose for MPC control
+        # NOTE: Cartographer (running separately) uses raw /odom and /imu
         Node(
             package='turtlebot_interceptor',
             executable='ekf_pose_estimator',
@@ -60,10 +60,8 @@ def generate_launch_description():
             output='screen'
         ),
         
-        # Cartographer SLAM (ENVIRONMENT MAPPING)
-        # Uses EKF pose + LIDAR to build accurate map
-        # EKF provides precise robot state, Cartographer builds the environment model
-        # This is MAPPING ONLY - pose comes from EKF above
+        # Cartographer SLAM (Google's production SLAM system)
+        # Provides /map topic for MPC obstacle avoidance
         Node(
             package='cartographer_ros',
             executable='cartographer_node',
@@ -72,27 +70,16 @@ def generate_launch_description():
                 '-configuration_directory', '/opt/ros/humble/share/turtlebot3_cartographer/config',
                 '-configuration_basename', 'turtlebot3_lds_2d.lua'
             ],
-            parameters=[{
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
-                # Tell Cartographer to trust the EKF odometry more
-                'tracking_frame': 'base_footprint',
-                'published_frame': 'map',
-            }],
-            remappings=[
-                # CRITICAL: Cartographer uses EKF's refined odometry (not raw wheel encoders)
-                # EKF fuses IMU + Mag + Encoders → publishes /odom_ekf
-                # This gives Cartographer the TRUE robot state for accurate mapping
-                ('/odom', '/odom_ekf'),
-            ],
+            parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
             output='screen'
         ),
         
-        # Cartographer occupancy grid node (converts Cartographer's map to OccupancyGrid)
+        # Cartographer occupancy grid node (publishes /map)
         Node(
             package='cartographer_ros',
             executable='cartographer_occupancy_grid_node',
             name='cartographer_occupancy_grid_node',
-            arguments=['-resolution', '0.02'],  # 2cm resolution for small obstacle detection
+            arguments=['-resolution', '0.05'],  # 5cm resolution (standard for TurtleBot3)
             parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
             output='screen'
         ),
