@@ -38,7 +38,13 @@ class FastLocalGrid(Node):
         self.log_odds_min = -5.0
         self.log_odds_max = 10.0
         
-        # Grid storage (log-odds)
+        # CRITICAL: Store obstacles in WORLD FRAME, not grid frame
+        # As robot moves, we reproject obstacles into robot-centric grid
+        # This prevents obstacles from disappearing when robot moves
+        self.world_obstacles = {}  # {(world_x, world_y): log_odds_value}
+        self.obstacle_decay_rate = 0.95  # Decay old obstacles slowly
+        
+        # Grid storage (log-odds) - ROBOT-CENTRIC, regenerated each update
         self.grid = np.zeros((self.width, self.height), dtype=np.float32)
         
         # Robot state
@@ -115,112 +121,139 @@ class FastLocalGrid(Node):
         self.initialize_from_global_map()
     
     def initialize_from_global_map(self):
-        """Initialize local grid from Cartographer's global map (Bayesian prior)"""
+        """Initialize WORLD obstacles from Cartographer's global map (Bayesian prior)"""
         if self.global_map is None:
             return
         
-        # Reset local grid
-        self.grid = np.zeros((self.width, self.height), dtype=np.float32)
-        
-        # Copy relevant portion from global map
+        # Copy obstacles from global map to world obstacles
         g_width = self.global_map.info.width
         g_height = self.global_map.info.height
         g_resolution = self.global_map.info.resolution
         g_origin_x = self.global_map.info.origin.position.x
         g_origin_y = self.global_map.info.origin.position.y
         
-        # Local grid bounds
-        local_min_x = self.robot_x - self.grid_size / 2
-        local_min_y = self.robot_y - self.grid_size / 2
-        
-        # For each cell in local grid, find corresponding cell in global map
-        for lx in range(self.width):
-            for ly in range(self.height):
-                # World coordinates of this local cell
-                world_x = local_min_x + lx * self.resolution + self.resolution / 2
-                world_y = local_min_y + ly * self.resolution + self.resolution / 2
+        # Only import obstacles near robot (within 10m radius)
+        for gx in range(g_width):
+            for gy in range(g_height):
+                # World coordinates
+                world_x = gx * g_resolution + g_origin_x + g_resolution / 2
+                world_y = gy * g_resolution + g_origin_y + g_resolution / 2
                 
-                # Find in global map
-                gx = int((world_x - g_origin_x) / g_resolution)
-                gy = int((world_y - g_origin_y) / g_resolution)
+                # Check if near robot
+                dist_to_robot = np.sqrt((world_x - self.robot_x)**2 + (world_y - self.robot_y)**2)
+                if dist_to_robot > 10.0:  # Too far
+                    continue
                 
-                if 0 <= gx < g_width and 0 <= gy < g_height:
-                    # Get occupancy from global map
-                    g_idx = gy * g_width + gx
-                    occupancy_prob = self.global_map.data[g_idx]
+                # Get occupancy
+                g_idx = gy * g_width + gx
+                occupancy_prob = self.global_map.data[g_idx]
+                
+                if occupancy_prob > 65:  # Occupied in global map
+                    # Convert to log-odds and store in world frame
+                    prob = occupancy_prob / 100.0
+                    log_odds = np.log(prob / (1.0 - prob))
                     
-                    if occupancy_prob >= 0:  # Known cell
-                        # Convert probability [0, 100] to log-odds
-                        prob = occupancy_prob / 100.0
-                        if prob > 0.01 and prob < 0.99:
-                            log_odds = np.log(prob / (1.0 - prob))
-                            self.grid[lx, ly] = np.clip(log_odds, self.log_odds_min, self.log_odds_max)
+                    # Discretize to our resolution
+                    key = (round(world_x / self.resolution) * self.resolution,
+                          round(world_y / self.resolution) * self.resolution)
+                    
+                    # Only add if not already present (don't override LIDAR data)
+                    if key not in self.world_obstacles:
+                        self.world_obstacles[key] = np.clip(log_odds, self.log_odds_min, self.log_odds_max)
+        
+        # Regenerate grid from world obstacles
+        self.regenerate_grid_from_world()
     
     def scan_callback(self, msg: LaserScan):
-        """Process LIDAR scan and update grid"""
+        """Process LIDAR scan and update WORLD obstacles"""
         # Ray-cast each LIDAR beam
         angle = msg.angle_min
+        
+        # Decay all existing obstacles slightly
+        for key in list(self.world_obstacles.keys()):
+            self.world_obstacles[key] *= self.obstacle_decay_rate
+            # Remove very weak obstacles
+            if abs(self.world_obstacles[key]) < 0.5:
+                del self.world_obstacles[key]
+        
         for r in msg.ranges:
             # Skip invalid readings
             if r < msg.range_min or r > msg.range_max or not np.isfinite(r):
                 angle += msg.angle_increment
                 continue
             
-            # Ray endpoint in world frame
+            # Ray endpoint in WORLD frame
             world_angle = self.robot_theta + angle
             end_x = self.robot_x + r * np.cos(world_angle)
             end_y = self.robot_y + r * np.sin(world_angle)
             
-            # Ray-cast: mark free cells along ray, occupied at endpoint
-            self.raycast(self.robot_x, self.robot_y, end_x, end_y, r < msg.range_max * 0.95)
+            # Update world obstacles (stores in world coordinates)
+            self.update_world_obstacles(self.robot_x, self.robot_y, end_x, end_y, 
+                                       r < msg.range_max * 0.95)
             
             angle += msg.angle_increment
+        
+        # Regenerate robot-centric grid from world obstacles
+        self.regenerate_grid_from_world()
     
-    def raycast(self, x0, y0, x1, y1, hit_obstacle):
-        """Bresenham-like ray-casting for occupancy grid"""
-        # Convert world coordinates to grid (centered on robot)
-        def world_to_grid(wx, wy):
-            # Grid center is at robot position
-            gx = int((wx - (self.robot_x - self.grid_size/2)) / self.resolution)
-            gy = int((wy - (self.robot_y - self.grid_size/2)) / self.resolution)
-            return gx, gy
+    def update_world_obstacles(self, x0, y0, x1, y1, hit_obstacle):
+        """Update obstacles in WORLD coordinates (not grid coordinates)"""
+        # Discretize to world grid (not robot-centric)
+        # Use resolution for discretization
+        def discretize(wx, wy):
+            return (round(wx / self.resolution) * self.resolution,
+                   round(wy / self.resolution) * self.resolution)
         
-        gx0, gy0 = world_to_grid(x0, y0)
-        gx1, gy1 = world_to_grid(x1, y1)
+        # Mark endpoint as occupied or free
+        end_key = discretize(x1, y1)
         
-        # Bresenham line algorithm
-        dx = abs(gx1 - gx0)
-        dy = abs(gy1 - gy0)
-        sx = 1 if gx0 < gx1 else -1
-        sy = 1 if gy0 < gy1 else -1
-        err = dx - dy
+        if hit_obstacle:
+            # Strong occupied evidence
+            if end_key in self.world_obstacles:
+                self.world_obstacles[end_key] += self.log_odds_occupied
+            else:
+                self.world_obstacles[end_key] = self.log_odds_occupied
+            # Clip
+            self.world_obstacles[end_key] = np.clip(self.world_obstacles[end_key],
+                                                     self.log_odds_min, self.log_odds_max)
         
-        x, y = gx0, gy0
+        # Mark free space along ray (sparse - every 10cm)
+        dist = np.sqrt((x1 - x0)**2 + (y1 - y0)**2)
+        num_samples = int(dist / 0.1)  # Sample every 10cm
         
-        while True:
-            # Mark current cell
-            if 0 <= x < self.width and 0 <= y < self.height:
-                if x == gx1 and y == gy1:
-                    # Endpoint - mark as occupied if hit obstacle
-                    if hit_obstacle:
-                        self.grid[x, y] += self.log_odds_occupied
-                        self.grid[x, y] = np.clip(self.grid[x, y], self.log_odds_min, self.log_odds_max)
-                    break
-                else:
-                    # Free space along ray
-                    self.grid[x, y] += self.log_odds_free
-                    self.grid[x, y] = np.clip(self.grid[x, y], self.log_odds_min, self.log_odds_max)
+        for i in range(1, num_samples):  # Skip start and end
+            t = i / num_samples
+            wx = x0 + t * (x1 - x0)
+            wy = y0 + t * (y1 - y0)
+            free_key = discretize(wx, wy)
             
-            if x == gx1 and y == gy1:
-                break
-            
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                x += sx
-            if e2 < dx:
-                err += dx
-                y += sy
+            if free_key in self.world_obstacles:
+                self.world_obstacles[free_key] += self.log_odds_free
+                # Remove if becomes very free
+                if self.world_obstacles[free_key] < -3.0:
+                    del self.world_obstacles[free_key]
+    
+    def regenerate_grid_from_world(self):
+        """Regenerate robot-centric grid from world obstacles"""
+        # Clear grid
+        self.grid = np.zeros((self.width, self.height), dtype=np.float32)
+        
+        # Grid bounds in world frame
+        min_x = self.robot_x - self.grid_size / 2
+        min_y = self.robot_y - self.grid_size / 2
+        max_x = self.robot_x + self.grid_size / 2
+        max_y = self.robot_y + self.grid_size / 2
+        
+        # Project world obstacles into current robot-centric grid
+        for (world_x, world_y), log_odds in self.world_obstacles.items():
+            # Check if obstacle is in current grid window
+            if min_x <= world_x <= max_x and min_y <= world_y <= max_y:
+                # Convert to grid coordinates
+                gx = int((world_x - min_x) / self.resolution)
+                gy = int((world_y - min_y) / self.resolution)
+                
+                if 0 <= gx < self.width and 0 <= gy < self.height:
+                    self.grid[gx, gy] = log_odds
     
     def publish_map(self):
         """Publish occupancy grid"""
