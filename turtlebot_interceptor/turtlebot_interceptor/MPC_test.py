@@ -19,7 +19,7 @@ class SimpleUnicycleMPC:
         # Velocity constraints (Twist message format)
         # Linear velocities (m/s)
         self.vx_min = 0.0
-        self.vx_max = 1.2  # Maximum forward velocity (was 0.6 - too slow!)
+        self.vx_max = 0.2  # SLOW MODE: Test obstacle avoidance first! (was 1.2)
         self.vy_min = 0.0  # Unicycle: no lateral velocity
         self.vy_max = 0.0
         self.vz_min = 0.0  # Unicycle: no vertical velocity
@@ -49,7 +49,7 @@ class SimpleUnicycleMPC:
 
         # Base weights - CRITICAL: Balance between reaching target and avoiding obstacles
         # Position weight must be high but not so high that obstacle costs are ignored
-        self.Qp_base = 500.0  # High position weight - but allow obstacle avoidance to dominate when close
+        self.Qp_base = 50.0  # REDUCED 10x - Obstacles MUST dominate over position tracking!
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
         self.Ra_base = 0.1  # Allow movement but penalize excessive acceleration
         self.Rw_base = 1.0  # Penalize spinning - encourage smooth turns
@@ -346,7 +346,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 1000000.0  # CRITICAL: CATASTROPHIC weight - MUST NEVER TOUCH OBSTACLES
+            repulsion_weight = 10000000.0  # CRITICAL: 10x higher - ABSOLUTELY MUST AVOID!
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -381,25 +381,31 @@ class SimpleUnicycleMPC:
                     safety_radius_sq = safety_radius * safety_radius
                     
                     # CRITICAL: ABSOLUTELY MASSIVE repulsion - robot CANNOT touch obstacles
-                    # Make cost so high that optimizer will do ANYTHING to avoid
-                    if dist_sq < safety_radius_sq * 0.25:  # EMERGENCY - TOO CLOSE!
-                        # Absolutely catastrophic - this should NEVER EVER happen
+                    # Use exponential-like scaling to make close obstacles DOMINATE the cost
+                    if dist_sq < safety_radius_sq * 0.1:  # COLLISION IMMINENT!
+                        # Essentially infinite cost - optimizer will do ANYTHING to avoid
+                        obstacle_cost_value += repulsion_weight * 1000000.0 / (dist_sq + 0.000001)
+                    elif dist_sq < safety_radius_sq * 0.25:  # EMERGENCY - TOO CLOSE!
+                        # Absolutely catastrophic
                         obstacle_cost_value += repulsion_weight * 100000.0 / (dist_sq + 0.00001)
                     elif dist_sq < safety_radius_sq * 0.5:  # VERY CLOSE - EMERGENCY!
-                        # Catastrophic cost - extreme danger
+                        # Catastrophic cost
                         obstacle_cost_value += repulsion_weight * 10000.0 / (dist_sq + 0.0001)
                     elif dist_sq < safety_radius_sq:  # Within safety radius - CRITICAL!
-                        # EXTREME penalty when too close - act like hard constraint
+                        # EXTREME penalty
                         obstacle_cost_value += repulsion_weight * 1000.0 / (dist_sq + 0.001)
                     elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
-                        # Very high penalty - start avoiding aggressively
+                        # Very high penalty - start curving away
                         obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.01)
                     elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
-                        # High penalty - plan to avoid
+                        # High penalty - plan ahead
                         obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.1)
+                    elif dist_sq < safety_radius_sq * 9:  # Within 9x safety radius
+                        # Moderate penalty - be aware
+                        obstacle_cost_value += repulsion_weight / (dist_sq + 0.5)
                     else:  # Far away
-                        # Still add some cost so optimizer is aware
-                        obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq)
+                        # Small penalty - just awareness
+                        obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + safety_radius_sq)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
         # CRITICAL: Scale obstacle cost based on proximity to make it act like hard constraint
