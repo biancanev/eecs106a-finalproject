@@ -346,7 +346,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 10000000.0  # CRITICAL: 10x higher - ABSOLUTELY MUST AVOID!
+            repulsion_weight = 1000000.0  # Strong but not excessive
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -375,9 +375,9 @@ class SimpleUnicycleMPC:
                     dist_sq = dx*dx + dy*dy
                     
                     # Safety radius (obstacle radius + robot radius + margin)
-                    # CRITICAL: radius is now 0.5-0.6m, add even MORE margin
-                    # Robot physical radius ~0.15m, but add extra safety buffer
-                    safety_radius = radius + 0.3  # Large additional margin for safety!
+                    # Relaxed for better navigation
+                    # Robot physical radius ~0.15m
+                    safety_radius = radius + 0.25  # Reasonable margin
                     safety_radius_sq = safety_radius * safety_radius
                     
                     # CRITICAL: ABSOLUTELY MASSIVE repulsion - robot CANNOT touch obstacles
@@ -419,7 +419,7 @@ class SimpleUnicycleMPC:
                 dx = px0 - center[0]
                 dy = py0 - center[1]
                 dist = np.sqrt(dx*dx + dy*dy)
-                safety_radius = radius + 0.3  # Large margin (SAME AS ABOVE)
+                safety_radius = radius + 0.25  # Reasonable margin (SAME AS ABOVE)
                 actual_clearance = dist - radius  # Actual distance to obstacle surface
                 if dist < safety_radius * 3.0:  # Within 3x safety radius
                     if dist < min_dist_to_obstacle:
