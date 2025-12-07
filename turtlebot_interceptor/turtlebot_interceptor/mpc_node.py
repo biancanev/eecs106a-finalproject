@@ -114,6 +114,9 @@ class MPCNode(Node):
         # Each obstacle: (position, radius, timestamp)
         self.persistent_obstacles = []
         self.obstacle_timeout = 5.0  # Keep obstacles for 5 seconds
+        
+        # CRITICAL: LIDAR frame offset (same as fast_local_grid)
+        self.lidar_angle_offset = np.pi  # 180 degrees - LIDAR mounted backwards
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
         self.prev_state = None  # Previous state for velocity estimation
@@ -483,7 +486,8 @@ class MPCNode(Node):
             ray_angle = angle_min + i * angle_increment
             
             # Convert to world frame
-            world_angle = robot_theta + ray_angle
+            # CRITICAL: Add LIDAR frame offset to correct for mounting orientation
+            world_angle = robot_theta + ray_angle + self.lidar_angle_offset
             obstacle_x = robot_x + r * np.cos(world_angle)
             obstacle_y = robot_y + r * np.sin(world_angle)
             

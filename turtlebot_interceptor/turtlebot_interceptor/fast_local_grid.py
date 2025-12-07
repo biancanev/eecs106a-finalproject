@@ -52,6 +52,11 @@ class FastLocalGrid(Node):
         self.robot_y = 0.0
         self.robot_theta = 0.0
         
+        # CRITICAL: LIDAR frame offset (if LIDAR is rotated relative to base_link)
+        # Common issues: LIDAR mounted backwards (180°) or sideways (90°/-90°)
+        # Adjust this if obstacles appear rotated
+        self.lidar_angle_offset = np.pi  # 180 degrees - LIDAR is backwards!
+        
         # QoS for LIDAR (BEST_EFFORT for hardware compatibility)
         lidar_qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -98,7 +103,9 @@ class FastLocalGrid(Node):
         self.get_logger().info(
             f'Fast Local Grid: {self.width}x{self.height} cells ({self.grid_size}m x {self.grid_size}m), '
             f'resolution={self.resolution}m\n'
-            f'  Mode: Bayesian fusion (Cartographer prior + LIDAR updates)'
+            f'  Mode: Bayesian fusion (Cartographer prior + LIDAR updates)\n'
+            f'  LIDAR angle offset: {np.degrees(self.lidar_angle_offset):.1f}° '
+            f'(adjust if obstacles appear rotated)'
         )
     
     def pose_callback(self, msg: PoseWithCovarianceStamped):
@@ -183,7 +190,8 @@ class FastLocalGrid(Node):
                 continue
             
             # Ray endpoint in WORLD frame
-            world_angle = self.robot_theta + angle
+            # CRITICAL: Add LIDAR frame offset to correct for mounting orientation
+            world_angle = self.robot_theta + angle + self.lidar_angle_offset
             end_x = self.robot_x + r * np.cos(world_angle)
             end_y = self.robot_y + r * np.sin(world_angle)
             
