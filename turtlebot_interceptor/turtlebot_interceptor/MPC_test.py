@@ -375,9 +375,9 @@ class SimpleUnicycleMPC:
                     dist_sq = dx*dx + dy*dy
                     
                     # Safety radius (obstacle radius + robot radius + margin)
-                    # CRITICAL: radius is already large (0.4m), just add robot center offset
-                    # The obstacle_radius in mpc_node already includes large margin
-                    safety_radius = radius + 0.2  # Obstacle already inflated, just add robot center
+                    # CRITICAL: radius is now 0.5-0.6m, add even MORE margin
+                    # Robot physical radius ~0.15m, but add extra safety buffer
+                    safety_radius = radius + 0.3  # Large additional margin for safety!
                     safety_radius_sq = safety_radius * safety_radius
                     
                     # CRITICAL: ABSOLUTELY MASSIVE repulsion - robot CANNOT touch obstacles
@@ -419,7 +419,7 @@ class SimpleUnicycleMPC:
                 dx = px0 - center[0]
                 dy = py0 - center[1]
                 dist = np.sqrt(dx*dx + dy*dy)
-                safety_radius = radius + 0.2  # Obstacle already inflated (SAME AS ABOVE)
+                safety_radius = radius + 0.3  # Large margin (SAME AS ABOVE)
                 actual_clearance = dist - radius  # Actual distance to obstacle surface
                 if dist < safety_radius * 3.0:  # Within 3x safety radius
                     if dist < min_dist_to_obstacle:
