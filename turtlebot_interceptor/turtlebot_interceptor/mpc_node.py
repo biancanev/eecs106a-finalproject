@@ -75,6 +75,15 @@ class MPCNode(Node):
             10
         )
         
+        # CRITICAL: Subscribe to fast local grid for immediate obstacle updates
+        # This updates at LIDAR rate (5-10 Hz) vs Cartographer's slow rate (1-2 Hz)
+        self.local_map_sub = self.create_subscription(
+            OccupancyGrid,
+            '/local_map',
+            self.local_map_callback,
+            10
+        )
+        
         # CRITICAL: Subscribe to LIDAR for immediate obstacle detection
         # Map updates slowly, LIDAR gives instant detection
         from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
@@ -99,6 +108,12 @@ class MPCNode(Node):
         self.target_pose = None
         self.target_cov = None
         self.latest_scan = None  # Store latest LIDAR scan
+        self.local_map = None  # Fast local grid (5-10 Hz updates)
+        
+        # Persistent obstacle storage (keeps obstacles even if Cartographer clears them)
+        # Each obstacle: (position, radius, timestamp)
+        self.persistent_obstacles = []
+        self.obstacle_timeout = 5.0  # Keep obstacles for 5 seconds
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
         self.prev_state = None  # Previous state for velocity estimation
@@ -149,6 +164,10 @@ class MPCNode(Node):
     def lidar_callback(self, msg: LaserScan):
         """Store latest LIDAR scan for immediate obstacle detection"""
         self.latest_scan = msg
+    
+    def local_map_callback(self, msg: OccupancyGrid):
+        """Store fast local grid (updates at 5-10 Hz)"""
+        self.local_map = msg
 
     def seeker_callback(self, msg: PoseWithCovarianceStamped):
         """Update seeker state (lab8 pattern - improved velocity estimation)"""
@@ -410,19 +429,21 @@ class MPCNode(Node):
         return obstacles
     
     def compute_obstacles(self):
-        """Extract obstacles from LIDAR (immediate) + Map (persistent)"""
+        """Extract obstacles from Local Grid (fast) + LIDAR (immediate)"""
         if self.seeker_state is None:
             return []
         
         obstacles = []
         
-        # PART 1: LIDAR obstacles (IMMEDIATE detection)
+        # PART 1: Fast Local Grid (PRIMARY SOURCE - 5-10 Hz updates!)
+        # This is the key to dynamic navigation - updates at LIDAR rate
+        if self.local_map is not None:
+            obstacles.extend(self.extract_map_obstacles_from_grid(self.local_map))
+        
+        # PART 2: LIDAR obstacles (BACKUP - for anything the grid misses)
+        # Also useful for very close obstacles
         if self.latest_scan is not None:
             obstacles.extend(self.extract_lidar_obstacles())
-        
-        # PART 2: Map obstacles (PERSISTENT from Cartographer)
-        if self.map is not None:
-            obstacles.extend(self.extract_map_obstacles())
         
         # Remove duplicates and limit total
         obstacles = self.merge_obstacles(obstacles)
@@ -430,7 +451,7 @@ class MPCNode(Node):
         return obstacles
     
     def extract_lidar_obstacles(self):
-        """Convert LIDAR scan to immediate obstacles"""
+        """Convert LIDAR scan to immediate obstacles AND store persistently"""
         if self.latest_scan is None or self.seeker_state is None:
             return []
         
@@ -438,6 +459,7 @@ class MPCNode(Node):
         robot_x = self.seeker_state[0]
         robot_y = self.seeker_state[1]
         robot_theta = self.seeker_state[2]
+        current_time = self.get_clock().now().nanoseconds / 1e9
         
         # LIDAR scan parameters
         angle_min = self.latest_scan.angle_min
@@ -465,7 +487,54 @@ class MPCNode(Node):
             obstacle_x = robot_x + r * np.cos(world_angle)
             obstacle_y = robot_y + r * np.sin(world_angle)
             
-            obstacles.append((np.array([obstacle_x, obstacle_y]), obstacle_radius))
+            obstacle_pos = np.array([obstacle_x, obstacle_y])
+            obstacles.append((obstacle_pos, obstacle_radius))
+            
+            # Add to persistent storage
+            self.persistent_obstacles.append((obstacle_pos, obstacle_radius, current_time))
+        
+        # Clean up old obstacles (older than timeout)
+        self.persistent_obstacles = [
+            (pos, radius, t) for pos, radius, t in self.persistent_obstacles
+            if current_time - t < self.obstacle_timeout
+        ]
+        
+        return obstacles
+    
+    def extract_map_obstacles_from_grid(self, grid_map):
+        """Extract obstacles from any occupancy grid (fast local or Cartographer)"""
+        if grid_map is None or self.seeker_state is None:
+            return []
+        
+        robot_x = self.seeker_state[0]
+        robot_y = self.seeker_state[1]
+        
+        # Extract ALL occupied cells within range
+        obstacles = []
+        width = grid_map.info.width
+        height = grid_map.info.height
+        resolution = grid_map.info.resolution
+        origin_x = grid_map.info.origin.position.x
+        origin_y = grid_map.info.origin.position.y
+        
+        # Smaller radius for local grid (more precise)
+        obstacle_radius = 0.2  # 20cm
+        
+        for i in range(width * height):
+            if grid_map.data[i] > 50:  # Occupied
+                gx = i % width
+                gy = i // width
+                world_x = gx * resolution + origin_x + resolution / 2
+                world_y = gy * resolution + origin_y + resolution / 2
+                
+                # Distance from robot
+                dx = world_x - robot_x
+                dy = world_y - robot_y
+                dist = np.sqrt(dx*dx + dy*dy)
+                
+                # Only within 2m (local awareness)
+                if dist < 2.0 and dist > 0.02:
+                    obstacles.append((np.array([world_x, world_y]), obstacle_radius))
         
         return obstacles
     
@@ -669,9 +738,9 @@ class MPCNode(Node):
                     f"Robot pose: ({x0[0]:.3f}, {x0[1]:.3f})"
                 )
                 # Log closest obstacles
-                obstacle_dists = [(np.sqrt((center[0] - x0[0])**2 + (center[1] - x0[1])**2), center, radius) 
+                obstacle_dists = [(float(np.sqrt((center[0] - x0[0])**2 + (center[1] - x0[1])**2)), center, radius) 
                                  for center, radius in obstacles]
-                obstacle_dists.sort()
+                obstacle_dists.sort(key=lambda x: x[0])  # Sort by distance (first element)
                 for i, (dist, center, radius) in enumerate(obstacle_dists[:5]):  # Log 5 closest
                     self.get_logger().error(
                         f"  Obstacle {i+1}: center=({center[0]:.3f}, {center[1]:.3f}), "

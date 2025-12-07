@@ -83,8 +83,19 @@ def generate_launch_description():
         # Then run this launch file:
         #   ros2 launch turtlebot_interceptor single_robot_navigation.launch.py
         #
-        # Cartographer will publish /map which MPC uses for obstacles
+        # Cartographer provides global /map (slow, accurate)
+        # Fast Local Grid provides /local_map (fast, dynamic)
         # ============================================================
+        
+        # Fast Local Grid (HIGH-SPEED local mapping for dynamic navigation)
+        # Updates at LIDAR rate (5-10 Hz) with simple ray-casting
+        # Perfect for maze navigation - instant environment awareness!
+        Node(
+            package='turtlebot_interceptor',
+            executable='fast_local_grid',
+            name='fast_local_grid',
+            output='screen'
+        ),
         
         # MCL node (localization using map and LIDAR)
         # OPTIONAL: Cartographer already provides pose tracking
