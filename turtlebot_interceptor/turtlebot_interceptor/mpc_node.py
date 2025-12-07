@@ -120,8 +120,8 @@ class MPCNode(Node):
         self.obstacle_timeout = 5.0  # Keep obstacles for 5 seconds
         
         # CRITICAL: LIDAR frame offset (same as fast_local_grid)
-        # Match Cartographer's TF convention - let ROS handle frame transforms
-        self.lidar_angle_offset = 0.0  # TF system handles base_scan → base_link
+        # LIDAR frame rotated 90° clockwise relative to Cartographer
+        self.lidar_angle_offset = -np.pi/2  # -90° (90° clockwise)
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
         self.prev_state = None  # Previous state for velocity estimation

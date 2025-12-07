@@ -53,10 +53,9 @@ class FastLocalGrid(Node):
         self.robot_theta = 0.0
         
         # CRITICAL: LIDAR frame offset
-        # Cartographer handles TF transforms automatically via base_scan → base_link
-        # We should match Cartographer's convention!
-        # Set to 0.0 to match Cartographer's frame handling
-        self.lidar_angle_offset = 0.0  # Let ROS TF handle frame transforms
+        # LIDAR frame is rotated 90° clockwise relative to Cartographer
+        # Clockwise rotation = negative angle
+        self.lidar_angle_offset = -np.pi/2  # -90° (90° clockwise)
         
         # QoS for LIDAR (BEST_EFFORT for hardware compatibility)
         lidar_qos = QoSProfile(
