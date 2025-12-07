@@ -46,16 +46,30 @@ def generate_launch_description():
             output='screen'
         ),
         
-        # EKF Pose Estimator (HIGH-PRECISION STATE ESTIMATION FOR MPC)
-        # Fuses IMU + Magnetometer + Wheel Encoders for true robot dynamics
-        # Publishes /amcl_pose for MPC control
-        # NOTE: Cartographer (running separately) uses raw /odom and /imu
+        # DISABLED: EKF has drift issues - using raw odometry instead
+        # The EKF integrates velocities and causes massive drift when stationary
+        # For now, use simple_pose_publisher which just republishes /odom
+        # TODO: Fix EKF drift before re-enabling
+        # Node(
+        #     package='turtlebot_interceptor',
+        #     executable='ekf_pose_estimator',
+        #     name='ekf_pose_estimator',
+        #     parameters=[{
+        #         'use_sim_time': LaunchConfiguration('use_sim_time'),
+        #     }],
+        #     output='screen'
+        # ),
+        
+        # Simple pose publisher (republishes /odom as /amcl_pose)
+        # Uses raw wheel odometry - no sensor fusion for now
         Node(
             package='turtlebot_interceptor',
-            executable='ekf_pose_estimator',
-            name='ekf_pose_estimator',
+            executable='simple_pose_publisher',
+            name='simple_pose_publisher',
             parameters=[{
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'use_odom': True,
+                'static_pose': False,
             }],
             output='screen'
         ),
@@ -79,7 +93,7 @@ def generate_launch_description():
             package='cartographer_ros',
             executable='cartographer_occupancy_grid_node',
             name='cartographer_occupancy_grid_node',
-            arguments=['-resolution', '0.05'],  # 5cm resolution (standard for TurtleBot3)
+            arguments=['-resolution', '0.05', '-publish_period_sec', '1.0'],  # 5cm resolution, 1Hz updates
             parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
             output='screen'
         ),
