@@ -107,6 +107,27 @@ class MPCNode(Node):
     def map_callback(self, msg: OccupancyGrid):
         """Store map for obstacle avoidance"""
         self.map = msg
+        
+        # Log map reception periodically
+        if not hasattr(self, '_map_callback_count'):
+            self._map_callback_count = 0
+        self._map_callback_count += 1
+        
+        if self._map_callback_count == 1:
+            # First map received
+            occupied_count = sum(1 for cell in msg.data if cell > 50)
+            self.get_logger().info(
+                f'MAP RECEIVED: {msg.info.width}x{msg.info.height} cells, '
+                f'resolution={msg.info.resolution:.3f}m, '
+                f'occupied={occupied_count}, '
+                f'frame={msg.header.frame_id}'
+            )
+        elif self._map_callback_count % 20 == 0:
+            # Every 20 updates (every ~10 seconds at 2Hz)
+            occupied_count = sum(1 for cell in msg.data if cell > 50)
+            self.get_logger().info(
+                f'MAP UPDATE: {occupied_count} occupied cells'
+            )
 
     def seeker_callback(self, msg: PoseWithCovarianceStamped):
         """Update seeker state (lab8 pattern - improved velocity estimation)"""
