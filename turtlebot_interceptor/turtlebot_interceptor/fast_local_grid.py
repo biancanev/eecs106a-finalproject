@@ -52,10 +52,26 @@ class FastLocalGrid(Node):
         self.robot_y = 0.0
         self.robot_theta = 0.0
         
-        # CRITICAL: LIDAR frame offset
-        # LIDAR frame is rotated 90° clockwise relative to Cartographer
-        # Clockwise rotation = negative angle
-        self.lidar_angle_offset = -np.pi/2  # -90° (90° clockwise)
+        # CRITICAL: LIDAR frame offset - ADJUST THIS TO FIX ALIGNMENT!
+        # Test each value to find correct orientation:
+        #   0.0      = No rotation (0°)
+        #   π/2      = 90° counter-clockwise (left)
+        #   π        = 180° (backwards)
+        #   -π/2     = 90° clockwise (right)
+        #   3π/2     = 270° counter-clockwise (same as -π/2)
+        # 
+        # TEST PROCEDURE:
+        # 1. Place obstacle DIRECTLY IN FRONT of robot
+        # 2. Check /local_map in RViz
+        # 3. If obstacle appears:
+        #    - In front → CORRECT! ✓
+        #    - Behind → Add π (180°)
+        #    - To left → Add π/2 (90°)
+        #    - To right → Subtract π/2 (-90°)
+        #
+        self.lidar_angle_offset = np.pi  # ← CHANGE THIS VALUE!
+        
+        self.get_logger().info(f'🔧 LIDAR offset: {self.lidar_angle_offset:.4f} rad = {np.degrees(self.lidar_angle_offset):.1f}°')
         
         # QoS for LIDAR (BEST_EFFORT for hardware compatibility)
         lidar_qos = QoSProfile(

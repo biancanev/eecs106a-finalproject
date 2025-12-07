@@ -119,9 +119,15 @@ class MPCNode(Node):
         self.persistent_obstacles = []
         self.obstacle_timeout = 5.0  # Keep obstacles for 5 seconds
         
-        # CRITICAL: LIDAR frame offset (same as fast_local_grid)
-        # LIDAR frame rotated 90° clockwise relative to Cartographer
-        self.lidar_angle_offset = -np.pi/2  # -90° (90° clockwise)
+        # CRITICAL: LIDAR frame offset (MUST MATCH fast_local_grid.py!)
+        # Set to same value as fast_local_grid.py
+        self.lidar_angle_offset = np.pi  # 180° - LIDAR backwards
+        
+        # Emergency recovery state machine
+        self.emergency_state = 'NORMAL'  # NORMAL, BACKUP, ROTATE, RECOVERY
+        self.emergency_start_time = None
+        self.backup_duration = 1.0  # Back up for 1 second
+        self.rotate_duration = 2.0  # Rotate for up to 2 seconds to find clear path
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
         self.prev_state = None  # Previous state for velocity estimation
@@ -629,6 +635,56 @@ class MPCNode(Node):
         
         return obstacles
     
+    def handle_emergency_recovery(self):
+        """Handle emergency backup and recovery"""
+        elapsed = (self.get_clock().now() - self.emergency_start_time).nanoseconds / 1e9
+        twist = Twist()
+        
+        if self.emergency_state == 'BACKUP':
+            # Phase 1: Back up from obstacle
+            if elapsed < self.backup_duration:
+                twist.linear.x = -0.1  # Reverse at 10cm/s
+                twist.angular.z = 0.0
+                self.get_logger().info(f'⬅️ BACKING UP... ({elapsed:.1f}s)')
+            else:
+                # Done backing up, start rotating to find clear path
+                self.emergency_state = 'ROTATE'
+                self.emergency_start_time = self.get_clock().now()
+                self.get_logger().info('🔄 Looking for clear path...')
+        
+        elif self.emergency_state == 'ROTATE':
+            # Phase 2: Rotate to find clear direction
+            if elapsed < self.rotate_duration:
+                # Check if path ahead is clear
+                if not self.check_immediate_collision():
+                    # Found clear path!
+                    self.emergency_state = 'RECOVERY'
+                    self.get_logger().info('✅ Clear path found! Resuming...')
+                else:
+                    # Keep rotating
+                    twist.linear.x = 0.0
+                    twist.angular.z = 0.5  # Rotate at 0.5 rad/s
+                    self.get_logger().info(f'🔄 Rotating to find path... ({elapsed:.1f}s)')
+            else:
+                # Couldn't find clear path, try backing up more
+                self.emergency_state = 'BACKUP'
+                self.emergency_start_time = self.get_clock().now()
+                self.get_logger().warn('⚠️ No clear path found, backing up more...')
+        
+        elif self.emergency_state == 'RECOVERY':
+            # Phase 3: Slowly resume - let MPC take over
+            if elapsed < 0.5:
+                # Brief pause before resuming
+                twist.linear.x = 0.0
+                twist.angular.z = 0.0
+            else:
+                # Resume normal operation
+                self.emergency_state = 'NORMAL'
+                self.get_logger().info('🚀 Resuming normal navigation')
+                return
+        
+        self.cmd_pub.publish(twist)
+    
     def check_immediate_collision(self):
         """Check if obstacle is directly ahead within emergency distance"""
         if self.latest_scan is None or self.seeker_state is None:
@@ -779,13 +835,17 @@ class MPCNode(Node):
         if self.seeker_state is None:
             return
         
-        # EMERGENCY STOP: Check for immediate collision danger
+        # EMERGENCY RECOVERY SYSTEM
+        if self.emergency_state != 'NORMAL':
+            self.handle_emergency_recovery()
+            return
+        
+        # Check for immediate collision danger
         if self.check_immediate_collision():
-            self.get_logger().error('🚨 EMERGENCY STOP: Obstacle directly ahead!')
-            twist = Twist()
-            twist.linear.x = 0.0
-            twist.angular.z = 0.0
-            self.cmd_pub.publish(twist)
+            self.get_logger().error('🚨 EMERGENCY: Obstacle ahead! Starting backup...')
+            self.emergency_state = 'BACKUP'
+            self.emergency_start_time = self.get_clock().now()
+            self.handle_emergency_recovery()
             return
         
         # For single robot navigation, use goal point if target not available
