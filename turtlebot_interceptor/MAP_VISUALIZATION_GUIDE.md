@@ -242,3 +242,4 @@ ros2 run tf2_ros tf2_echo map base_scan
 - Gray voxels (unknown) in unscanned areas
 - Map updates in real-time as robot scans
 
+

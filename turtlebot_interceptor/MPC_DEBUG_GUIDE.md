@@ -179,3 +179,4 @@ obstacles = None  # Disable obstacles for testing
 - Verify goal coordinates are correct
 - Check coordinate frames match
 
+

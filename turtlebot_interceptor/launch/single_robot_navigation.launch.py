@@ -46,70 +46,77 @@ def generate_launch_description():
             output='screen'
         ),
         
-        # Simple pose publisher (for SLAM node - uses odometry or static pose)
-        # This provides pose until MCL initializes and takes over
+        # EKF Pose Estimator (HIGH-PRECISION STATE ESTIMATION)
+        # Fuses IMU + Magnetometer + Wheel Encoders for true robot dynamics
+        # This is the SOURCE OF TRUTH for robot pose/velocity
+        # Cartographer will use this pose for mapping
         Node(
             package='turtlebot_interceptor',
-            executable='simple_pose_publisher',
-            name='simple_pose_publisher',
+            executable='ekf_pose_estimator',
+            name='ekf_pose_estimator',
             parameters=[{
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'use_odom': True,  # Use /odom if available, else static pose
-                'static_pose': False,
             }],
             output='screen'
         ),
         
-        # LIDAR processor node (processes raw LIDAR data)
-        # Based on lab4 patterns
+        # Cartographer SLAM (ENVIRONMENT MAPPING)
+        # Uses EKF pose + LIDAR to build accurate map
+        # EKF provides precise robot state, Cartographer builds the environment model
+        # This is MAPPING ONLY - pose comes from EKF above
         Node(
-            package='turtlebot_interceptor',
-            executable='lidar_processor_node',
-            name='lidar_processor_node',
+            package='cartographer_ros',
+            executable='cartographer_node',
+            name='cartographer_node',
+            arguments=[
+                '-configuration_directory', '/opt/ros/humble/share/turtlebot3_cartographer/config',
+                '-configuration_basename', 'turtlebot3_lds_2d.lua'
+            ],
+            parameters=[{
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+                # Tell Cartographer to trust the EKF odometry more
+                'tracking_frame': 'base_footprint',
+                'published_frame': 'map',
+            }],
+            remappings=[
+                # CRITICAL: Cartographer uses EKF's refined odometry (not raw wheel encoders)
+                # EKF fuses IMU + Mag + Encoders → publishes /odom_ekf
+                # This gives Cartographer the TRUE robot state for accurate mapping
+                ('/odom', '/odom_ekf'),
+            ],
+            output='screen'
+        ),
+        
+        # Cartographer occupancy grid node (converts Cartographer's map to OccupancyGrid)
+        Node(
+            package='cartographer_ros',
+            executable='cartographer_occupancy_grid_node',
+            name='cartographer_occupancy_grid_node',
+            arguments=['-resolution', '0.02'],  # 2cm resolution for small obstacle detection
             parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
             output='screen'
         ),
         
-        # SLAM node (log-odds occupancy grid mapping)
-        # Based on lab6/mapping patterns - high resolution for small cone detection
-        Node(
-            package='turtlebot_interceptor',
-            executable='slam_node',
-            name='slam_node',
-            parameters=[{
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'map_width': 200,  # Increased for higher resolution coverage
-                'map_height': 200,  # Increased for higher resolution coverage
-                'resolution': 0.02,  # 2cm resolution (higher = smaller voxels, better for small cones)
-                'origin_x': -2.0,  # Adjusted for new map size
-                'origin_y': -2.0,  # Adjusted for new map size
-                'log_odds_free': -0.8,  # Stronger free space evidence
-                'log_odds_occupied': 1.2,  # Stronger occupied evidence (better for small objects)
-                'log_odds_min': -3.0,
-                'log_odds_max': 3.0,
-                'occupancy_threshold': 0.2,  # Lower threshold = more sensitive to obstacles
-            }],
-            output='screen'
-        ),
-        
         # MCL node (localization using map and LIDAR)
-        # Based on lab4 patterns
-        Node(
-            package='turtlebot_interceptor',
-            executable='mcl_node',
-            name='mcl_node',
-            parameters=[{
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'num_particles': 300,
-                'motion_noise_x': 0.02,
-                'motion_noise_y': 0.02,
-                'motion_noise_theta': 0.01,
-                'max_range': 3.5,
-                'min_range': 0.25,
-                'resample_threshold': 0.98,
-            }],
-            output='screen'
-        ),
+        # OPTIONAL: Cartographer already provides pose tracking
+        # Can disable this and use Cartographer's pose directly from /tracked_pose
+        # For now, keep it for compatibility with existing MPC code that expects /amcl_pose
+        # Node(
+        #     package='turtlebot_interceptor',
+        #     executable='mcl_node',
+        #     name='mcl_node',
+        #     parameters=[{
+        #         'use_sim_time': LaunchConfiguration('use_sim_time'),
+        #         'num_particles': 300,
+        #         'motion_noise_x': 0.02,
+        #         'motion_noise_y': 0.02,
+        #         'motion_noise_theta': 0.01,
+        #         'max_range': 3.5,
+        #         'min_range': 0.25,
+        #         'resample_threshold': 0.98,
+        #     }],
+        #     output='screen'
+        # ),
         
         # MPC node (control to goal point)
         # Based on lab8 patterns - simplified for single goal point
