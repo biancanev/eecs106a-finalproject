@@ -126,8 +126,12 @@ class MPCNode(Node):
         # Emergency recovery state machine
         self.emergency_state = 'NORMAL'  # NORMAL, BACKUP, ROTATE, RECOVERY
         self.emergency_start_time = None
-        self.backup_duration = 1.0  # Back up for 1 second
-        self.rotate_duration = 2.0  # Rotate for up to 2 seconds to find clear path
+        self.backup_duration = 1.5  # Back up for 1.5 seconds (longer to get more space)
+        self.rotate_duration = 3.0  # Rotate for up to 3 seconds to find clear path
+        
+        # Track safe trajectory for backing up along known-good path
+        self.trajectory_history = []  # Store recent positions
+        self.max_history_length = 50  # Keep last 5 seconds at 10Hz
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
         self.prev_state = None  # Previous state for velocity estimation
@@ -636,16 +640,46 @@ class MPCNode(Node):
         return obstacles
     
     def handle_emergency_recovery(self):
-        """Handle emergency backup and recovery"""
+        """Handle emergency backup and recovery along known-safe path"""
         elapsed = (self.get_clock().now() - self.emergency_start_time).nanoseconds / 1e9
         twist = Twist()
         
         if self.emergency_state == 'BACKUP':
-            # Phase 1: Back up from obstacle
+            # Phase 1: Back up along known-safe trajectory
             if elapsed < self.backup_duration:
-                twist.linear.x = -0.1  # Reverse at 10cm/s
-                twist.angular.z = 0.0
-                self.get_logger().info(f'⬅️ BACKING UP... ({elapsed:.1f}s)')
+                # Use trajectory history to back up along previous path
+                # The path we took to get here is guaranteed safe
+                if len(self.trajectory_history) > 5:
+                    # Get heading back along our path
+                    current_x = self.seeker_state[0]
+                    current_y = self.seeker_state[1]
+                    # Look at position from 0.5s ago (5 steps at 10Hz)
+                    prev_pos = self.trajectory_history[-5]
+                    
+                    # Calculate direction back to previous position
+                    dx = prev_pos['x'] - current_x
+                    dy = prev_pos['y'] - current_y
+                    
+                    # If significant distance, align to back up along that path
+                    if np.sqrt(dx*dx + dy*dy) > 0.05:
+                        target_heading = np.arctan2(dy, dx)
+                        current_heading = self.seeker_state[2]
+                        heading_error = target_heading - current_heading
+                        heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
+                        
+                        # Gentle turn correction while backing up
+                        twist.linear.x = -0.15  # Faster reverse (15cm/s)
+                        twist.angular.z = 0.5 * heading_error  # Proportional heading correction
+                    else:
+                        # No history or too close, just back up straight
+                        twist.linear.x = -0.15
+                        twist.angular.z = 0.0
+                else:
+                    # No history, back up straight
+                    twist.linear.x = -0.15
+                    twist.angular.z = 0.0
+                
+                self.get_logger().info(f'⬅️ BACKING UP along safe path... ({elapsed:.1f}s)')
             else:
                 # Done backing up, start rotating to find clear path
                 self.emergency_state = 'ROTATE'
@@ -985,12 +1019,24 @@ class MPCNode(Node):
         twist.angular.z = float(omega_cmd)
         self.cmd_pub.publish(twist)
         
+        # Record successful position in trajectory history (for safe backup)
+        if self.seeker_state is not None:
+            self.trajectory_history.append({
+                'x': self.seeker_state[0],
+                'y': self.seeker_state[1],
+                'theta': self.seeker_state[2]
+            })
+            # Keep only recent history
+            if len(self.trajectory_history) > self.max_history_length:
+                self.trajectory_history.pop(0)
+        
         # SAFETY FILTER: Check if command would cause collision
         if not self.is_command_safe(v_cmd, omega_cmd):
-            self.get_logger().error('🛑 SAFETY FILTER: Command rejected - would cause collision!')
-            twist.linear.x = 0.0
-            twist.angular.z = 0.0
-            self.cmd_pub.publish(twist)
+            self.get_logger().error('🛑 SAFETY FILTER: MPC planned unsafe path! Starting backup...')
+            # Trigger emergency backup - we know the path behind is safe
+            self.emergency_state = 'BACKUP'
+            self.emergency_start_time = self.get_clock().now()
+            self.handle_emergency_recovery()
             return
         
         # Visualize MPC predicted trajectory
