@@ -99,8 +99,12 @@ class MPCNode(Node):
             lidar_qos
         )
 
-        # Publisher
+        # Publishers
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        
+        # Trajectory visualization
+        from visualization_msgs.msg import Marker
+        self.traj_pub = self.create_publisher(Marker, '/mpc_trajectory', 10)
 
         # State
         self.seeker_pose = None
@@ -116,7 +120,8 @@ class MPCNode(Node):
         self.obstacle_timeout = 5.0  # Keep obstacles for 5 seconds
         
         # CRITICAL: LIDAR frame offset (same as fast_local_grid)
-        self.lidar_angle_offset = np.pi  # 180 degrees - LIDAR mounted backwards
+        # Match Cartographer's TF convention - let ROS handle frame transforms
+        self.lidar_angle_offset = 0.0  # TF system handles base_scan → base_link
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
         self.prev_state = None  # Previous state for velocity estimation
@@ -506,39 +511,62 @@ class MPCNode(Node):
         return obstacles
     
     def extract_map_obstacles_from_grid(self, grid_map):
-        """Extract obstacles from any occupancy grid (fast local or Cartographer)"""
+        """Extract obstacles from occupancy grid with clustering to reduce noise"""
         if grid_map is None or self.seeker_state is None:
             return []
         
         robot_x = self.seeker_state[0]
         robot_y = self.seeker_state[1]
         
-        # Extract ALL occupied cells within range
-        obstacles = []
+        # Extract occupied cells
         width = grid_map.info.width
         height = grid_map.info.height
         resolution = grid_map.info.resolution
         origin_x = grid_map.info.origin.position.x
         origin_y = grid_map.info.origin.position.y
         
-        # Smaller radius for local grid (more precise)
-        obstacle_radius = 0.2  # 20cm
-        
+        # First pass: find all occupied cells within range
+        occupied_cells = []
         for i in range(width * height):
-            if grid_map.data[i] > 50:  # Occupied
+            if grid_map.data[i] > 65:  # Higher threshold to reduce noise
                 gx = i % width
                 gy = i // width
                 world_x = gx * resolution + origin_x + resolution / 2
                 world_y = gy * resolution + origin_y + resolution / 2
                 
-                # Distance from robot
                 dx = world_x - robot_x
                 dy = world_y - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
                 
-                # Only within 2m (local awareness)
-                if dist < 2.0 and dist > 0.02:
-                    obstacles.append((np.array([world_x, world_y]), obstacle_radius))
+                if 0.1 < dist < 2.0:  # Within 2m, ignore cells on robot
+                    occupied_cells.append((world_x, world_y))
+        
+        # Second pass: cluster nearby cells into single obstacles
+        obstacles = []
+        cluster_dist = 0.15  # 15cm clustering
+        obstacle_radius = 0.25  # 25cm radius
+        
+        used = set()
+        for i, (cx, cy) in enumerate(occupied_cells):
+            if i in used:
+                continue
+            
+            # Find all cells within cluster distance
+            cluster = [(cx, cy)]
+            used.add(i)
+            
+            for j, (ox, oy) in enumerate(occupied_cells):
+                if j in used:
+                    continue
+                if np.sqrt((cx - ox)**2 + (cy - oy)**2) < cluster_dist:
+                    cluster.append((ox, oy))
+                    used.add(j)
+            
+            # Use cluster center as obstacle
+            if len(cluster) >= 2:  # At least 2 cells to be real obstacle
+                center_x = sum(x for x, y in cluster) / len(cluster)
+                center_y = sum(y for x, y in cluster) / len(cluster)
+                obstacles.append((np.array([center_x, center_y]), obstacle_radius))
         
         return obstacles
     
@@ -600,6 +628,69 @@ class MPCNode(Node):
                 )
         
         return obstacles
+    
+    def check_immediate_collision(self):
+        """Check if obstacle is directly ahead within emergency distance"""
+        if self.latest_scan is None or self.seeker_state is None:
+            return False
+        
+        # Check LIDAR rays in front (±30 degrees)
+        ranges = self.latest_scan.ranges
+        angle_min = self.latest_scan.angle_min
+        angle_increment = self.latest_scan.angle_increment
+        
+        emergency_dist = 0.4  # 40cm emergency threshold
+        front_range = np.pi / 6  # ±30 degrees
+        
+        for i, r in enumerate(ranges):
+            if not np.isfinite(r) or r > self.latest_scan.range_max:
+                continue
+            
+            angle = angle_min + i * angle_increment + self.lidar_angle_offset
+            
+            # Check if ray is pointing forward
+            if abs(angle) < front_range:
+                if r < emergency_dist:
+                    return True
+        
+        return False
+    
+    def visualize_trajectory(self):
+        """Publish MPC predicted trajectory for visualization"""
+        if not hasattr(self.mpc, 'X_sol') or self.mpc.X_sol is None:
+            return
+        
+        from visualization_msgs.msg import Marker
+        from geometry_msgs.msg import Point
+        
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'mpc_trajectory'
+        marker.id = 0
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        
+        # Line properties
+        marker.scale.x = 0.05  # Line width
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+        
+        # Add points from MPC solution
+        try:
+            X_sol = self.mpc.X_sol.value
+            for i in range(X_sol.shape[1]):
+                p = Point()
+                p.x = float(X_sol[0, i])
+                p.y = float(X_sol[1, i])
+                p.z = 0.1
+                marker.points.append(p)
+        except:
+            pass
+        
+        self.traj_pub.publish(marker)
     
     def merge_obstacles(self, obstacles):
         """Remove duplicate obstacles and limit count"""
@@ -686,6 +777,15 @@ class MPCNode(Node):
             return  # Don't run MPC until startup delay is over
         
         if self.seeker_state is None:
+            return
+        
+        # EMERGENCY STOP: Check for immediate collision danger
+        if self.check_immediate_collision():
+            self.get_logger().error('🚨 EMERGENCY STOP: Obstacle directly ahead!')
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.angular.z = 0.0
+            self.cmd_pub.publish(twist)
             return
         
         # For single robot navigation, use goal point if target not available
@@ -824,6 +924,58 @@ class MPCNode(Node):
         twist.angular.y = 0.0
         twist.angular.z = float(omega_cmd)
         self.cmd_pub.publish(twist)
+        
+        # SAFETY FILTER: Check if command would cause collision
+        if not self.is_command_safe(v_cmd, omega_cmd):
+            self.get_logger().error('🛑 SAFETY FILTER: Command rejected - would cause collision!')
+            twist.linear.x = 0.0
+            twist.angular.z = 0.0
+            self.cmd_pub.publish(twist)
+            return
+        
+        # Visualize MPC predicted trajectory
+        self.visualize_trajectory()
+    
+    def is_command_safe(self, v_cmd, omega_cmd):
+        """Check if executing this command would cause collision"""
+        if self.latest_scan is None or self.seeker_state is None:
+            return True  # No sensor data, allow
+        
+        # Simulate one step forward with this command
+        dt = 0.1
+        x = self.seeker_state[0]
+        y = self.seeker_state[1]
+        theta = self.seeker_state[2]
+        
+        # Predicted position after dt
+        new_theta = theta + omega_cmd * dt
+        new_x = x + v_cmd * np.cos(new_theta) * dt
+        new_y = y + v_cmd * np.sin(new_theta) * dt
+        
+        # Check LIDAR for obstacles in that direction
+        ranges = self.latest_scan.ranges
+        angle_min = self.latest_scan.angle_min
+        angle_increment = self.latest_scan.angle_increment
+        
+        safety_dist = 0.35  # 35cm safety threshold
+        
+        # Check direction we're moving
+        move_direction = np.arctan2(new_y - y, new_x - x) - theta
+        move_direction = np.arctan2(np.sin(move_direction), np.cos(move_direction))  # Wrap
+        
+        for i, r in enumerate(ranges):
+            if not np.isfinite(r) or r > self.latest_scan.range_max:
+                continue
+            
+            angle = angle_min + i * angle_increment + self.lidar_angle_offset
+            angle = np.arctan2(np.sin(angle), np.cos(angle))  # Wrap
+            
+            # Check if ray is in our movement direction (±45 degrees)
+            if abs(angle - move_direction) < np.pi / 4:
+                if r < safety_dist:
+                    return False  # Obstacle in path!
+        
+        return True  # Safe
     
     def fallback_control(self, x0, target_seq):
         """Fallback proportional control (lab8 pattern)"""

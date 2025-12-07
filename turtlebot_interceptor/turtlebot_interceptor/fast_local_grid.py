@@ -52,10 +52,11 @@ class FastLocalGrid(Node):
         self.robot_y = 0.0
         self.robot_theta = 0.0
         
-        # CRITICAL: LIDAR frame offset (if LIDAR is rotated relative to base_link)
-        # Common issues: LIDAR mounted backwards (180°) or sideways (90°/-90°)
-        # Adjust this if obstacles appear rotated
-        self.lidar_angle_offset = np.pi  # 180 degrees - LIDAR is backwards!
+        # CRITICAL: LIDAR frame offset
+        # Cartographer handles TF transforms automatically via base_scan → base_link
+        # We should match Cartographer's convention!
+        # Set to 0.0 to match Cartographer's frame handling
+        self.lidar_angle_offset = 0.0  # Let ROS TF handle frame transforms
         
         # QoS for LIDAR (BEST_EFFORT for hardware compatibility)
         lidar_qos = QoSProfile(
@@ -104,8 +105,9 @@ class FastLocalGrid(Node):
             f'Fast Local Grid: {self.width}x{self.height} cells ({self.grid_size}m x {self.grid_size}m), '
             f'resolution={self.resolution}m\n'
             f'  Mode: Bayesian fusion (Cartographer prior + LIDAR updates)\n'
+            f'  Frame: map (aligned with Cartographer)\n'
             f'  LIDAR angle offset: {np.degrees(self.lidar_angle_offset):.1f}° '
-            f'(adjust if obstacles appear rotated)'
+            f'(matching Cartographer TF convention)'
         )
     
     def pose_callback(self, msg: PoseWithCovarianceStamped):
