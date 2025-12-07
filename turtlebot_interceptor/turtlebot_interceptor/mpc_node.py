@@ -8,6 +8,7 @@ from rclpy.node import Node
 from rclpy.exceptions import ParameterAlreadyDeclaredException
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid
+from sensor_msgs.msg import LaserScan
 import numpy as np
 import math
 import transforms3d.euler as euler
