@@ -35,6 +35,8 @@ setup(
                 'slam_node = turtlebot_interceptor.slam_node:main',
                 'lidar_processor_node = turtlebot_interceptor.lidar_processor_node:main',
                 'simple_pose_publisher = turtlebot_interceptor.simple_pose_publisher:main',  # For LIDAR validation
+                'ekf_pose_estimator = turtlebot_interceptor.ekf_pose_estimator:main',  # EKF sensor fusion (IMU + Mag + Encoders)
+                'cartographer_pose_bridge = turtlebot_interceptor.cartographer_pose_bridge:main',  # Bridge Cartographer pose to /amcl_pose
                 'navigation_visualizer = turtlebot_interceptor.navigation_visualizer_node:main',  # RViz visualization
                 'animated_sim = turtlebot_interceptor.animated_sim:main',  # Standalone simulation
             ],
