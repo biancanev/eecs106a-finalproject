@@ -73,6 +73,21 @@ class MPCNode(Node):
             self.map_callback,
             10
         )
+        
+        # CRITICAL: Subscribe to LIDAR for immediate obstacle detection
+        # Map updates slowly, LIDAR gives instant detection
+        from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
+        lidar_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT
+        )
+        self.lidar_sub = self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.lidar_callback,
+            lidar_qos
+        )
 
         # Publisher
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -82,6 +97,7 @@ class MPCNode(Node):
         self.seeker_cov = None
         self.target_pose = None
         self.target_cov = None
+        self.latest_scan = None  # Store latest LIDAR scan
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
         self.prev_state = None  # Previous state for velocity estimation
@@ -128,6 +144,10 @@ class MPCNode(Node):
             self.get_logger().info(
                 f'MAP UPDATE: {occupied_count} occupied cells'
             )
+    
+    def lidar_callback(self, msg: LaserScan):
+        """Store latest LIDAR scan for immediate obstacle detection"""
+        self.latest_scan = msg
 
     def seeker_callback(self, msg: PoseWithCovarianceStamped):
         """Update seeker state (lab8 pattern - improved velocity estimation)"""
@@ -389,8 +409,68 @@ class MPCNode(Node):
         return obstacles
     
     def compute_obstacles(self):
-        """Extract obstacles - EVERY occupied cell within range"""
-        if self.seeker_state is None or self.map is None:
+        """Extract obstacles from LIDAR (immediate) + Map (persistent)"""
+        if self.seeker_state is None:
+            return []
+        
+        obstacles = []
+        
+        # PART 1: LIDAR obstacles (IMMEDIATE detection)
+        if self.latest_scan is not None:
+            obstacles.extend(self.extract_lidar_obstacles())
+        
+        # PART 2: Map obstacles (PERSISTENT from Cartographer)
+        if self.map is not None:
+            obstacles.extend(self.extract_map_obstacles())
+        
+        # Remove duplicates and limit total
+        obstacles = self.merge_obstacles(obstacles)
+        
+        return obstacles
+    
+    def extract_lidar_obstacles(self):
+        """Convert LIDAR scan to immediate obstacles"""
+        if self.latest_scan is None or self.seeker_state is None:
+            return []
+        
+        obstacles = []
+        robot_x = self.seeker_state[0]
+        robot_y = self.seeker_state[1]
+        robot_theta = self.seeker_state[2]
+        
+        # LIDAR scan parameters
+        angle_min = self.latest_scan.angle_min
+        angle_increment = self.latest_scan.angle_increment
+        ranges = self.latest_scan.ranges
+        range_max = self.latest_scan.range_max
+        
+        # Convert LIDAR points to obstacles
+        obstacle_radius = 0.25  # 25cm radius for LIDAR-detected obstacles
+        
+        for i, r in enumerate(ranges):
+            # Skip invalid readings
+            if r < 0.1 or r > range_max or not np.isfinite(r):
+                continue
+            
+            # Only consider obstacles within 2m
+            if r > 2.0:
+                continue
+            
+            # Angle of this ray in robot frame
+            ray_angle = angle_min + i * angle_increment
+            
+            # Convert to world frame
+            world_angle = robot_theta + ray_angle
+            obstacle_x = robot_x + r * np.cos(world_angle)
+            obstacle_y = robot_y + r * np.sin(world_angle)
+            
+            obstacles.append((np.array([obstacle_x, obstacle_y]), obstacle_radius))
+        
+        return obstacles
+    
+    def extract_map_obstacles(self):
+        """Extract obstacles from Cartographer map (persistent)"""
+        if self.map is None or self.seeker_state is None:
             return []
         
         robot_x = self.seeker_state[0]
@@ -446,6 +526,48 @@ class MPCNode(Node):
                 )
         
         return obstacles
+    
+    def merge_obstacles(self, obstacles):
+        """Remove duplicate obstacles and limit count"""
+        if len(obstacles) == 0:
+            return []
+        
+        robot_x = self.seeker_state[0]
+        robot_y = self.seeker_state[1]
+        
+        # Sort by distance to robot
+        obstacles.sort(key=lambda obs: np.sqrt((obs[0][0]-robot_x)**2 + (obs[0][1]-robot_y)**2))
+        
+        # Remove duplicates (obstacles within 0.1m of each other)
+        unique_obstacles = []
+        for obs in obstacles:
+            # Check if this obstacle is too close to any existing one
+            is_duplicate = False
+            for existing in unique_obstacles:
+                dist = np.sqrt((obs[0][0]-existing[0][0])**2 + (obs[0][1]-existing[0][1])**2)
+                if dist < 0.15:  # Within 15cm = duplicate
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                unique_obstacles.append(obs)
+        
+        # Limit to closest 50 obstacles (performance)
+        if len(unique_obstacles) > 50:
+            unique_obstacles = unique_obstacles[:50]
+        
+        # DEBUG logging
+        if not hasattr(self, '_obstacle_merge_count'):
+            self._obstacle_merge_count = 0
+        self._obstacle_merge_count += 1
+        if self._obstacle_merge_count % 20 == 0:
+            lidar_count = sum(1 for obs in obstacles if obs[1] <= 0.26)  # LIDAR has ~0.25m radius
+            map_count = len(obstacles) - lidar_count
+            self.get_logger().info(
+                f"OBSTACLES: {lidar_count} LIDAR + {map_count} map → {len(unique_obstacles)} after merge"
+            )
+        
+        return unique_obstacles
 
     def predict_target_trajectory(self):
         """Predict target trajectory over MPC horizon (lab8 pattern - improved prediction)"""
