@@ -27,7 +27,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'goal_y',
-            default_value='1.5',
+            default_value='0',
             description='Goal Y position (meters)'
         ),
         
@@ -74,29 +74,17 @@ def generate_launch_description():
             output='screen'
         ),
         
-        # Cartographer SLAM (Google's production SLAM system)
-        # Provides /map topic for MPC obstacle avoidance
-        Node(
-            package='cartographer_ros',
-            executable='cartographer_node',
-            name='cartographer_node',
-            arguments=[
-                '-configuration_directory', '/opt/ros/humble/share/turtlebot3_cartographer/config',
-                '-configuration_basename', 'turtlebot3_lds_2d.lua'
-            ],
-            parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
-            output='screen'
-        ),
-        
-        # Cartographer occupancy grid node (publishes /map)
-        Node(
-            package='cartographer_ros',
-            executable='cartographer_occupancy_grid_node',
-            name='cartographer_occupancy_grid_node',
-            arguments=['-resolution', '0.05', '-publish_period_sec', '1.0'],  # 5cm resolution, 1Hz updates
-            parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
-            output='screen'
-        ),
+        # ============================================================
+        # IMPORTANT: Launch Cartographer SEPARATELY before this!
+        # ============================================================
+        # Run this command FIRST (in a separate terminal):
+        #   ros2 launch turtlebot3_cartographer cartographer.launch.py
+        #
+        # Then run this launch file:
+        #   ros2 launch turtlebot_interceptor single_robot_navigation.launch.py
+        #
+        # Cartographer will publish /map which MPC uses for obstacles
+        # ============================================================
         
         # MCL node (localization using map and LIDAR)
         # OPTIONAL: Cartographer already provides pose tracking
