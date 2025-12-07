@@ -486,7 +486,7 @@ class MPCNode(Node):
         range_max = self.latest_scan.range_max
         
         # Convert LIDAR points to obstacles
-        obstacle_radius = 0.25  # 25cm radius for LIDAR-detected obstacles
+        obstacle_radius = 0.5  # 50cm radius - DOUBLED for safety margin!
         
         for i, r in enumerate(ranges):
             # Skip invalid readings
@@ -554,7 +554,7 @@ class MPCNode(Node):
         # Second pass: cluster nearby cells into single obstacles
         obstacles = []
         cluster_dist = 0.15  # 15cm clustering
-        obstacle_radius = 0.25  # 25cm radius
+        obstacle_radius = 0.5  # 50cm radius - DOUBLED for safety!
         
         used = set()
         for i, (cx, cy) in enumerate(occupied_cells):
@@ -596,8 +596,8 @@ class MPCNode(Node):
         origin_x = self.map.info.origin.position.x
         origin_y = self.map.info.origin.position.y
         
-        # CRITICAL: Large obstacle radius to ensure avoidance
-        obstacle_radius = 0.4  # 40cm - very large to ensure no collisions
+        # CRITICAL: MASSIVE obstacle radius to ensure avoidance
+        obstacle_radius = 0.6  # 60cm - HUGE margin!
         
         for i in range(width * height):
             if self.map.data[i] > 30:  # Occupied
@@ -729,7 +729,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.4  # 40cm emergency threshold
+        emergency_dist = 0.6  # 60cm emergency threshold - INCREASED!
         front_range = np.pi / 6  # ±30 degrees
         
         for i, r in enumerate(ranges):
@@ -1063,7 +1063,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        safety_dist = 0.35  # 35cm safety threshold
+        safety_dist = 0.5  # 50cm safety threshold - INCREASED!
         
         # Check direction we're moving
         move_direction = np.arctan2(new_y - y, new_x - x) - theta
