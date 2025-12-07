@@ -161,9 +161,9 @@ class EKFPoseEstimator(Node):
         # Update measurement (angular velocity)
         self.update_imu_gyro(omega_body[2])
         
-        # Update measurement (linear acceleration) - only if significant
-        if np.linalg.norm(accel_true[0:2]) > 0.1:  # Threshold to avoid noise
-            self.update_imu_accel(accel_true[0:2])
+        # DISABLED: Acceleration updates cause drift - rely on wheel odometry instead
+        # if np.linalg.norm(accel_true[0:2]) > 0.1:
+        #     self.update_imu_accel(accel_true[0:2])
     
     def mag_callback(self, msg: MagneticField):
         """Process magnetometer data for absolute heading"""
@@ -203,6 +203,13 @@ class EKFPoseEstimator(Node):
         v_x = msg.twist.twist.linear.x
         v_y = msg.twist.twist.linear.y
         omega = msg.twist.twist.angular.z
+        
+        # CRITICAL: Sanity check - if velocities are unreasonably high, robot might be stationary
+        # This prevents integrating noise when robot hasn't started moving yet
+        max_reasonable_v = 1.0  # m/s (TurtleBot max is ~0.6)
+        if abs(v_x) > max_reasonable_v or abs(v_y) > max_reasonable_v:
+            self.get_logger().warn(f'Odom velocity unreasonable: vx={v_x:.2f}, vy={v_y:.2f} - ignoring')
+            return
         
         self.odom_data = {
             'vx': v_x,
@@ -307,43 +314,10 @@ class EKFPoseEstimator(Node):
     
     def update_imu_accel(self, accel_measured):
         """EKF update step for IMU accelerometer (linear acceleration)"""
-        # Measurement model: a = dv/dt
-        # This is complex - we'll use acceleration to update velocity
-        # Simple approximation: integrate acceleration to velocity
-        # But this can drift - use with caution
-        
-        # For now, use acceleration as a weak constraint on velocity change
-        # z = [ax, ay]
-        # h(x) = (v_new - v_old) / dt ≈ a
-        
-        # Skip if dt too small
-        if self.dt < 0.001:
-            return
-        
-        # Expected acceleration from velocity change
-        # This is a simplified model - proper EKF would integrate acceleration
-        H = np.zeros((2, 6))
-        H[0, 3] = 1.0 / self.dt  # dvx/dt
-        H[1, 4] = 1.0 / self.dt  # dvy/dt
-        
-        # Innovation
-        z = accel_measured
-        z_pred = np.array([0, 0])  # Assume constant velocity (no acceleration)
-        y = z - z_pred
-        
-        # Innovation covariance
-        R_accel = np.eye(2) * self.R_imu_accel
-        S = H @ self.P @ H.T + R_accel
-        
-        # Kalman gain
-        try:
-            K = self.P @ H.T @ np.linalg.inv(S)
-        except np.linalg.LinAlgError:
-            return  # Skip if singular
-        
-        # Update state and covariance
-        self.state = self.state + K @ y
-        self.P = (np.eye(6) - K @ H) @ self.P
+        # DISABLED: Acceleration integration causes massive drift
+        # The double integration of noisy accelerometer data leads to unbounded position error
+        # We rely on wheel odometry for velocity instead
+        return
     
     def update_magnetometer(self, heading_measured):
         """EKF update step for magnetometer (absolute heading)"""

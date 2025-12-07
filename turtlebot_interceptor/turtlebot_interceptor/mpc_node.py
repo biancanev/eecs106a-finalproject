@@ -91,9 +91,9 @@ class MPCNode(Node):
         # Initialize MPC
         self.mpc = SimpleUnicycleMPC(horizon=self.N, dt=self.dt)
 
-        # Startup delay: Wait 10 seconds for LIDAR, SLAM, and MCL to initialize
+        # Startup delay: Wait 20 seconds for LIDAR, SLAM, and MCL to initialize
         self.startup_time = self.get_clock().now()
-        self.startup_delay = 10.0  # 10 seconds delay
+        self.startup_delay = 60.0  # 20 seconds delay (increased for sensor stabilization)
 
         # Timer for MPC updates
         # Start timer immediately, but check startup delay in callback
