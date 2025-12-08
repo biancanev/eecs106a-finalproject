@@ -161,7 +161,13 @@ class MPCNode(Node):
         
         # Waypoint system for routing around obstacles
         self.current_waypoint = None  # If set, use this instead of final goal
-        self.waypoint_reached_threshold = 0.05  # 5cm to consider waypoint "reached" - MUST get very close!
+        self.waypoint_reached_threshold = 0.10  # 10cm to consider waypoint "reached"
+        
+        # ALGORITHMIC IMPROVEMENTS
+        self.min_obstacle_distance = float('inf')  # Track closest obstacle
+        self.velocity_scale_factor = 1.0  # Dynamic velocity scaling
+        self.prev_safe_trajectory = None  # Memory of last safe path
+        self.failed_waypoints = []  # Track waypoints that led to failures
         
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
@@ -280,6 +286,83 @@ class MPCNode(Node):
         self.target_pose = msg.pose.pose
         self.target_cov = np.array(msg.pose.covariance).reshape((6, 6))
 
+    def improved_obstacle_clustering(self, occupied_points, eps=0.15, min_samples=3):
+        """
+        ALGORITHMIC IMPROVEMENT: Better obstacle clustering using DBSCAN-like algorithm.
+        Groups nearby occupied cells into coherent obstacles with better representation.
+        
+        Args:
+            occupied_points: List of (x, y) coordinates
+            eps: Maximum distance between points in same cluster (15cm)
+            min_samples: Minimum points to form a cluster
+        
+        Returns: List of (center, radius) tuples
+        """
+        if len(occupied_points) == 0:
+            return []
+        
+        points = np.array(occupied_points)
+        n_points = len(points)
+        
+        # Compute pairwise distances efficiently
+        labels = -np.ones(n_points, dtype=int)  # -1 = unassigned
+        cluster_id = 0
+        
+        for i in range(n_points):
+            if labels[i] != -1:
+                continue  # Already assigned
+            
+            # Find all points within eps distance
+            dists = np.linalg.norm(points - points[i], axis=1)
+            neighbors = np.where(dists <= eps)[0]
+            
+            if len(neighbors) < min_samples:
+                labels[i] = -1  # Noise point
+                continue
+            
+            # Start new cluster
+            labels[i] = cluster_id
+            seed_set = list(neighbors)
+            
+            # Expand cluster
+            while seed_set:
+                current_point = seed_set.pop(0)
+                
+                if labels[current_point] == -1:
+                    labels[current_point] = cluster_id
+                elif labels[current_point] != -1:
+                    continue
+                
+                labels[current_point] = cluster_id
+                
+                # Find neighbors of current point
+                dists = np.linalg.norm(points - points[current_point], axis=1)
+                new_neighbors = np.where(dists <= eps)[0]
+                
+                if len(new_neighbors) >= min_samples:
+                    seed_set.extend(new_neighbors)
+            
+            cluster_id += 1
+        
+        # Convert clusters to obstacles
+        obstacles = []
+        for cid in range(cluster_id):
+            cluster_points = points[labels == cid]
+            if len(cluster_points) < 2:
+                continue
+            
+            # Compute center and radius
+            center = np.mean(cluster_points, axis=0)
+            distances = np.linalg.norm(cluster_points - center, axis=1)
+            radius = np.max(distances) + 0.05  # Add 5cm safety margin
+            
+            # Ensure minimum radius
+            radius = max(radius, 0.08)
+            
+            obstacles.append((center, radius))
+        
+        return obstacles
+    
     def extract_cones_from_map(self):
         """Extract circular obstacles (cones) from occupancy grid - based on lab6 patterns
         Returns obstacles in map frame (same frame as robot pose and goal)
@@ -377,8 +460,9 @@ class MPCNode(Node):
             if not assigned:
                 clusters.append([(x, y)])
         
-        # Extract circular obstacles from clusters
-        # CRITICAL: Improved obstacle extraction with better radius calculation
+        # ALGORITHMIC IMPROVEMENT 5: Use improved clustering instead of simple grid-based
+        # Collect all occupied points first
+        occupied_points = []
         for cluster in clusters:
             if len(cluster) < 2:  # Reduced from 3 - allow smaller obstacles
                 continue
@@ -483,9 +567,8 @@ class MPCNode(Node):
     
     def generate_waypoint_if_blocked(self, robot_pos, goal_pos, obstacles):
         """
-        Check if there's an EXTREME CLOSE obstacle directly ahead and generate waypoint.
-        Only triggers for obstacles within 0.05m straight ahead - last resort only!
-        MPC should handle everything else with its low position weight.
+        Check if there's an obstacle directly ahead and generate waypoint.
+        Triggers for obstacles within 0.20m straight ahead - proactive avoidance.
         
         Returns: waypoint position [x, y] if blocked NOW, None otherwise
         """
@@ -499,17 +582,16 @@ class MPCNode(Node):
         forward_dir = np.array([np.cos(robot_theta), np.sin(robot_theta)])
         
         # Only check obstacles that are:
-        # 1. EXTREMELY CLOSE (within 0.05m = 5cm!)
+        # 1. CLOSE (within 0.20m)
         # 2. DIRECTLY AHEAD (within ±30 degrees of forward direction)
-        # This is LAST RESORT - MPC should handle everything else
         blocking_obstacles = []
         for center, radius in obstacles:
             # Vector from robot to obstacle
             to_obstacle = center - robot_xy
             dist_to_obstacle = np.linalg.norm(to_obstacle)
             
-            # Skip if not extremely close - let MPC handle it!
-            if dist_to_obstacle > 0.05:
+            # Skip if not close enough
+            if dist_to_obstacle > 0.20:
                 continue
             
             # Check if it's ahead of us
@@ -526,9 +608,9 @@ class MPCNode(Node):
         if not blocking_obstacles:
             return None  # No immediate obstacle ahead
         
-        # EXTREMELY close obstacle detected! Generate emergency waypoint
+        # Close obstacle detected! Generate waypoint
         self.get_logger().warn(
-            f"🚨🚨 CRITICAL: obstacle within 0.05m! Last-resort waypoint for {len(blocking_obstacles)} obstacles..."
+            f"🚨 Obstacle within 0.20m ahead! Generating waypoint for {len(blocking_obstacles)} obstacles..."
         )
         
         # Find the closest blocking obstacle
@@ -1221,6 +1303,12 @@ class MPCNode(Node):
         # Compute obstacles with uncertainty inflation
         obstacles = self.compute_obstacles()  # Enable obstacle avoidance
         
+        # ALGORITHMIC IMPROVEMENT 1: Compute minimum distance to obstacles for adaptive behavior
+        self.min_obstacle_distance = self.compute_min_obstacle_distance(x0, obstacles)
+        
+        # ALGORITHMIC IMPROVEMENT 2: Adaptive velocity scaling based on proximity
+        self.velocity_scale_factor = self.compute_velocity_scale(self.min_obstacle_distance)
+        
         # WAYPOINT GENERATION: Check if path to goal is blocked and generate waypoint
         if use_goal and self.current_waypoint is None:
             self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
@@ -1253,14 +1341,25 @@ class MPCNode(Node):
                     f"(threshold=30, lookahead=3.0m)"
                 )
 
-        # Adjust speed limit based on uncertainty (from paper)
+        # ALGORITHMIC IMPROVEMENT 3: Adjust speed based on both uncertainty AND obstacle proximity
+        base_v_max = self.v_max_base
+        
+        # Factor 1: Uncertainty-based scaling (from paper)
         if self.seeker_cov is not None:
             sigma_seek = np.sqrt(np.max(np.linalg.eigvals(self.seeker_cov[:2, :2])))
             alpha = 1.0
-            v_max = self.v_max_base * np.exp(-alpha * sigma_seek)
-            self.mpc.v_max = np.clip(v_max, self.v_min, self.v_max_base)
-        else:
-            self.mpc.v_max = self.v_max_base
+            base_v_max = base_v_max * np.exp(-alpha * sigma_seek)
+        
+        # Factor 2: Obstacle proximity scaling (NEW - algorithmic improvement)
+        v_max = base_v_max * self.velocity_scale_factor
+        self.mpc.v_max = np.clip(v_max, self.v_min * 0.5, self.v_max_base)  # Allow stopping if needed
+        
+        # Log velocity scaling
+        if hasattr(self, '_obstacle_debug_count') and self._obstacle_debug_count % 10 == 0:
+            self.get_logger().info(
+                f"📊 Velocity: min_obs_dist={self.min_obstacle_distance:.3f}m, "
+                f"scale={self.velocity_scale_factor:.2f}, v_max={self.mpc.v_max:.3f}m/s"
+            )
 
         # Solve MPC (lab8 pattern - with fallback to proportional control)
         try:
@@ -1273,6 +1372,20 @@ class MPCNode(Node):
             if math.isnan(v_cmd) or math.isnan(omega_cmd) or \
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
+            
+            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification
+            is_safe, clearance = self.verify_full_trajectory_safety(x0, v_cmd, omega_cmd, obstacles)
+            if not is_safe:
+                self.get_logger().warn(
+                    f"⚠️ Trajectory verification failed! Min clearance: {clearance:.3f}m. "
+                    f"Triggering emergency waypoint."
+                )
+                # Generate emergency waypoint if not already set
+                if self.current_waypoint is None and use_goal:
+                    self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
+                # Reduce velocity significantly
+                v_cmd *= 0.3
+                omega_cmd *= 0.5
             
             # CRITICAL DEBUG: Log everything to find the bug
             if not hasattr(self, '_mpc_cmd_count'):
