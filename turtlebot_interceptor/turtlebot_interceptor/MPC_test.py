@@ -47,11 +47,11 @@ class SimpleUnicycleMPC:
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - OPTIMIZED for COMMITTED trajectories (less hesitant)
-        self.Qp_base = 100.0  # MUCH STRONGER goal tracking - commit to path!
+        # Base weights - OPTIMIZED for COMMITTED trajectories (GO STRAIGHT!)
+        self.Qp_base = 200.0  # EXTREMELY STRONG goal tracking - COMMIT TO GOAL!
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.01  # EVEN LOWER acceleration penalty - allow quick movements
-        self.Rw_base = 0.002  # EVEN LOWER turn penalty - commit to curves!
+        self.Ra_base = 0.005  # ULTRA LOW acceleration penalty - GO FAST!
+        self.Rw_base = 0.001  # ULTRA LOW turn penalty - GO STRAIGHT!
         
         # Current adaptive weights
         self.Qp = self.Qp_base
