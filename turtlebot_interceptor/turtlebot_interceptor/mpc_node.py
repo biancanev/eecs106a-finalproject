@@ -745,38 +745,31 @@ class MPCNode(Node):
     
     def compute_obstacles(self):
         """
-        Extract obstacles with PRIORITY ordering.
-        Priority: Fast Local Grid > Scan-Matched Points > Raw LIDAR
+        Extract obstacles from Fast Local Grid ONLY.
+        Fast Local Grid stores obstacles in WORLD coordinates (map frame) - no drift!
+        Point cloud causes drift issues, so we use Fast Local Grid exclusively.
         """
         if self.seeker_state is None:
             return []
         
         obstacles = []
         
-        # PRIORITY 1: Fast Local Grid (HIGHEST - persistent, reliable memory)
-        # ONLY use if we have good quality data
+        # PRIORITY 1: Fast Local Grid (ONLY SOURCE - fixed in world frame, no drift)
+        # Fast Local Grid stores obstacles in world_obstacles dictionary in WORLD coordinates
+        # These don't drift as robot moves - they're fixed in the world frame
         if self.local_map is not None:
             grid_obstacles = self.extract_map_obstacles_from_grid(self.local_map)
-            # Only use if we have reasonable number (not too many = noise)
-            if len(grid_obstacles) <= 10:  # Only use if reasonable number
-                obstacles.extend(grid_obstacles)
-                if len(grid_obstacles) > 0 and not hasattr(self, '_grid_priority_logged'):
-                    self.get_logger().info(f"✓ Using Fast Local Grid: {len(grid_obstacles)} obstacles")
-                    self._grid_priority_logged = True
+            obstacles.extend(grid_obstacles)
+            if len(grid_obstacles) > 0 and not hasattr(self, '_grid_priority_logged'):
+                self.get_logger().info(f"✓ Using Fast Local Grid ONLY: {len(grid_obstacles)} obstacles (world frame, no drift)")
+                self._grid_priority_logged = True
         
-        # PRIORITY 2: Cartographer scan-matched points (MEDIUM - accurate but can be sparse)
-        # ONLY use if we don't have too many obstacles already
-        if self.matched_points is not None and len(obstacles) < 5:  # Only if we have few obstacles
-            scan_obstacles = self.extract_scan_matched_obstacles()
-            # Limit scan-matched obstacles to avoid noise
-            if len(scan_obstacles) <= 5:
-                obstacles.extend(scan_obstacles)
-        
-        # PRIORITY 3: Raw LIDAR (LOWEST - backup only, DISABLED to reduce false positives)
-        # Disable raw LIDAR - too noisy, causes false positives
-        # if self.latest_scan is not None and len(obstacles) < self.max_obstacles:
-        #     lidar_obstacles = self.extract_lidar_obstacles()
-        #     obstacles.extend(lidar_obstacles)
+        # DISABLED: Point cloud causes drift - Fast Local Grid is more reliable
+        # Fast Local Grid stores obstacles in world coordinates and doesn't drift
+        # if self.matched_points is not None and len(obstacles) < 5:
+        #     scan_obstacles = self.extract_scan_matched_obstacles()
+        #     if len(scan_obstacles) <= 5:
+        #         obstacles.extend(scan_obstacles)
         
         # Remove duplicates and limit total
         obstacles = self.merge_obstacles(obstacles)
@@ -802,25 +795,23 @@ class MPCNode(Node):
         
         try:
             # Extract points from PointCloud2
+            # CRITICAL: These points are ALREADY in MAP FRAME from Cartographer!
+            # Do NOT adjust them based on robot position - they're fixed in world coordinates
             for point in point_cloud2.read_points(self.matched_points, 
                                                   field_names=("x", "y", "z"), 
                                                   skip_nans=True):
                 px, py, pz = point
                 
-                # Distance from robot
+                # CRITICAL: Points are already in map frame - use them directly!
+                # Only compute distance for filtering, not for correction
                 dx = px - robot_x
                 dy = py - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
-
-                ux = dx / dist
-                uy = dy / dist
-
-                corrected_x = px + ux * obstacle_radius
-                corrected_y = py + uy * obstacle_radius
                 
                 # Only within 1.0m (reduced from 2.0m to avoid false positives)
+                # Obstacle position is FIXED in map frame - don't adjust it!
                 if 0.15 < dist < 1.0:
-                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
+                    obstacles.append((np.array([px, py]), obstacle_radius))
         except Exception as e:
             # Point cloud parsing can fail, fall back to LIDAR
             if not hasattr(self, '_pointcloud_error_logged'):
@@ -887,59 +878,22 @@ class MPCNode(Node):
             )
     
     def extract_lidar_obstacles(self):
-        """Convert LIDAR scan to immediate obstacles AND store persistently"""
-        if self.latest_scan is None or self.seeker_state is None:
-            return []
+        """Convert LIDAR scan to immediate obstacles - DISABLED to prevent frame drift"""
+        # DISABLED: LIDAR obstacles cause frame drift issues
+        # Use map-based obstacles instead which are fixed in map frame
+        return []
         
-        obstacles = []
-        robot_x = self.seeker_state[0]
-        robot_y = self.seeker_state[1]
-        robot_theta = self.seeker_state[2]
-        current_time = self.get_clock().now().nanoseconds / 1e9
-        
-        # LIDAR scan parameters
-        angle_min = self.latest_scan.angle_min
-        angle_increment = self.latest_scan.angle_increment
-        ranges = self.latest_scan.ranges
-        range_max = self.latest_scan.range_max
-        
-        # Convert LIDAR points to obstacles
-        obstacle_radius = self.obstacle_radius_param  # From parameter
-        
-        for i, r in enumerate(ranges):
-            # Skip invalid readings
-            if r < 0.1 or r > range_max or not np.isfinite(r):
-                continue
-            
-            # Only consider obstacles within 1.0m (reduced from 2.0m to avoid false positives)
-            if r > 1.0:
-                continue
-            
-            # Angle of this ray in robot frame
-            ray_angle = angle_min + i * angle_increment
-            
-            # Convert to world frame
-            # CRITICAL: Add LIDAR frame offset to correct for mounting orientation
-            world_angle = robot_theta + ray_angle + self.lidar_angle_offset
-            obstacle_x = robot_x + (r + obstacle_radius) * np.cos(world_angle)
-            obstacle_y = robot_y + (r + obstacle_radius) * np.sin(world_angle)
-            
-            obstacle_pos = np.array([obstacle_x, obstacle_y])
-            obstacles.append((obstacle_pos, obstacle_radius))
-            
-            # Add to persistent storage
-            self.persistent_obstacles.append((obstacle_pos, obstacle_radius, current_time))
-        
-        # Clean up old obstacles (older than timeout)
-        self.persistent_obstacles = [
-            (pos, radius, t) for pos, radius, t in self.persistent_obstacles
-            if current_time - t < self.obstacle_timeout
-        ]
-        
-        return obstacles
+        # OLD CODE (disabled):
+        # LIDAR scans are in base_link frame, converting to map frame causes drift
+        # Better to use map-based obstacles which are already in map frame
     
     def extract_map_obstacles_from_grid(self, grid_map):
-        """Extract obstacles from occupancy grid with clustering to reduce noise"""
+        """
+        Extract obstacles from Fast Local Grid occupancy grid.
+        CRITICAL: Fast Local Grid stores obstacles in WORLD coordinates (map frame).
+        The grid origin moves with robot, but obstacles are stored in world frame.
+        We must convert grid coordinates back to world coordinates using the grid origin.
+        """
         if grid_map is None or self.seeker_state is None:
             return []
         
@@ -953,25 +907,44 @@ class MPCNode(Node):
         origin_x = grid_map.info.origin.position.x
         origin_y = grid_map.info.origin.position.y
         
+        # CRITICAL: Fast Local Grid publishes grid with robot-centric origin that MOVES with robot.
+        # The origin is: (robot_x - grid_size/2, robot_y - grid_size/2)
+        # But obstacles stored in world_obstacles are in FIXED world coordinates.
+        # When we extract, we must convert grid cell coordinates to world coordinates correctly.
+        # 
+        # Grid cell (gx, gy) in grid with origin (origin_x, origin_y):
+        #   world_x = origin_x + gx * resolution + resolution/2  (cell center)
+        #   world_y = origin_y + gy * resolution + resolution/2
+        #
+        # This should give us the FIXED world coordinates, not relative to robot!
+        
         # First pass: find all occupied cells within range
         occupied_cells = []
         for i in range(width * height):
-            if grid_map.data[i] > 80:  # MUCH HIGHER threshold to reduce noise (was 65)
+            if grid_map.data[i] > 80:  # High threshold to reduce noise
                 gx = i % width
                 gy = i // width
-                world_x = gx * resolution + origin_x + resolution / 2
-                world_y = gy * resolution + origin_y + resolution / 2
                 
+                # CRITICAL: Convert grid coordinates to WORLD coordinates
+                # Use the grid origin from the message (which is robot-centric but correct at publish time)
+                # The world coordinate is: origin + grid_position + cell_center_offset
+                world_x = origin_x + gx * resolution + resolution / 2
+                world_y = origin_y + gy * resolution + resolution / 2
+                
+                # Verify: This world coordinate should be FIXED and not change as robot moves
+                # (assuming the obstacle is actually fixed in the world)
+                
+                # Distance from robot (for filtering only - not for correction!)
                 dx = world_x - robot_x
                 dy = world_y - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
                 
-                if 0.15 < dist < 1.5:  # Within 1.5m, ignore cells very close to robot (was 2.0m)
+                if 0.15 < dist < 1.5:  # Within 1.5m, ignore cells very close to robot
                     occupied_cells.append((world_x, world_y))
         
         # Second pass: cluster nearby cells into single obstacles
         obstacles = []
-        cluster_dist = 0.20  # 20cm clustering (was 15cm - larger clusters)
+        cluster_dist = 0.20  # 20cm clustering
         obstacle_radius = self.obstacle_radius_param  # From parameter
         
         used = set()
@@ -991,14 +964,29 @@ class MPCNode(Node):
                     used.add(j)
             
             # Use cluster center as obstacle - REQUIRE MORE CELLS to be real obstacle
-            if len(cluster) >= 5:  # At least 5 cells to be real obstacle (was 2)
+            if len(cluster) >= 5:  # At least 5 cells to be real obstacle
                 center_x = sum(x for x, y in cluster) / len(cluster)
                 center_y = sum(y for x, y in cluster) / len(cluster)
                 
-                # CRITICAL: Obstacles are in MAP FRAME (fixed world frame), NOT relative to robot!
-                # Don't adjust based on robot position - obstacles are fixed in world
-                obstacles.append((np.array([center_x, center_y]), obstacle_radius))
-
+                # CRITICAL: Obstacles are in WORLD FRAME (map frame) - fixed coordinates!
+                # Fast Local Grid stores obstacles in world_obstacles dictionary in world coordinates
+                # These don't drift as robot moves - they're fixed in the world
+                # 
+                # VERIFICATION: These world coordinates should be FIXED and not change
+                # as the robot moves. The grid origin moves, but we convert back to
+                # world coordinates correctly using the origin from the message.
+                obstacle_world_pos = np.array([center_x, center_y])
+                obstacles.append((obstacle_world_pos, obstacle_radius))
+        
+        # DEBUG: Verify obstacles are in world frame (optional logging)
+        if len(obstacles) > 0 and not hasattr(self, '_obstacle_world_frame_verified'):
+            self.get_logger().info(
+                f"✓ Extracted {len(obstacles)} obstacles from Fast Local Grid in WORLD frame. "
+                f"Robot at ({robot_x:.3f}, {robot_y:.3f}), "
+                f"First obstacle at ({obstacles[0][0][0]:.3f}, {obstacles[0][0][1]:.3f})"
+            )
+            self._obstacle_world_frame_verified = True
+        
         return obstacles
 
     
