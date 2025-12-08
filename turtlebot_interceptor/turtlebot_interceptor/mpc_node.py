@@ -164,7 +164,7 @@ class MPCNode(Node):
         self.current_waypoint = None  # If set, use this instead of final goal
         self.waypoint_reached_threshold = 0.20  # 20cm to consider waypoint "reached" - more forgiving
         self.waypoint_cleared_time = None  # Track when waypoint was last cleared
-        self.waypoint_cooldown = 30.0  # Don't generate new waypoint for 10 seconds after clearing (prevent continuous generation)
+        self.waypoint_cooldown = 30.0  # Don't generate new waypoint for 30 seconds after clearing (prevent continuous generation)
         self.committed_direction = None  # 'LEFT' or 'RIGHT' - commit to a direction when blocked
         self.waypoint_generated_this_obstacle = False  # Track if we've generated a waypoint for current obstacle
         
@@ -625,18 +625,18 @@ class MPCNode(Node):
             to_obstacle = center - robot_xy
             dist_to_obstacle = np.linalg.norm(to_obstacle)
             
-            # REQUIREMENT 1: Must be close - VERY AGGRESSIVE
-            if dist_to_obstacle > 0.60:  # 60cm - catch obstacles much earlier
+            # REQUIREMENT 1: Must be VERY close - STRICT to avoid false positives
+            if dist_to_obstacle > 0.30:  # 30cm - only very close obstacles (was 60cm)
                 continue
             
             if dist_to_obstacle > 0:
                 to_obstacle_norm = to_obstacle / dist_to_obstacle
                 
-                # REQUIREMENT 2: Check if obstacle is in direction of GOAL (not just forward)
+                # REQUIREMENT 2: Check if obstacle is DIRECTLY in direction of GOAL
                 goal_alignment = np.dot(to_obstacle_norm, goal_dir)
                 
-                # VERY LENIENT: If obstacle is anywhere in the general direction of goal
-                if goal_alignment > 0.3:  # cos(72°) - very wide angle
+                # STRICT: Obstacle must be directly in path to goal
+                if goal_alignment > 0.8:  # cos(37°) - much stricter, directly ahead (was 0.3)
                     # Check if obstacle is between robot and goal
                     proj_length = np.dot(to_obstacle, goal_dir)
                     if 0 < proj_length < goal_dist:  # Obstacle is between robot and goal
@@ -644,18 +644,17 @@ class MPCNode(Node):
                         closest_pt_on_goal_line = robot_xy + goal_dir * proj_length
                         perp_dist = np.linalg.norm(center - closest_pt_on_goal_line)
                         
-                        # VERY LENIENT: If obstacle is anywhere near the path
-                        if perp_dist < (radius + 0.40):  # Large margin - 40cm
+                        # STRICT: Obstacle must be directly on the path
+                        if perp_dist < (radius + 0.20):  # Smaller margin - 20cm (was 40cm)
                             blocking_obstacles.append((center, radius, dist_to_obstacle))
-                            debug_info.append(f"  Obstacle at {dist_to_obstacle:.2f}m, goal_align={goal_alignment:.2f}, perp={perp_dist:.2f}m")
         
         
         if not blocking_obstacles:
             return None  # No immediate obstacle ahead
         
-        # Obstacle detected! Generate waypoint
+        # Obstacle detected! Generate waypoint (STRICT requirements met)
         self.get_logger().warn(
-            f"🚨 Obstacle blocking path! Generating waypoint for {len(blocking_obstacles)} obstacles..."
+            f"🚨 Obstacle <30cm, directly blocking path! Generating waypoint for {len(blocking_obstacles)} obstacles..."
         )
         
         # Find the closest blocking obstacle
@@ -755,22 +754,29 @@ class MPCNode(Node):
         obstacles = []
         
         # PRIORITY 1: Fast Local Grid (HIGHEST - persistent, reliable memory)
+        # ONLY use if we have good quality data
         if self.local_map is not None:
             grid_obstacles = self.extract_map_obstacles_from_grid(self.local_map)
-            obstacles.extend(grid_obstacles)
-            if len(grid_obstacles) > 0 and not hasattr(self, '_grid_priority_logged'):
-                self.get_logger().info(f"✓ Using Fast Local Grid: {len(grid_obstacles)} obstacles")
-                self._grid_priority_logged = True
+            # Only use if we have reasonable number (not too many = noise)
+            if len(grid_obstacles) <= 10:  # Only use if reasonable number
+                obstacles.extend(grid_obstacles)
+                if len(grid_obstacles) > 0 and not hasattr(self, '_grid_priority_logged'):
+                    self.get_logger().info(f"✓ Using Fast Local Grid: {len(grid_obstacles)} obstacles")
+                    self._grid_priority_logged = True
         
         # PRIORITY 2: Cartographer scan-matched points (MEDIUM - accurate but can be sparse)
-        if self.matched_points is not None and len(obstacles) < self.max_obstacles:
+        # ONLY use if we don't have too many obstacles already
+        if self.matched_points is not None and len(obstacles) < 5:  # Only if we have few obstacles
             scan_obstacles = self.extract_scan_matched_obstacles()
-            obstacles.extend(scan_obstacles)
+            # Limit scan-matched obstacles to avoid noise
+            if len(scan_obstacles) <= 5:
+                obstacles.extend(scan_obstacles)
         
-        # PRIORITY 3: Raw LIDAR (LOWEST - backup only)
-        if self.latest_scan is not None and len(obstacles) < self.max_obstacles:
-            lidar_obstacles = self.extract_lidar_obstacles()
-            obstacles.extend(lidar_obstacles)
+        # PRIORITY 3: Raw LIDAR (LOWEST - backup only, DISABLED to reduce false positives)
+        # Disable raw LIDAR - too noisy, causes false positives
+        # if self.latest_scan is not None and len(obstacles) < self.max_obstacles:
+        #     lidar_obstacles = self.extract_lidar_obstacles()
+        #     obstacles.extend(lidar_obstacles)
         
         # Remove duplicates and limit total
         obstacles = self.merge_obstacles(obstacles)
@@ -812,8 +818,8 @@ class MPCNode(Node):
                 corrected_x = px + ux * obstacle_radius
                 corrected_y = py + uy * obstacle_radius
                 
-                # Only within 2m
-                if 0.1 < dist < 2.0:
+                # Only within 1.0m (reduced from 2.0m to avoid false positives)
+                if 0.15 < dist < 1.0:
                     obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
         except Exception as e:
             # Point cloud parsing can fail, fall back to LIDAR
@@ -905,8 +911,8 @@ class MPCNode(Node):
             if r < 0.1 or r > range_max or not np.isfinite(r):
                 continue
             
-            # Only consider obstacles within 2m
-            if r > 2.0:
+            # Only consider obstacles within 1.0m (reduced from 2.0m to avoid false positives)
+            if r > 1.0:
                 continue
             
             # Angle of this ray in robot frame
@@ -950,7 +956,7 @@ class MPCNode(Node):
         # First pass: find all occupied cells within range
         occupied_cells = []
         for i in range(width * height):
-            if grid_map.data[i] > 65:  # Higher threshold to reduce noise
+            if grid_map.data[i] > 80:  # MUCH HIGHER threshold to reduce noise (was 65)
                 gx = i % width
                 gy = i // width
                 world_x = gx * resolution + origin_x + resolution / 2
@@ -960,12 +966,12 @@ class MPCNode(Node):
                 dy = world_y - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
                 
-                if 0.1 < dist < 2.0:  # Within 2m, ignore cells on robot
+                if 0.15 < dist < 1.5:  # Within 1.5m, ignore cells very close to robot (was 2.0m)
                     occupied_cells.append((world_x, world_y))
         
         # Second pass: cluster nearby cells into single obstacles
         obstacles = []
-        cluster_dist = 0.15  # 15cm clustering
+        cluster_dist = 0.20  # 20cm clustering (was 15cm - larger clusters)
         obstacle_radius = self.obstacle_radius_param  # From parameter
         
         used = set()
@@ -984,8 +990,8 @@ class MPCNode(Node):
                     cluster.append((ox, oy))
                     used.add(j)
             
-            # Use cluster center as obstacle
-            if len(cluster) >= 2:  # At least 2 cells to be real obstacle
+            # Use cluster center as obstacle - REQUIRE MORE CELLS to be real obstacle
+            if len(cluster) >= 5:  # At least 5 cells to be real obstacle (was 2)
                 center_x = sum(x for x, y in cluster) / len(cluster)
                 center_y = sum(y for x, y in cluster) / len(cluster)
                 
@@ -1016,7 +1022,7 @@ class MPCNode(Node):
         obstacle_radius = self.obstacle_radius_param * 1.2  # Slightly larger for map obstacles
         
         for i in range(width * height):
-            if self.map.data[i] > 30:  # Occupied
+            if self.map.data[i] > 80:  # MUCH HIGHER threshold - only very occupied cells (was 30)
                 gx = i % width
                 gy = i // width
                 world_x = gx * resolution + origin_x + resolution / 2  # Cell center
@@ -1028,15 +1034,15 @@ class MPCNode(Node):
                 dy = world_y - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
                 
-                # Only within 1.0m of robot (reduced to avoid random obstacles)
+                # Only within 0.8m of robot (reduced to avoid random obstacles, was 1.0m)
                 # Obstacle position is FIXED in map frame, don't adjust it!
-                if dist < 1.0 and dist > 0.02:
+                if dist < 0.8 and dist > 0.15:  # Increased min distance to 15cm
                     obstacles.append((np.array([world_x, world_y]), obstacle_radius))
         
-        # Limit to closest 30 obstacles (for performance)
-        if len(obstacles) > 30:
+        # Limit to closest 10 obstacles (reduced from 30 to avoid false positives)
+        if len(obstacles) > 10:
             obstacles.sort(key=lambda obs: np.sqrt((obs[0][0]-robot_x)**2 + (obs[0][1]-robot_y)**2))
-            obstacles = obstacles[:30]
+            obstacles = obstacles[:10]
         
         # DEBUG
         if not hasattr(self, '_obstacle_count'):
