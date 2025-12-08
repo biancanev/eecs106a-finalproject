@@ -1432,6 +1432,11 @@ class MPCNode(Node):
         # ALGORITHMIC IMPROVEMENT 2: Adaptive velocity scaling based on proximity
         self.velocity_scale_factor = self.compute_velocity_scale(self.min_obstacle_distance)
         
+        # Initialize debug counter if needed (must be before first use)
+        if not hasattr(self, '_obstacle_debug_count'):
+            self._obstacle_debug_count = 0
+        self._obstacle_debug_count += 1
+        
         # WAYPOINT GENERATION: Check if path to goal is blocked and generate waypoint
         # BUT: Don't generate new waypoint immediately after clearing one (cooldown period)
         if use_goal and self.current_waypoint is None:
@@ -1464,9 +1469,6 @@ class MPCNode(Node):
                         )
         
         # DEBUG: Log obstacles periodically - MORE FREQUENT
-        if not hasattr(self, '_obstacle_debug_count'):
-            self._obstacle_debug_count = 0
-        self._obstacle_debug_count += 1
         if self._obstacle_debug_count % 10 == 0:  # Every 1 second
             total_occupied = np.sum(np.array(self.map.data) > 30) if self.map else 0
             if obstacles and len(obstacles) > 0:
