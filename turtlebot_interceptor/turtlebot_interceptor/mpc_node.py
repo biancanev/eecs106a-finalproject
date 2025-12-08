@@ -1092,11 +1092,25 @@ class MPCNode(Node):
                     current_x = self.seeker_state[0]
                     current_y = self.seeker_state[1]
                     # Look at position from 0.5s ago (5 steps at 10Hz)
-                    prev_pos = self.trajectory_history[-5]
+                    prev_entry = self.trajectory_history[-5]
+                    
+                    # Extract pose from new format
+                    if 'pose' in prev_entry:
+                        prev_pose = prev_entry['pose']
+                        prev_x = prev_pose[0]
+                        prev_y = prev_pose[1]
+                    elif 'x' in prev_entry:
+                        # Old format fallback
+                        prev_x = prev_entry['x']
+                        prev_y = prev_entry['y']
+                    else:
+                        # No valid history, use current position
+                        prev_x = current_x
+                        prev_y = current_y
                     
                     # Calculate direction back to previous position
-                    dx = prev_pos['x'] - current_x
-                    dy = prev_pos['y'] - current_y
+                    dx = prev_x - current_x
+                    dy = prev_y - current_y
                     
                     # If significant distance, align to back up along that path
                     if np.sqrt(dx*dx + dy*dy) > 0.05:
@@ -1617,16 +1631,6 @@ class MPCNode(Node):
         twist.angular.z = float(omega_cmd)
         self.cmd_pub.publish(twist)
         
-        # Record trajectory history for final analysis (full format)
-        if self.seeker_state is not None:
-            self.trajectory_history.append({
-                'time': self.get_clock().now().nanoseconds / 1e9,
-                'pose': self.seeker_state.copy(),  # [x, y, theta, v]
-                'command': {'v': v_cmd, 'omega': omega_cmd},
-                'goal': [self.goal_x, self.goal_y] if hasattr(self, 'goal_x') else None
-            })
-            # Keep full history for final analysis (don't limit)
-        
         # SAFETY FILTER: Check if command would cause collision
         if not self.is_command_safe(v_cmd, omega_cmd):
             self.get_logger().error('🛑 SAFETY FILTER: MPC planned unsafe path! Starting backup...')
@@ -1636,14 +1640,15 @@ class MPCNode(Node):
             self.handle_emergency_recovery()
             return
         
-        # Store trajectory history for final analysis
+        # Record trajectory history for final analysis (full format) - AFTER safety check
         if self.seeker_state is not None:
             self.trajectory_history.append({
                 'time': self.get_clock().now().nanoseconds / 1e9,
-                'pose': self.seeker_state.copy(),
+                'pose': self.seeker_state.copy(),  # [x, y, theta, v]
                 'command': {'v': v_cmd, 'omega': omega_cmd},
                 'goal': [self.goal_x, self.goal_y] if hasattr(self, 'goal_x') else None
             })
+            # Keep full history for final analysis (don't limit)
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
