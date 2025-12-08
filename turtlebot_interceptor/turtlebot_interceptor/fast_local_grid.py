@@ -68,8 +68,8 @@ class FastLocalGrid(Node):
         #    - Behind → Add π (180°)
         #    - To left → Add π/2 (90°)
         #    - To right → Subtract π/2 (-90°)
-        # MIRRORING FIX: If obstacles are mirrored (left/right swapped), flip sign
-        self.lidar_angle_offset = -np.pi/2  # FIXED: Negative to fix mirroring
+        # MIRRORING: Now handled by negating angle in world_angle calculation
+        self.lidar_angle_offset = np.pi/2  # Standard offset
         
         self.get_logger().info(f'🔧 LIDAR offset: {self.lidar_angle_offset:.4f} rad = {np.degrees(self.lidar_angle_offset):.1f}°')
         
@@ -223,7 +223,8 @@ class FastLocalGrid(Node):
             # CRITICAL: These coordinates are computed from robot pose in map frame
             # If robot pose (self.robot_x, self.robot_y) drifts, these will drift too!
             # Solution: Ensure /amcl_pose is from stable source (Cartographer/MCL)
-            world_angle = self.robot_theta + angle + self.lidar_angle_offset
+            # MIRRORING FIX: Negate angle to flip left/right (not rotate!)
+            world_angle = self.robot_theta - angle + self.lidar_angle_offset  # NEGATE angle for mirroring
             end_x = self.robot_x + r * np.cos(world_angle)  # World coordinate
             end_y = self.robot_y + r * np.sin(world_angle)  # World coordinate
             
