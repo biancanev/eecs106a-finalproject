@@ -635,13 +635,13 @@ class MPCNode(Node):
         perpendicular = np.array([-goal_dir[1], goal_dir[0]])
         
         # Position waypoint ON THE PATH to goal, just shifted laterally
-        # Stay close to the direct line!
-        progress_distance = min(0.3, goal_dist * 0.3)  # 30% toward goal or 30cm max
+        # Stay VERY close to the direct line!
+        progress_distance = min(0.25, goal_dist * 0.25)  # 25% toward goal or 25cm max
         waypoint_base = robot_xy + goal_dir * progress_distance
         
-        # MINIMAL lateral offsets - just enough to clear obstacle
-        min_clearance = key_radius + 0.15 + 0.05  # obstacle + robot + 5cm
-        offset_candidates = [min_clearance, min_clearance * 1.1, min_clearance * 1.2, 0.25]
+        # ULTRA-MINIMAL lateral offsets - absolute minimum to clear obstacle
+        min_clearance = key_radius + 0.15 + 0.03  # obstacle + robot + 3cm (very tight!)
+        offset_candidates = [min_clearance, min_clearance * 1.05, min_clearance * 1.1, 0.18]
         
         best_waypoint = None
         best_clearance = -999.0
@@ -1281,9 +1281,15 @@ class MPCNode(Node):
         if use_goal:
             # Check if we need to use a waypoint or go directly to goal
             final_goal = np.array([self.goal_x, self.goal_y])
+            dist_to_final_goal = np.linalg.norm(final_goal - x0[:2])
             
+            # CRITICAL: If very close to FINAL goal, ignore obstacles and just go for it!
+            if dist_to_final_goal < 0.15:  # Within 15cm of final goal
+                self.get_logger().info(f"🎯 Close to final goal ({dist_to_final_goal:.3f}m), ignoring obstacles!")
+                self.current_waypoint = None  # Clear any waypoint
+                target_pos = final_goal
             # If we have a waypoint and haven't reached it, use waypoint
-            if self.current_waypoint is not None:
+            elif self.current_waypoint is not None:
                 dist_to_waypoint = np.linalg.norm(self.current_waypoint - x0[:2])
                 if dist_to_waypoint < self.waypoint_reached_threshold:
                     self.get_logger().info(f"✓ Reached waypoint, clearing and resuming to final goal")

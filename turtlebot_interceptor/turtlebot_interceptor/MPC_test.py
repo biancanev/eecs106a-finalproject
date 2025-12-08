@@ -47,11 +47,11 @@ class SimpleUnicycleMPC:
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - BALANCED for robust navigation
-        self.Qp_base = 30.0  # BALANCED - Strong goal tracking while allowing obstacle avoidance
+        # Base weights - TUNED for fast, accurate navigation
+        self.Qp_base = 50.0  # STRONG goal tracking - robot should actively pursue target
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.1  # Allow movement but penalize excessive acceleration
-        self.Rw_base = 0.05  # BALANCED - smooth turns while still allowing curves
+        self.Ra_base = 0.05  # Low acceleration penalty - allow quick movements
+        self.Rw_base = 0.03  # Low turn penalty - allow agile maneuvering
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -345,7 +345,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 5000000.0  # Very high but balanced for robustness
+            repulsion_weight = 8000000.0  # Very high - obstacles still critical but position matters
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
