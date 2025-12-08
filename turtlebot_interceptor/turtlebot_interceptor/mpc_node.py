@@ -161,7 +161,7 @@ class MPCNode(Node):
         
         # Waypoint system for routing around obstacles
         self.current_waypoint = None  # If set, use this instead of final goal
-        self.waypoint_reached_threshold = 0.10  # 10cm to consider waypoint "reached"
+        self.waypoint_reached_threshold = 0.20  # 20cm to consider waypoint "reached" - more forgiving
         
         # ALGORITHMIC IMPROVEMENTS
         self.min_obstacle_distance = float('inf')  # Track closest obstacle
@@ -618,19 +618,18 @@ class MPCNode(Node):
         closest_obstacle = blocking_obstacles[0]
         key_center, key_radius, key_dist = closest_obstacle
         
-        # Calculate minimum clearance needed (obstacle radius + robot radius + small margin)
-        min_clearance = key_radius + 0.15 + 0.10  # obstacle + robot + 10cm safety (tight!)
+        # Calculate minimum clearance needed - TIGHT to stay close to path
+        min_clearance = key_radius + 0.15 + 0.05  # obstacle + robot + 5cm safety (very tight!)
         
         # Perpendicular direction (rotate 90 degrees from FORWARD direction, not goal)
         perpendicular = np.array([-forward_dir[1], forward_dir[0]])
         
-        # Position waypoint BESIDE the robot (emergency lateral move)
-        # Not far ahead - just get out of the way NOW
-        waypoint_base = robot_xy + forward_dir * 0.2  # Just 20cm ahead
+        # Position waypoint CLOSE to the path - minimal deviation
+        waypoint_base = robot_xy + forward_dir * 0.10  # Just 15cm ahead (tighter!)
         
-        # Try progressively wider offsets - IMMEDIATE lateral escape
-        # Start tight (just enough to clear), expand if needed
-        offset_candidates = [min_clearance, min_clearance * 1.3, min_clearance * 1.6, 0.5]
+        # Try TIGHT offsets - stay close to the direct path
+        # Minimize lateral deviation for skinny trajectories
+        offset_candidates = [min_clearance, min_clearance * 1.2, min_clearance * 1.4, 0.20]
         
         best_waypoint = None
         best_clearance = -999.0
