@@ -483,72 +483,70 @@ class MPCNode(Node):
     
     def generate_waypoint_if_blocked(self, robot_pos, goal_pos, obstacles):
         """
-        Check if path to goal is blocked by obstacles and generate intermediate waypoint.
-        This solves the "zig-zag problem" where MPC can't route around obstacles in a straight line.
+        Check if there's an IMMEDIATE obstacle directly ahead and generate waypoint.
+        Only triggers for obstacles within 0.25m straight ahead - reactive, not predictive.
         
-        Returns: waypoint position [x, y] if path is blocked, None otherwise
+        Returns: waypoint position [x, y] if blocked NOW, None otherwise
         """
         if not obstacles or len(obstacles) == 0:
             return None
         
         robot_xy = robot_pos[:2]
-        direction_to_goal = goal_pos - robot_xy
-        dist_to_goal = np.linalg.norm(direction_to_goal)
+        robot_theta = robot_pos[2]  # Current heading
         
-        if dist_to_goal < 0.3:  # Close to goal, don't generate waypoints
-            return None
+        # Forward direction based on CURRENT heading (not goal direction)
+        forward_dir = np.array([np.cos(robot_theta), np.sin(robot_theta)])
         
-        direction_to_goal_norm = direction_to_goal / dist_to_goal
-        
-        # Check if any obstacle is "blocking" the direct path to goal
+        # Only check obstacles that are:
+        # 1. VERY CLOSE (within 0.25m)
+        # 2. DIRECTLY AHEAD (within ±30 degrees of forward direction)
         blocking_obstacles = []
         for center, radius in obstacles:
             # Vector from robot to obstacle
             to_obstacle = center - robot_xy
+            dist_to_obstacle = np.linalg.norm(to_obstacle)
             
-            # Project obstacle onto robot-goal line
-            projection_length = np.dot(to_obstacle, direction_to_goal_norm)
+            # Skip if too far
+            if dist_to_obstacle > 0.25:
+                continue
             
-            # Only consider obstacles that are:
-            # 1. In front of us (projection > 0)
-            # 2. Not beyond the goal (projection < dist_to_goal)
-            # 3. Close to the direct line (perpendicular distance small)
-            if 0 < projection_length < dist_to_goal:
-                # Point on line closest to obstacle
-                closest_point_on_line = robot_xy + projection_length * direction_to_goal_norm
-                perpendicular_dist = np.linalg.norm(center - closest_point_on_line)
+            # Check if it's ahead of us
+            if dist_to_obstacle > 0:
+                to_obstacle_norm = to_obstacle / dist_to_obstacle
                 
-                # Consider it "blocking" if it's within 0.5m of the direct path
-                if perpendicular_dist < (radius + 0.5):
-                    blocking_obstacles.append((center, radius, perpendicular_dist))
+                # Dot product = cos(angle) - close to 1.0 means straight ahead
+                forward_alignment = np.dot(to_obstacle_norm, forward_dir)
+                
+                # Only consider if within ±30 degrees (cos(30°) ≈ 0.866)
+                if forward_alignment > 0.866:
+                    blocking_obstacles.append((center, radius, dist_to_obstacle))
         
         if not blocking_obstacles:
-            return None  # Path is clear
+            return None  # No immediate obstacle ahead
         
-        # Path is blocked! Generate TIGHT waypoint
-        self.get_logger().info(
-            f"🚧 Path blocked by {len(blocking_obstacles)} obstacles! Generating tight waypoint..."
+        # Immediate obstacle detected! Generate TIGHT waypoint
+        self.get_logger().warn(
+            f"🚨 IMMEDIATE obstacle within 0.25m! Generating emergency waypoint for {len(blocking_obstacles)} obstacles..."
         )
         
-        # Find the furthest blocking obstacle (this is our "keyhole" to pass through)
-        blocking_obstacles.sort(key=lambda x: np.dot(x[0] - robot_xy, direction_to_goal_norm), reverse=True)
-        furthest_obstacle = blocking_obstacles[0]
-        key_center, key_radius, _ = furthest_obstacle
+        # Find the closest blocking obstacle
+        blocking_obstacles.sort(key=lambda x: x[2])  # Sort by distance
+        closest_obstacle = blocking_obstacles[0]
+        key_center, key_radius, key_dist = closest_obstacle
         
         # Calculate minimum clearance needed (obstacle radius + robot radius + small margin)
-        min_clearance = key_radius + 0.15 + 0.15  # obstacle + robot + 15cm safety
+        min_clearance = key_radius + 0.15 + 0.10  # obstacle + robot + 10cm safety (tight!)
         
-        # Perpendicular direction (rotate 90 degrees)
-        perpendicular = np.array([-direction_to_goal_norm[1], direction_to_goal_norm[0]])
+        # Perpendicular direction (rotate 90 degrees from FORWARD direction, not goal)
+        perpendicular = np.array([-forward_dir[1], forward_dir[0]])
         
-        # Position waypoint PAST the obstacle cluster (not at center) for better flow
-        # Place it at the furthest obstacle's position along the path
-        projection_dist = np.dot(key_center - robot_xy, direction_to_goal_norm)
-        waypoint_base = robot_xy + direction_to_goal_norm * (projection_dist + 0.3)  # 30cm past obstacle
+        # Position waypoint BESIDE the robot (emergency lateral move)
+        # Not far ahead - just get out of the way NOW
+        waypoint_base = robot_xy + forward_dir * 0.2  # Just 20cm ahead
         
-        # Try progressively wider offsets until we find clear path
+        # Try progressively wider offsets - IMMEDIATE lateral escape
         # Start tight (just enough to clear), expand if needed
-        offset_candidates = [min_clearance, min_clearance * 1.5, min_clearance * 2.0, 0.8]
+        offset_candidates = [min_clearance, min_clearance * 1.3, min_clearance * 1.6, 0.5]
         
         best_waypoint = None
         best_clearance = -999.0
