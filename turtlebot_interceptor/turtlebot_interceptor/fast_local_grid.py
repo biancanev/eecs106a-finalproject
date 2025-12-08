@@ -69,7 +69,7 @@ class FastLocalGrid(Node):
         #    - To left → Add π/2 (90°)
         #    - To right → Subtract π/2 (-90°)
         #
-        self.lidar_angle_offset = np.pi  # ← CHANGE THIS VALUE!
+        self.lidar_angle_offset = np.pi/2  # ← CHANGE THIS VALUE!
         
         self.get_logger().info(f'🔧 LIDAR offset: {self.lidar_angle_offset:.4f} rad = {np.degrees(self.lidar_angle_offset):.1f}°')
         
