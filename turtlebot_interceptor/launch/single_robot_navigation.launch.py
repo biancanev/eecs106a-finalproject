@@ -37,7 +37,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'obstacle_radius',
-            default_value='0.05',
+            default_value='0.03',
             description='Obstacle radius in meters (smaller = less conservative)'
         ),
         
