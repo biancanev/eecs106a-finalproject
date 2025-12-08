@@ -58,8 +58,12 @@ class MPCNode(Node):
         # For single robot navigation, use goal point instead
         self.declare_parameter('goal_x', 1.5)
         self.declare_parameter('goal_y', 1.5)
+        self.declare_parameter('max_obstacles', 100)  # Max number of obstacles to track
+        self.declare_parameter('obstacle_radius', 0.2)  # Default obstacle radius (meters)
         self.goal_x = self.get_parameter('goal_x').get_parameter_value().double_value
         self.goal_y = self.get_parameter('goal_y').get_parameter_value().double_value
+        self.max_obstacles = self.get_parameter('max_obstacles').get_parameter_value().integer_value
+        self.obstacle_radius_param = self.get_parameter('obstacle_radius').get_parameter_value().double_value
         
         self.target_sub = self.create_subscription(
             PoseWithCovarianceStamped,
@@ -486,11 +490,11 @@ class MPCNode(Node):
         
         # PART 2: Raw LIDAR (BACKUP - if scan-matched not available yet)
         # Use raw LIDAR with auto-calibrated offset
-        if self.latest_scan is not None and len(obstacles) < 5:
+        if self.latest_scan is not None:
             obstacles.extend(self.extract_lidar_obstacles())
         
         # PART 3: Fast Local Grid (TERTIARY - for persistent memory)
-        if self.local_map is not None and len(obstacles) < 10:
+        if self.local_map is not None:
             grid_obstacles = self.extract_map_obstacles_from_grid(self.local_map)
             obstacles.extend(grid_obstacles)
         
@@ -514,7 +518,7 @@ class MPCNode(Node):
         robot_x = self.seeker_state[0]
         robot_y = self.seeker_state[1]
         
-        obstacle_radius = 0.25  # 25cm for point cloud obstacles
+        obstacle_radius = self.obstacle_radius_param  # From parameter
         
         try:
             # Extract points from PointCloud2
@@ -614,7 +618,7 @@ class MPCNode(Node):
         range_max = self.latest_scan.range_max
         
         # Convert LIDAR points to obstacles
-        obstacle_radius = 0.3  # 30cm radius - reasonable safety margin
+        obstacle_radius = self.obstacle_radius_param  # From parameter
         
         for i, r in enumerate(ranges):
             # Skip invalid readings
@@ -682,7 +686,7 @@ class MPCNode(Node):
         # Second pass: cluster nearby cells into single obstacles
         obstacles = []
         cluster_dist = 0.15  # 15cm clustering
-        obstacle_radius = 0.3  # 30cm radius - reasonable
+        obstacle_radius = self.obstacle_radius_param  # From parameter
         
         used = set()
         for i, (cx, cy) in enumerate(occupied_cells):
@@ -725,7 +729,7 @@ class MPCNode(Node):
         origin_y = self.map.info.origin.position.y
         
         # CRITICAL: Large obstacle radius to ensure avoidance
-        obstacle_radius = 0.35  # 35cm - reasonable margin
+        obstacle_radius = self.obstacle_radius_param * 1.2  # Slightly larger for map obstacles
         
         for i in range(width * height):
             if self.map.data[i] > 30:  # Occupied
@@ -935,9 +939,9 @@ class MPCNode(Node):
             if not is_duplicate:
                 unique_obstacles.append(obs)
         
-        # Limit to closest 50 obstacles (performance)
-        if len(unique_obstacles) > 50:
-            unique_obstacles = unique_obstacles[:50]
+        # Limit to max_obstacles (configurable)
+        if len(unique_obstacles) > self.max_obstacles:
+            unique_obstacles = unique_obstacles[:self.max_obstacles]
         
         # DEBUG logging
         if not hasattr(self, '_obstacle_merge_count'):
