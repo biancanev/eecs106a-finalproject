@@ -47,11 +47,11 @@ class SimpleUnicycleMPC:
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - TUNED for fast, accurate navigation
+        # Base weights - OPTIMIZED for smooth curves around cones
         self.Qp_base = 50.0  # STRONG goal tracking - robot should actively pursue target
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.05  # Low acceleration penalty - allow quick movements
-        self.Rw_base = 0.03  # Low turn penalty - allow agile maneuvering
+        self.Ra_base = 0.02  # VERY LOW acceleration penalty - allow quick movements
+        self.Rw_base = 0.005  # ULTRA LOW turn penalty - smooth curves are critical!
         
         # Current adaptive weights
         self.Qp = self.Qp_base

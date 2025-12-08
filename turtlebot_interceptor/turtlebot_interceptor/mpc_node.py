@@ -163,7 +163,7 @@ class MPCNode(Node):
         self.current_waypoint = None  # If set, use this instead of final goal
         self.waypoint_reached_threshold = 0.20  # 20cm to consider waypoint "reached" - more forgiving
         self.waypoint_cleared_time = None  # Track when waypoint was last cleared
-        self.waypoint_cooldown = 30.0  # Don't generate new waypoint for 2 seconds after clearing
+        self.waypoint_cooldown = 50.0  # Don't generate new waypoint for 5 seconds after clearing (longer!)
         
         # ALGORITHMIC IMPROVEMENTS
         self.min_obstacle_distance = float('inf')  # Track closest obstacle
@@ -707,27 +707,32 @@ class MPCNode(Node):
         return best_waypoint
     
     def compute_obstacles(self):
-        """Extract obstacles - PRIMARY SOURCE: Cartographer scan-matched points!"""
+        """
+        Extract obstacles with PRIORITY ordering.
+        Priority: Fast Local Grid > Scan-Matched Points > Raw LIDAR
+        """
         if self.seeker_state is None:
             return []
         
         obstacles = []
         
-        # PART 1: Cartographer scan-matched points (PRIMARY - already in correct frame!)
-        # These are LIDAR points that Cartographer has aligned with the map
-        # NO frame offset needed - Cartographer handles all transforms!
-        if self.matched_points is not None:
-            obstacles.extend(self.extract_scan_matched_obstacles())
-        
-        # PART 2: Raw LIDAR (BACKUP - if scan-matched not available yet)
-        # Use raw LIDAR with auto-calibrated offset
-        if self.latest_scan is not None:
-            obstacles.extend(self.extract_lidar_obstacles())
-        
-        # PART 3: Fast Local Grid (TERTIARY - for persistent memory)
+        # PRIORITY 1: Fast Local Grid (HIGHEST - persistent, reliable memory)
         if self.local_map is not None:
             grid_obstacles = self.extract_map_obstacles_from_grid(self.local_map)
             obstacles.extend(grid_obstacles)
+            if len(grid_obstacles) > 0 and not hasattr(self, '_grid_priority_logged'):
+                self.get_logger().info(f"✓ Using Fast Local Grid: {len(grid_obstacles)} obstacles")
+                self._grid_priority_logged = True
+        
+        # PRIORITY 2: Cartographer scan-matched points (MEDIUM - accurate but can be sparse)
+        if self.matched_points is not None and len(obstacles) < self.max_obstacles:
+            scan_obstacles = self.extract_scan_matched_obstacles()
+            obstacles.extend(scan_obstacles)
+        
+        # PRIORITY 3: Raw LIDAR (LOWEST - backup only)
+        if self.latest_scan is not None and len(obstacles) < self.max_obstacles:
+            lidar_obstacles = self.extract_lidar_obstacles()
+            obstacles.extend(lidar_obstacles)
         
         # Remove duplicates and limit total
         obstacles = self.merge_obstacles(obstacles)
@@ -1209,14 +1214,18 @@ class MPCNode(Node):
         # Sort by distance to robot
         obstacles.sort(key=lambda obs: np.sqrt((obs[0][0]-robot_x)**2 + (obs[0][1]-robot_y)**2))
         
-        # Remove duplicates (obstacles within 0.1m of each other)
+        # Remove duplicates (obstacles within 0.2m of each other) - more aggressive merging
         unique_obstacles = []
         for obs in obstacles:
             # Check if this obstacle is too close to any existing one
             is_duplicate = False
             for existing in unique_obstacles:
                 dist = np.sqrt((obs[0][0]-existing[0][0])**2 + (obs[0][1]-existing[0][1])**2)
-                if dist < 0.15:  # Within 15cm = duplicate
+                if dist < 0.20:  # Within 20cm = duplicate (more aggressive)
+                    # Keep the one with larger radius (more conservative)
+                    if obs[1] > existing[1]:
+                        unique_obstacles.remove(existing)
+                        unique_obstacles.append(obs)
                     is_duplicate = True
                     break
             
