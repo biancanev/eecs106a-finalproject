@@ -674,8 +674,8 @@ class MPCNode(Node):
         perpendicular = np.array([-goal_dir[1], goal_dir[0]])
         
         # Position waypoint ON THE PATH to goal, just shifted laterally
-        # Stay close to the direct line but commit to a direction!
-        progress_distance = min(0.20, goal_dist * 0.20)  # 20% toward goal or 20cm max (closer to path)
+        # COMMIT: Place waypoint much closer to goal to stay on path!
+        progress_distance = min(0.50, goal_dist * 0.50)  # 50% toward goal or 50cm max - COMMIT TO PATH!
         waypoint_base = robot_xy + goal_dir * progress_distance
         
         # COMMIT TO A DIRECTION: Use committed direction if we have one, otherwise pick best
@@ -1169,7 +1169,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.15  # 15cm emergency threshold - VERY RELAXED (was 20cm)
+        emergency_dist = 0.08  # 8cm emergency threshold - ONLY trigger when VERY close (was 15cm)
         front_range = np.pi / 6  # ±30 degrees
         
         # Count valid readings in front
@@ -1190,7 +1190,7 @@ class MPCNode(Node):
         
         # VERY STRICT: Need MANY close readings to trigger (avoid false positives)
         # This prevents triggering on single noisy readings or walls far away
-        if valid_readings > 15 and close_readings >= 8:  # At least 8 close readings (was 5)
+        if valid_readings > 20 and close_readings >= 12:  # At least 12 close readings (was 8)
             return True
         
         return False
@@ -1744,7 +1744,7 @@ class MPCNode(Node):
                 min_clearance = min(min_clearance, clearance)
                 
                 # If collision imminent, trajectory is unsafe
-                if clearance < 0.05:  # 5cm safety margin
+                if clearance < 0.03:  # 3cm safety margin - only trigger when truly about to hit
                     return False, clearance
         
         return True, min_clearance
@@ -1906,11 +1906,11 @@ class MPCNode(Node):
                     dist_to_center = np.linalg.norm(center - pos)
                     clearance = dist_to_center - radius - 0.105  # Robot radius
                     
-                    # VERY RELAXED: Stop if within 15cm (very close only)
-                    if clearance < 0.15:
+                    # VERY RELAXED: Stop if within 8cm (only when extremely close)
+                    if clearance < 0.08:
                         return False
         
-        safety_dist = 0.15  # 15cm safety threshold - very relaxed
+        safety_dist = 0.08  # 8cm safety threshold - only trigger when extremely close
         
         # ALSO check LIDAR for immediate obstacles ahead
         # Check direction we're moving

@@ -303,13 +303,14 @@ class FastLocalGrid(Node):
                 continue
             
             # Ray endpoint in WORLD frame
-            # CRITICAL: Use scan_pose_* (frozen at scan time), NOT robot_* (current pose)!
-            # This ensures obstacles are stored at FIXED world coordinates that don't change
-            # when robot rotates. The entire map should NOT rotate with the robot!
-            # MIRRORING FIX: Negate angle to flip left/right (not rotate!)
-            world_angle = scan_theta - angle + self.lidar_angle_offset  # Use scan_theta, not robot_theta!
-            end_x = scan_x + r * np.cos(world_angle)  # World coordinate - FIXED at scan time
-            end_y = scan_y + r * np.sin(world_angle)  # World coordinate - FIXED at scan time
+            # CRITICAL: Obstacles are FIXED in world coordinates, independent of robot orientation!
+            # LIDAR angle is relative to robot's forward direction
+            # World angle = robot_orientation + lidar_angle + lidar_offset
+            # We use scan_theta (frozen) so all rays in scan use same robot orientation
+            # MIRRORING FIX: Negate angle to flip left/right
+            world_angle = scan_theta + (-angle) + self.lidar_angle_offset  # Add robot orientation to LIDAR angle
+            end_x = scan_x + r * np.cos(world_angle)  # World coordinate - FIXED in world frame
+            end_y = scan_y + r * np.sin(world_angle)  # World coordinate - FIXED in world frame
             
             # Update world obstacles (stores in world coordinates)
             # CRITICAL: Using scan_pose_* ensures obstacles are stored at FIXED world coordinates
