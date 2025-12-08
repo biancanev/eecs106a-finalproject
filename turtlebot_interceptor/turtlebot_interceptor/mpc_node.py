@@ -679,41 +679,66 @@ class MPCNode(Node):
         waypoint_base = robot_xy + goal_dir * progress_distance
         
         # COMMIT TO A DIRECTION: Use committed direction if we have one, otherwise pick best
-        if self.committed_direction is None:
-            # First time - pick LEFT or RIGHT based on which side has more clearance
-            min_clearance = key_radius + 0.15 + 0.05  # obstacle + robot + 5cm
+        # CRITICAL: Ensure waypoint is NOT on an obstacle!
+        min_clearance = key_radius + 0.15 + 0.10  # obstacle + robot + 10cm safety
+        
+        best_waypoint = None
+        best_side = None
+        best_clearance = -999.0
+        
+        # Try different offsets to find a safe waypoint
+        for offset_mult in [1.0, 1.2, 1.5, 2.0]:
+            offset = min_clearance * offset_mult
             
-            # Check clearance on both sides
-            left_candidate = waypoint_base + perpendicular * min_clearance
-            right_candidate = waypoint_base - perpendicular * min_clearance
-            
-            left_clearance = min([np.linalg.norm(obs[0] - left_candidate) - obs[1] for obs in obstacles])
-            right_clearance = min([np.linalg.norm(obs[0] - right_candidate) - obs[1] for obs in obstacles])
-            
-            # Pick side with better clearance, or default to LEFT if equal
-            if right_clearance > left_clearance + 0.05:  # Right is significantly better
-                self.committed_direction = 'RIGHT'
-                best_waypoint = right_candidate
-                best_side = "RIGHT"
+            if self.committed_direction is None:
+                # First time - try both sides and pick best
+                for side_mult, side_name in [(1.0, "LEFT"), (-1.0, "RIGHT")]:
+                    candidate = waypoint_base + perpendicular * (offset * side_mult)
+                    
+                    # Check if waypoint is clear of ALL obstacles
+                    min_clearance_to_obstacles = float('inf')
+                    for obs_center, obs_radius in obstacles:
+                        dist_to_obs = np.linalg.norm(obs_center - candidate)
+                        clearance = dist_to_obs - obs_radius - 0.15  # Robot radius
+                        min_clearance_to_obstacles = min(min_clearance_to_obstacles, clearance)
+                    
+                    # Waypoint must be at least 10cm clear of all obstacles
+                    if min_clearance_to_obstacles > 0.10 and min_clearance_to_obstacles > best_clearance:
+                        best_clearance = min_clearance_to_obstacles
+                        best_waypoint = candidate
+                        best_side = side_name
+                        self.committed_direction = side_name
             else:
-                self.committed_direction = 'LEFT'
-                best_waypoint = left_candidate
-                best_side = "LEFT"
-            
-            self.get_logger().info(f"🎯 COMMITTED TO {best_side} direction (clearance: L={left_clearance:.2f}m, R={right_clearance:.2f}m)")
-        else:
-            # Use committed direction - STICK WITH IT!
-            min_clearance = key_radius + 0.15 + 0.05  # obstacle + robot + 5cm
-            if self.committed_direction == 'LEFT':
-                best_waypoint = waypoint_base + perpendicular * min_clearance
-                best_side = "LEFT"
-            else:
-                best_waypoint = waypoint_base - perpendicular * min_clearance
-                best_side = "RIGHT"
+                # Use committed direction
+                side_mult = 1.0 if self.committed_direction == 'LEFT' else -1.0
+                candidate = waypoint_base + perpendicular * (offset * side_mult)
+                
+                # Check if waypoint is clear of ALL obstacles
+                min_clearance_to_obstacles = float('inf')
+                for obs_center, obs_radius in obstacles:
+                    dist_to_obs = np.linalg.norm(obs_center - candidate)
+                    clearance = dist_to_obs - obs_radius - 0.15  # Robot radius
+                    min_clearance_to_obstacles = min(min_clearance_to_obstacles, clearance)
+                
+                # Waypoint must be at least 10cm clear of all obstacles
+                if min_clearance_to_obstacles > 0.10:
+                    best_waypoint = candidate
+                    best_side = self.committed_direction
+                    best_clearance = min_clearance_to_obstacles
+                    break  # Found safe waypoint, use it
+        
+        if best_waypoint is None:
+            # Fallback: use larger offset
+            offset = min_clearance * 2.5
+            side_mult = 1.0 if (self.committed_direction == 'LEFT' or self.committed_direction is None) else -1.0
+            best_waypoint = waypoint_base + perpendicular * offset * side_mult
+            best_side = "LEFT" if side_mult > 0 else "RIGHT"
+            if self.committed_direction is None:
+                self.committed_direction = best_side
         
         self.get_logger().info(
             f"📍 Generated waypoint: ({best_waypoint[0]:.3f}, {best_waypoint[1]:.3f}) "
-            f"on {best_side} side (COMMITTED)"
+            f"on {best_side} side, clearance={best_clearance:.2f}m"
         )
         
         return best_waypoint
@@ -963,24 +988,9 @@ class MPCNode(Node):
                 center_x = sum(x for x, y in cluster) / len(cluster)
                 center_y = sum(y for x, y in cluster) / len(cluster)
                 
-                # Normalize direction vector FROM robot TO obstacle center
-                robot_x = self.seeker_state[0]
-                robot_y = self.seeker_state[1]
-                dx = center_x - robot_x
-                dy = center_y - robot_y
-                dist = np.sqrt(dx*dx + dy*dy)
-                
-                if dist > 0.01 and dist < 2.0:  # Avoid division by zero, within range
-                    ux = dx / dist
-                    uy = dy / dist
-                    
-                    # Push obstacle center AWAY from robot by radius (more conservative)
-                    corrected_x = center_x + ux * obstacle_radius
-                    corrected_y = center_y + uy * obstacle_radius
-                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
-                else:
-                    # Too close or too far, use center as-is
-                    obstacles.append((np.array([center_x, center_y]), obstacle_radius))
+                # CRITICAL: Obstacles are in MAP FRAME (fixed world frame), NOT relative to robot!
+                # Don't adjust based on robot position - obstacles are fixed in world
+                obstacles.append((np.array([center_x, center_y]), obstacle_radius))
 
         return obstacles
 
@@ -1011,20 +1021,16 @@ class MPCNode(Node):
                 world_x = gx * resolution + origin_x + resolution / 2  # Cell center
                 world_y = gy * resolution + origin_y + resolution / 2
                 
-                # Distance from robot
+                # CRITICAL: Obstacles are in MAP FRAME (fixed world frame)
+                # Distance from robot (for filtering only, not for correction)
                 dx = world_x - robot_x
                 dy = world_y - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
-
-                ux = dx / dist
-                uy = dy / dist
-
-                corrected_x = world_x + ux * obstacle_radius
-                corrected_y = world_y + uy * obstacle_radius
                 
-                # Only within 1.5m of robot (reduced range for performance)
-                if dist < 1.5 and dist > 0.02:
-                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
+                # Only within 2.0m of robot (for performance)
+                # Obstacle position is FIXED in map frame, don't adjust it!
+                if dist < 2.0 and dist > 0.02:
+                    obstacles.append((np.array([world_x, world_y]), obstacle_radius))
         
         # Limit to closest 30 obstacles (for performance)
         if len(obstacles) > 30:
@@ -1416,6 +1422,8 @@ class MPCNode(Node):
                     self.get_logger().info(f"✓ Reached waypoint, clearing and resuming to final goal")
                     self.current_waypoint = None
                     self.waypoint_cleared_time = self.get_clock().now()  # Mark when cleared
+                    # Reset committed direction after reaching waypoint
+                    self.committed_direction = None
                     target_pos = final_goal
                 else:
                     target_pos = self.current_waypoint
@@ -1453,20 +1461,38 @@ class MPCNode(Node):
             self._obstacle_debug_count = 0
         self._obstacle_debug_count += 1
         
-        # WAYPOINT GENERATION: Check if path to goal is blocked and generate waypoint
-        # BUT: Don't generate new waypoint immediately after clearing one (cooldown period)
+        # WAYPOINT GENERATION: Only generate if path to FINAL GOAL is blocked
+        # After reaching a waypoint, go to final goal - don't generate new waypoints unless truly blocked
         if use_goal and self.current_waypoint is None:
-            can_generate = True
+            # Check if we just cleared a waypoint - if so, only generate new one if path to FINAL GOAL is blocked
+            just_cleared_waypoint = False
             if self.waypoint_cleared_time is not None:
                 time_since_clear = (self.get_clock().now() - self.waypoint_cleared_time).nanoseconds / 1e9
-                if time_since_clear < self.waypoint_cooldown:
-                    can_generate = False
-                    if self._obstacle_debug_count % 10 == 0:
-                        self.get_logger().info(
-                            f"⏳ Waypoint cooldown: {time_since_clear:.1f}s / {self.waypoint_cooldown}s"
+                if time_since_clear < 3.0:  # Within 3 seconds of clearing waypoint
+                    just_cleared_waypoint = True
+                    # Only generate new waypoint if path to FINAL GOAL is blocked (not just any obstacle)
+                    dist_to_final = np.linalg.norm(final_goal - x0[:2])
+                    if dist_to_final < 0.15:  # Very close to final goal, don't generate waypoint
+                        pass  # Don't generate
+                    else:
+                        # Check if path to FINAL GOAL is blocked
+                        new_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
+                        if new_waypoint is not None:
+                            self.current_waypoint = new_waypoint
+                            self.get_logger().warn(
+                                f"✅ NEW WAYPOINT (path to goal blocked): ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f})"
+                            )
+                else:
+                    # Enough time has passed, can generate normally
+                    new_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
+                    if new_waypoint is not None:
+                        self.current_waypoint = new_waypoint
+                        self.get_logger().warn(
+                            f"✅ WAYPOINT GENERATED: ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f}) "
+                            f"Direction: {self.committed_direction}"
                         )
-            
-            if can_generate:
+            else:
+                # No previous waypoint, generate normally
                 new_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
                 if new_waypoint is not None:
                     self.current_waypoint = new_waypoint
@@ -1474,13 +1500,6 @@ class MPCNode(Node):
                         f"✅ WAYPOINT GENERATED: ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f}) "
                         f"Direction: {self.committed_direction}"
                     )
-                else:
-                    # Reset committed direction if no obstacles blocking
-                    if self.committed_direction is not None:
-                        # Check if we're clear of obstacles
-                        if len(obstacles) == 0 or min([np.linalg.norm(obs[0] - x0[:2]) for obs in obstacles]) > 0.5:
-                            self.committed_direction = None
-                            self.get_logger().info("🔄 Reset committed direction - path clear")
                     
         
         # DEBUG: Log obstacles periodically - MORE FREQUENT
