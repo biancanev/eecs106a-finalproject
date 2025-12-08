@@ -230,9 +230,13 @@ class OfflineTrajectoryPlanner:
         
         plt.tight_layout()
         
+        # Always save the plot
         if save_path:
             plt.savefig(save_path, dpi=200, bbox_inches='tight')
             print(f"✅ Saved comprehensive trajectory plot to {save_path}")
-        else:
-            plt.show()
+        
+        # Show plot interactively and wait for user to close
+        print("📊 Displaying trajectory plot... Close the window to continue.")
+        plt.show(block=True)  # Block until window is closed
+        print("✅ Plot window closed, continuing...")
 
