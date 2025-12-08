@@ -161,7 +161,7 @@ class MPCNode(Node):
         
         # Waypoint system for routing around obstacles
         self.current_waypoint = None  # If set, use this instead of final goal
-        self.waypoint_reached_threshold = 0.2  # 20cm to consider waypoint "reached" (tight!)
+        self.waypoint_reached_threshold = 0.05  # 5cm to consider waypoint "reached" - MUST get very close!
         
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
@@ -483,8 +483,9 @@ class MPCNode(Node):
     
     def generate_waypoint_if_blocked(self, robot_pos, goal_pos, obstacles):
         """
-        Check if there's an IMMEDIATE obstacle directly ahead and generate waypoint.
-        Only triggers for obstacles within 0.25m straight ahead - reactive, not predictive.
+        Check if there's an EXTREME CLOSE obstacle directly ahead and generate waypoint.
+        Only triggers for obstacles within 0.05m straight ahead - last resort only!
+        MPC should handle everything else with its low position weight.
         
         Returns: waypoint position [x, y] if blocked NOW, None otherwise
         """
@@ -498,16 +499,17 @@ class MPCNode(Node):
         forward_dir = np.array([np.cos(robot_theta), np.sin(robot_theta)])
         
         # Only check obstacles that are:
-        # 1. VERY CLOSE (within 0.25m)
+        # 1. EXTREMELY CLOSE (within 0.05m = 5cm!)
         # 2. DIRECTLY AHEAD (within ±30 degrees of forward direction)
+        # This is LAST RESORT - MPC should handle everything else
         blocking_obstacles = []
         for center, radius in obstacles:
             # Vector from robot to obstacle
             to_obstacle = center - robot_xy
             dist_to_obstacle = np.linalg.norm(to_obstacle)
             
-            # Skip if too far
-            if dist_to_obstacle > 0.25:
+            # Skip if not extremely close - let MPC handle it!
+            if dist_to_obstacle > 0.05:
                 continue
             
             # Check if it's ahead of us
@@ -524,9 +526,9 @@ class MPCNode(Node):
         if not blocking_obstacles:
             return None  # No immediate obstacle ahead
         
-        # Immediate obstacle detected! Generate TIGHT waypoint
+        # EXTREMELY close obstacle detected! Generate emergency waypoint
         self.get_logger().warn(
-            f"🚨 IMMEDIATE obstacle within 0.25m! Generating emergency waypoint for {len(blocking_obstacles)} obstacles..."
+            f"🚨🚨 CRITICAL: obstacle within 0.05m! Last-resort waypoint for {len(blocking_obstacles)} obstacles..."
         )
         
         # Find the closest blocking obstacle
