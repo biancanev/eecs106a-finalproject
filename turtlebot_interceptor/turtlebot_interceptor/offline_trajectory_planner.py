@@ -52,7 +52,7 @@ class OfflineTrajectoryPlanner:
             target_seq[0, :] = goal_pos[0]
             target_seq[1, :] = goal_pos[1]
             
-            # Solve MPC
+            # Solve MPC with obstacles
             try:
                 twist_cmd = self.mpc.get_twist_command(current_state, target_seq, obstacles)
                 v_cmd = twist_cmd['linear']['x']
