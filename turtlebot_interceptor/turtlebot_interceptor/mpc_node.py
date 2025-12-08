@@ -503,19 +503,25 @@ class MPCNode(Node):
             
             # Accept reasonable obstacle sizes (cones are typically 0.1-0.2m radius)
             if 0.05 < radius < 0.6:  # Expanded range - was 0.06-0.5
-                # Normalize direction vector
+                # Normalize direction vector FROM robot TO obstacle center
                 current_x = self.seeker_state[0]
                 current_y = self.seeker_state[1]
                 dx = center_x - current_x
                 dy = center_y - current_y
                 dist = np.sqrt(dx**2 + dy**2)
-                ux = dx / dist
-                uy = dy / dist
-
-                # Push obstacle center backwards along ray
-                corrected_x = world_x + ux * radius
-                corrected_y = world_y + uy * radius
-                obstacles.append((np.array([corrected_x, corrected_y]), radius))
+                
+                if dist > 0.01:  # Avoid division by zero
+                    ux = dx / dist
+                    uy = dy / dist
+                    
+                    # Push obstacle center AWAY from robot by radius (more conservative)
+                    # This accounts for the fact that detected point might be on surface
+                    corrected_x = center_x + ux * radius
+                    corrected_y = center_y + uy * radius
+                    obstacles.append((np.array([corrected_x, corrected_y]), radius))
+                else:
+                    # Too close, use center as-is
+                    obstacles.append((np.array([center_x, center_y]), radius))
                 # DEBUG: Log each extracted obstacle
                 if self._occupied_debug_count % 20 == 0:
                     self.get_logger().error(
@@ -950,19 +956,25 @@ class MPCNode(Node):
             if len(cluster) >= 2:  # At least 2 cells to be real obstacle
                 center_x = sum(x for x, y in cluster) / len(cluster)
                 center_y = sum(y for x, y in cluster) / len(cluster)
-                obstacles.append((np.array([center_x, center_y]), obstacle_radius))
-        
-
-                if dist < 2.0 and dist > 0.02:
-                    # Normalize direction vector
+                
+                # Normalize direction vector FROM robot TO obstacle center
+                robot_x = self.seeker_state[0]
+                robot_y = self.seeker_state[1]
+                dx = center_x - robot_x
+                dy = center_y - robot_y
+                dist = np.sqrt(dx*dx + dy*dy)
+                
+                if dist > 0.01 and dist < 2.0:  # Avoid division by zero, within range
                     ux = dx / dist
                     uy = dy / dist
-
-                    # Push obstacle center backwards along ray
-                    corrected_x = world_x + ux * obstacle_radius
-                    corrected_y = world_y + uy * obstacle_radius
-
+                    
+                    # Push obstacle center AWAY from robot by radius (more conservative)
+                    corrected_x = center_x + ux * obstacle_radius
+                    corrected_y = center_y + uy * obstacle_radius
                     obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
+                else:
+                    # Too close or too far, use center as-is
+                    obstacles.append((np.array([center_x, center_y]), obstacle_radius))
 
         return obstacles
 
