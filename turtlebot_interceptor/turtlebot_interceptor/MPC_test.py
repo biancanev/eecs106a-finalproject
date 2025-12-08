@@ -47,12 +47,11 @@ class SimpleUnicycleMPC:
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - CRITICAL: Balance between reaching target and avoiding obstacles
-        # Position weight must be VERY LOW to allow zig-zag/detour paths
-        self.Qp_base = 5.0  # ULTRA-LOW - Let obstacles dictate path, position is secondary!
+        # Base weights - BALANCED for robust navigation
+        self.Qp_base = 30.0  # BALANCED - Strong goal tracking while allowing obstacle avoidance
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
         self.Ra_base = 0.1  # Allow movement but penalize excessive acceleration
-        self.Rw_base = 0.01  # ULTRA-LOW - encourage simultaneous turning + forward motion (curved paths)
+        self.Rw_base = 0.05  # BALANCED - smooth turns while still allowing curves
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -346,7 +345,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 1000000.0  # Strong but not excessive
+            repulsion_weight = 5000000.0  # Very high but balanced for robustness
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -374,37 +373,22 @@ class SimpleUnicycleMPC:
                     dy = py - center[1]
                     dist_sq = dx*dx + dy*dy
                     
-                    # Safety radius (obstacle radius + robot radius + margin)
-                    # Relaxed for better navigation
-                    # Robot physical radius ~0.15m
-                    safety_radius = radius + 0.05  # TIGHT margin - trust the sensors!
+                    # Safety radius - robust margin for reliable avoidance
+                    safety_radius = radius + 0.10  # 10cm buffer for safety
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # CRITICAL: ABSOLUTELY MASSIVE repulsion - robot CANNOT touch obstacles
-                    # Use exponential-like scaling to make close obstacles DOMINATE the cost
-                    if dist_sq < safety_radius_sq * 0.1:  # COLLISION IMMINENT!
-                        # Essentially infinite cost - optimizer will do ANYTHING to avoid
-                        obstacle_cost_value += repulsion_weight * 1000000.0 / (dist_sq + 0.000001)
-                    elif dist_sq < safety_radius_sq * 0.25:  # EMERGENCY - TOO CLOSE!
-                        # Absolutely catastrophic
-                        obstacle_cost_value += repulsion_weight * 100000.0 / (dist_sq + 0.00001)
-                    elif dist_sq < safety_radius_sq * 0.5:  # VERY CLOSE - EMERGENCY!
-                        # Catastrophic cost
+                    # Tiered proximity-based penalties - balanced and robust
+                    if dist_sq < safety_radius_sq * 0.2:  # VERY CLOSE - DANGER!
                         obstacle_cost_value += repulsion_weight * 10000.0 / (dist_sq + 0.0001)
-                    elif dist_sq < safety_radius_sq:  # Within safety radius - CRITICAL!
-                        # EXTREME penalty
+                    elif dist_sq < safety_radius_sq * 0.5:  # CLOSE - WARNING!
                         obstacle_cost_value += repulsion_weight * 1000.0 / (dist_sq + 0.001)
-                    elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
-                        # Very high penalty - start curving away
+                    elif dist_sq < safety_radius_sq:  # Within safety radius
                         obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.01)
-                    elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
-                        # High penalty - plan ahead
+                    elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
                         obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.1)
-                    elif dist_sq < safety_radius_sq * 9:  # Within 9x safety radius
-                        # Moderate penalty - be aware
+                    elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
                         obstacle_cost_value += repulsion_weight / (dist_sq + 0.5)
                     else:  # Far away
-                        # Small penalty - just awareness
                         obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + safety_radius_sq)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
