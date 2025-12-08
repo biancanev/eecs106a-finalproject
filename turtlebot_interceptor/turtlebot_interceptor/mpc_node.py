@@ -13,7 +13,7 @@ import numpy as np
 import math
 import transforms3d.euler as euler
 from turtlebot_interceptor.MPC_test import SimpleUnicycleMPC
-
+from visualization_msgs.msg import Marker, MarkerArray
 
 class MPCNode(Node):
     def __init__(self):
@@ -121,7 +121,7 @@ class MPCNode(Node):
         from visualization_msgs.msg import Marker
         self.traj_pub = self.create_publisher(Marker, '/mpc_trajectory', 10)
         self.waypoint_pub = self.create_publisher(Marker, '/mpc_waypoint', 10)
-
+        self.obs_pub = self.create_publisher(Marker, '/obstacles', 10)
         # State
         self.seeker_pose = None
         self.seeker_cov = None
@@ -182,7 +182,7 @@ class MPCNode(Node):
 
         # Startup delay: Wait 20 seconds for LIDAR, SLAM, and MCL to initialize
         self.startup_time = self.get_clock().now()
-        self.startup_delay = 60.0  # 20 seconds delay (increased for sensor stabilization)
+        self.startup_delay = 20.0  # 20 seconds delay (increased for sensor stabilization)
 
         # Timer for MPC updates
         # Start timer immediately, but check startup delay in callback
@@ -854,8 +854,8 @@ class MPCNode(Node):
             # Convert to world frame
             # CRITICAL: Add LIDAR frame offset to correct for mounting orientation
             world_angle = robot_theta + ray_angle + self.lidar_angle_offset
-            obstacle_x = robot_x + r * np.cos(world_angle)
-            obstacle_y = robot_y + r * np.sin(world_angle)
+            obstacle_x = robot_x + (r + obstacle_radius) * np.cos(world_angle)
+            obstacle_y = robot_y + (r + obstacle_radius) * np.sin(world_angle)
             
             obstacle_pos = np.array([obstacle_x, obstacle_y])
             obstacles.append((obstacle_pos, obstacle_radius))
@@ -929,7 +929,20 @@ class MPCNode(Node):
                 center_y = sum(y for x, y in cluster) / len(cluster)
                 obstacles.append((np.array([center_x, center_y]), obstacle_radius))
         
+
+                if dist < 2.0 and dist > 0.02:
+                    # Normalize direction vector
+                    ux = dx / dist
+                    uy = dy / dist
+
+                    # Push obstacle center backwards along ray
+                    corrected_x = world_x + ux * obstacle_radius
+                    corrected_y = world_y + uy * obstacle_radius
+
+                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
+
         return obstacles
+
     
     def extract_map_obstacles(self):
         """Extract obstacles from Cartographer map (persistent)"""
@@ -1309,7 +1322,7 @@ class MPCNode(Node):
             # CRITICAL DEBUG: Verify target sequence
             if self._debug_count % 20 == 0:
                 self.get_logger().error(
-                    f"DEBUG: target_seq[0,0]={target_seq[0,0]:.3f}, target_seq[1,0]={target_seq[1,0]:.3f}, "
+                    f"DEBUG: target_seq[0,0]={target_seq[0,0]:.3f},> target_seq[1,0]={target_seq[1,0]:.3f}, "
                     f"dx={target_seq[0,0]-x0[0]:.3f}, dy={target_seq[1,0]-x0[1]:.3f}"
                 )
         else:
@@ -1365,6 +1378,35 @@ class MPCNode(Node):
                         f"  Obstacle {i+1}: center=({center[0]:.3f}, {center[1]:.3f}), "
                         f"radius={radius:.3f}m, dist_to_robot={dist:.3f}m"
                     )
+                    marker = Marker()
+                    marker.header.frame_id = "map"
+                    marker.header.stamp = self.get_clock().now().to_msg()
+
+                    marker.ns = "obstacles"
+                    marker.id = i + 1
+                    marker.type = Marker.CYLINDER
+                    marker.action = Marker.ADD
+                    
+                    marker.pose.position.x = center[0]
+                    marker.pose.position.y = center[1]
+                    marker.pose.position.z = 0.0
+
+                    marker.pose.orientation.x = 0.0
+                    marker.pose.orientation.y = 0.0
+                    marker.pose.orientation.z = 0.0
+                    marker.pose.orientation.w = 1.0
+
+                    marker.scale.x = 2.0*radius
+                    marker.scale.y = 2.0*radius
+                    marker.scale.z = 0.1
+
+                    marker.color.r = 1.0
+                    marker.color.g = 1.0
+                    marker.color.b = 0.0
+                    marker.color.a = 0.7
+
+                    self.obs_pub.publish(marker)
+
             else:
                 self.get_logger().warn(
                     f"NO OCCUPIED CELLS NEAR ROBOT! Map has {total_occupied} total occupied cells "
