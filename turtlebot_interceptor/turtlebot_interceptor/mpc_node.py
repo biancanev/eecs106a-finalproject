@@ -861,7 +861,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.45  # 45cm emergency threshold
+        emergency_dist = 0.25  # 25cm emergency threshold - TIGHT for curved navigation
         front_range = np.pi / 6  # ±30 degrees
         
         for i, r in enumerate(ranges):
@@ -1195,7 +1195,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        safety_dist = 0.4  # 40cm safety threshold
+        safety_dist = 0.2  # 20cm safety threshold - TIGHT for curved navigation
         
         # Check direction we're moving
         move_direction = np.arctan2(new_y - y, new_x - x) - theta

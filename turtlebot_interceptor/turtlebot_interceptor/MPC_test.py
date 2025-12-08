@@ -52,7 +52,7 @@ class SimpleUnicycleMPC:
         self.Qp_base = 50.0  # REDUCED 10x - Obstacles MUST dominate over position tracking!
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
         self.Ra_base = 0.1  # Allow movement but penalize excessive acceleration
-        self.Rw_base = 1.0  # Penalize spinning - encourage smooth turns
+        self.Rw_base = 0.01  # ULTRA-LOW - encourage simultaneous turning + forward motion (curved paths)
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -377,7 +377,7 @@ class SimpleUnicycleMPC:
                     # Safety radius (obstacle radius + robot radius + margin)
                     # Relaxed for better navigation
                     # Robot physical radius ~0.15m
-                    safety_radius = radius + 0.25  # Reasonable margin
+                    safety_radius = radius + 0.05  # TIGHT margin - trust the sensors!
                     safety_radius_sq = safety_radius * safety_radius
                     
                     # CRITICAL: ABSOLUTELY MASSIVE repulsion - robot CANNOT touch obstacles
@@ -419,7 +419,7 @@ class SimpleUnicycleMPC:
                 dx = px0 - center[0]
                 dy = py0 - center[1]
                 dist = np.sqrt(dx*dx + dy*dy)
-                safety_radius = radius + 0.25  # Reasonable margin (SAME AS ABOVE)
+                safety_radius = radius + 0.05  # TIGHT margin (SAME AS ABOVE)
                 actual_clearance = dist - radius  # Actual distance to obstacle surface
                 if dist < safety_radius * 3.0:  # Within 3x safety radius
                     if dist < min_dist_to_obstacle:
@@ -444,7 +444,7 @@ class SimpleUnicycleMPC:
                     if closest_obstacle:
                         center, radius, dist = closest_obstacle
                         actual_clearance = dist - radius
-                        safety_radius_needed = radius + 0.25 + 0.35
+                        safety_radius_needed = radius + 0.05 + 0.15  # Robot radius
                         print(f"  Closest obstacle: center=({center[0]:.3f}, {center[1]:.3f}), "
                               f"radius={radius:.3f}m, dist_to_center={dist:.3f}m")
                         print(f"    CLEARANCE: {actual_clearance:.3f}m (need {safety_radius_needed:.3f}m), "
