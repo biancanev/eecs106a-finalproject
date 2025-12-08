@@ -180,9 +180,9 @@ class MPCNode(Node):
         # Initialize MPC
         self.mpc = SimpleUnicycleMPC(horizon=self.N, dt=self.dt)
 
-        # Startup delay: Wait 20 seconds for LIDAR, SLAM, and MCL to initialize
+        # Startup delay: Wait 60 seconds for LIDAR, SLAM, and MCL to initialize
         self.startup_time = self.get_clock().now()
-        self.startup_delay = 20.0  # 20 seconds delay (increased for sensor stabilization)
+        self.startup_delay = 60.0  # 60 seconds delay (increased for sensor stabilization)
         self.offline_trajectory_computed = False  # Track if we've computed offline trajectory
 
         # Timer for MPC updates
@@ -620,19 +620,19 @@ class MPCNode(Node):
             to_obstacle = center - robot_xy
             dist_to_obstacle = np.linalg.norm(to_obstacle)
             
-            # REQUIREMENT 1: Must be close (relaxed from 0.10 to 0.12 for better balance)
-            if dist_to_obstacle > 0.12:  # 12cm - balanced between too strict and too loose
+            # REQUIREMENT 1: Must be close - RELAXED to prevent oscillation
+            if dist_to_obstacle > 0.25:  # 25cm - much more lenient to catch obstacles earlier
                 continue
             
-            # REQUIREMENT 2: Must be directly ahead (relaxed from ±15° to ±20°)
+            # REQUIREMENT 2: Must be directly ahead - RELAXED for better detection
             if dist_to_obstacle > 0:
                 to_obstacle_norm = to_obstacle / dist_to_obstacle
                 
                 # Dot product = cos(angle) - close to 1.0 means straight ahead
                 forward_alignment = np.dot(to_obstacle_norm, forward_dir)
                 
-                # Only consider if within ±20 degrees (cos(20°) ≈ 0.940) - balanced
-                if forward_alignment < 0.940:
+                # Only consider if within ±30 degrees (cos(30°) ≈ 0.866) - more lenient
+                if forward_alignment < 0.866:
                     continue
                 
                 # REQUIREMENT 3: Must actually block path to GOAL
@@ -656,9 +656,9 @@ class MPCNode(Node):
         if not blocking_obstacles:
             return None  # No immediate obstacle ahead
         
-        # CRITICAL obstacle detected! Generate waypoint (very strict requirements met)
+        # Obstacle detected! Generate waypoint (relaxed requirements met)
         self.get_logger().warn(
-            f"🚨 CRITICAL: Obstacle <10cm, ±15°, blocking goal path! Generating waypoint for {len(blocking_obstacles)} obstacles..."
+            f"🚨 Obstacle <25cm, ±30°, blocking goal path! Generating waypoint for {len(blocking_obstacles)} obstacles..."
         )
         
         # Find the closest blocking obstacle
