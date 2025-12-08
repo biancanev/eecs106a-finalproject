@@ -22,7 +22,7 @@ class MPCNode(Node):
         # Declare parameters (lab4 + lab8 pattern)
         self.declare_parameter('mpc_horizon', 15)
         self.declare_parameter('dt', 0.1)
-        self.declare_parameter('v_max_base', 1.0)  # INCREASED: Faster movement
+        self.declare_parameter('v_max_base', 0.6)
         self.declare_parameter('v_min', 0.0)
         self.declare_parameter('omega_max', 1.5)
         # use_sim_time may be passed from launch file - declare only if not already set
@@ -152,9 +152,8 @@ class MPCNode(Node):
         # Emergency recovery state machine
         self.emergency_state = 'NORMAL'  # NORMAL, BACKUP, ROTATE, RECOVERY
         self.emergency_start_time = None
-        self.backup_duration = 0.1  # Back up for 0.1 seconds (very brief, just to re-evaluate)
-        self.rotate_duration = 1.0  # Rotate for up to 1 second to find clear path
-        self.emergency_timeout = 1.5  # Maximum time in emergency state before forcing exit
+        self.backup_duration = 1.5  # Back up for 1.5 seconds (longer to get more space)
+        self.rotate_duration = 3.0  # Rotate for up to 3 seconds to find clear path
         
         # Track safe trajectory for backing up along known-good path
         self.trajectory_history = []  # Store recent positions
@@ -164,9 +163,7 @@ class MPCNode(Node):
         self.current_waypoint = None  # If set, use this instead of final goal
         self.waypoint_reached_threshold = 0.20  # 20cm to consider waypoint "reached" - more forgiving
         self.waypoint_cleared_time = None  # Track when waypoint was last cleared
-        self.waypoint_cooldown = 30.0  # Don't generate new waypoint for 30 seconds after clearing (prevent continuous generation)
-        self.committed_direction = None  # 'LEFT' or 'RIGHT' - commit to a direction when blocked
-        self.waypoint_generated_this_obstacle = False  # Track if we've generated a waypoint for current obstacle
+        self.waypoint_cooldown = 50.0  # Don't generate new waypoint for 5 seconds after clearing (longer!)
         
         # ALGORITHMIC IMPROVEMENTS
         self.min_obstacle_distance = float('inf')  # Track closest obstacle
@@ -186,11 +183,7 @@ class MPCNode(Node):
         # Startup delay: Wait 60 seconds for LIDAR, SLAM, and MCL to initialize
         self.startup_time = self.get_clock().now()
         self.startup_delay = 60.0  # 60 seconds delay (increased for sensor stabilization)
-        self.offline_trajectory_computed = False  # Track if we've computed offline trajectory
-        self.goal_reached = False  # Track if goal has been reached
-        self.trajectory_history = []  # Store full trajectory history for analysis
-        self.command_history = []  # Store command history
-        
+
         # Timer for MPC updates
         # Start timer immediately, but check startup delay in callback
         self.timer = self.create_timer(self.dt, self.timer_callback)
@@ -594,8 +587,8 @@ class MPCNode(Node):
     
     def generate_waypoint_if_blocked(self, robot_pos, goal_pos, obstacles):
         """
-        Check if there's an obstacle DIRECTLY blocking the path to goal.
-        STRICT requirements: Very close, very directly ahead, AND actually blocking goal path.
+        Check if there's an obstacle directly ahead and generate waypoint.
+        Triggers for obstacles within 0.20m straight ahead - proactive avoidance.
         
         Returns: waypoint position [x, y] if blocked NOW, None otherwise
         """
@@ -605,62 +598,48 @@ class MPCNode(Node):
         robot_xy = robot_pos[:2]
         robot_theta = robot_pos[2]  # Current heading
         
-        # Direction to GOAL (not just forward!)
-        goal_dir = goal_pos - robot_xy
-        goal_dist = np.linalg.norm(goal_dir)
-        if goal_dist > 0:
-            goal_dir = goal_dir / goal_dist
-        else:
-            return None  # Already at goal
-        
-        # Forward direction based on CURRENT heading
+        # Forward direction based on CURRENT heading (not goal direction)
         forward_dir = np.array([np.cos(robot_theta), np.sin(robot_theta)])
         
-        # MUCH MORE AGGRESSIVE: Generate waypoint if obstacle is anywhere near the path
+        # Only check obstacles that are:
+        # 1. CLOSE (within 0.20m)
+        # 2. DIRECTLY AHEAD (within ±30 degrees of forward direction)
         blocking_obstacles = []
-        debug_info = []  # For logging
-        
         for center, radius in obstacles:
             # Vector from robot to obstacle
             to_obstacle = center - robot_xy
             dist_to_obstacle = np.linalg.norm(to_obstacle)
             
-            # REQUIREMENT 1: Must be VERY close - STRICT to avoid false positives
-            if dist_to_obstacle > 0.30:  # 30cm - only very close obstacles (was 60cm)
+            # Skip if not close enough
+            if dist_to_obstacle > 0.15:
                 continue
             
+            # Check if it's ahead of us
             if dist_to_obstacle > 0:
                 to_obstacle_norm = to_obstacle / dist_to_obstacle
                 
-                # REQUIREMENT 2: Check if obstacle is DIRECTLY in direction of GOAL
-                goal_alignment = np.dot(to_obstacle_norm, goal_dir)
+                # Dot product = cos(angle) - close to 1.0 means straight ahead
+                forward_alignment = np.dot(to_obstacle_norm, forward_dir)
                 
-                # STRICT: Obstacle must be directly in path to goal
-                if goal_alignment > 0.8:  # cos(37°) - much stricter, directly ahead (was 0.3)
-                    # Check if obstacle is between robot and goal
-                    proj_length = np.dot(to_obstacle, goal_dir)
-                    if 0 < proj_length < goal_dist:  # Obstacle is between robot and goal
-                        # Check perpendicular distance to goal line
-                        closest_pt_on_goal_line = robot_xy + goal_dir * proj_length
-                        perp_dist = np.linalg.norm(center - closest_pt_on_goal_line)
-                        
-                        # STRICT: Obstacle must be directly on the path
-                        if perp_dist < (radius + 0.20):  # Smaller margin - 20cm (was 40cm)
-                            blocking_obstacles.append((center, radius, dist_to_obstacle))
-        
+                # Only consider if within ±30 degrees (cos(30°) ≈ 0.866)
+                if forward_alignment > 0.866:
+                    blocking_obstacles.append((center, radius, dist_to_obstacle))
         
         if not blocking_obstacles:
             return None  # No immediate obstacle ahead
         
-        # Obstacle detected! Generate waypoint (STRICT requirements met)
+        # Close obstacle detected! Generate waypoint
         self.get_logger().warn(
-            f"🚨 Obstacle <30cm, directly blocking path! Generating waypoint for {len(blocking_obstacles)} obstacles..."
+            f"🚨 Obstacle within 0.20m ahead! Generating waypoint for {len(blocking_obstacles)} obstacles..."
         )
         
         # Find the closest blocking obstacle
         blocking_obstacles.sort(key=lambda x: x[2])  # Sort by distance
         closest_obstacle = blocking_obstacles[0]
         key_center, key_radius, key_dist = closest_obstacle
+        
+        # CRITICAL: Generate waypoint ALONG the path to goal, not perpendicular!
+        # We want to stay on the line to the goal, just shift slightly to avoid obstacle
         
         # Direction to GOAL (not just forward!)
         goal_dir = goal_pos - robot_xy
@@ -674,102 +653,92 @@ class MPCNode(Node):
         perpendicular = np.array([-goal_dir[1], goal_dir[0]])
         
         # Position waypoint ON THE PATH to goal, just shifted laterally
-        # COMMIT: Place waypoint much closer to goal to stay on path!
-        progress_distance = min(0.50, goal_dist * 0.50)  # 50% toward goal or 50cm max - COMMIT TO PATH!
+        # Stay VERY close to the direct line!
+        progress_distance = min(0.25, goal_dist * 0.25)  # 25% toward goal or 25cm max
         waypoint_base = robot_xy + goal_dir * progress_distance
         
-        # COMMIT TO A DIRECTION: Use committed direction if we have one, otherwise pick best
-        # CRITICAL: Ensure waypoint is NOT on an obstacle!
-        min_clearance = key_radius + 0.15 + 0.10  # obstacle + robot + 10cm safety
+        # ULTRA-MINIMAL lateral offsets - absolute minimum to clear obstacle
+        min_clearance = key_radius + 0.15 + 0.03  # obstacle + robot + 3cm (very tight!)
+        offset_candidates = [min_clearance, min_clearance * 1.05, min_clearance * 1.1, 0.18]
         
         best_waypoint = None
-        best_side = None
         best_clearance = -999.0
+        best_side = "LEFT"
         
-        # Try different offsets to find a safe waypoint
-        for offset_mult in [1.0, 1.2, 1.5, 2.0]:
-            offset = min_clearance * offset_mult
-            
-            if self.committed_direction is None:
-                # First time - try both sides and pick best
-                for side_mult, side_name in [(1.0, "LEFT"), (-1.0, "RIGHT")]:
-                    candidate = waypoint_base + perpendicular * (offset * side_mult)
-                    
-                    # Check if waypoint is clear of ALL obstacles
-                    min_clearance_to_obstacles = float('inf')
-                    for obs_center, obs_radius in obstacles:
-                        dist_to_obs = np.linalg.norm(obs_center - candidate)
-                        clearance = dist_to_obs - obs_radius - 0.15  # Robot radius
-                        min_clearance_to_obstacles = min(min_clearance_to_obstacles, clearance)
-                    
-                    # Waypoint must be at least 10cm clear of all obstacles
-                    if min_clearance_to_obstacles > 0.10 and min_clearance_to_obstacles > best_clearance:
-                        best_clearance = min_clearance_to_obstacles
-                        best_waypoint = candidate
-                        best_side = side_name
-                        self.committed_direction = side_name
-            else:
-                # Use committed direction
-                side_mult = 1.0 if self.committed_direction == 'LEFT' else -1.0
+        for offset in offset_candidates:
+            # Try both sides
+            for side_mult, side_name in [(1.0, "LEFT"), (-1.0, "RIGHT")]:
                 candidate = waypoint_base + perpendicular * (offset * side_mult)
                 
-                # Check if waypoint is clear of ALL obstacles
-                min_clearance_to_obstacles = float('inf')
-                for obs_center, obs_radius in obstacles:
-                    dist_to_obs = np.linalg.norm(obs_center - candidate)
-                    clearance = dist_to_obs - obs_radius - 0.15  # Robot radius
-                    min_clearance_to_obstacles = min(min_clearance_to_obstacles, clearance)
+                # Check clearance to ALL obstacles
+                clearances = [np.linalg.norm(obs[0] - candidate) - obs[1] for obs in obstacles]
+                min_clearance_val = min(clearances) if clearances else 999.0
                 
-                # Waypoint must be at least 10cm clear of all obstacles
-                if min_clearance_to_obstacles > 0.10:
+                # Also check if path from robot to waypoint is clear
+                path_clear = True
+                for obs_center, obs_radius in obstacles:
+                    # Check if obstacle intersects robot-waypoint line
+                    to_candidate = candidate - robot_xy
+                    dist_to_candidate = np.linalg.norm(to_candidate)
+                    if dist_to_candidate > 0:
+                        to_candidate_norm = to_candidate / dist_to_candidate
+                        proj = np.dot(obs_center - robot_xy, to_candidate_norm)
+                        if 0 < proj < dist_to_candidate:
+                            closest_pt = robot_xy + to_candidate_norm * proj
+                            perp_dist = np.linalg.norm(obs_center - closest_pt)
+                            if perp_dist < (obs_radius + 0.25):  # 25cm margin for path
+                                path_clear = False
+                                break
+                
+                # Keep best candidate
+                if path_clear and min_clearance_val > best_clearance:
+                    best_clearance = min_clearance_val
                     best_waypoint = candidate
-                    best_side = self.committed_direction
-                    best_clearance = min_clearance_to_obstacles
-                    break  # Found safe waypoint, use it
+                    best_side = side_name
+            
+            # If we found a good waypoint, use it (prefer tighter offsets)
+            if best_waypoint is not None and best_clearance > 0.1:
+                break
         
         if best_waypoint is None:
-            # Fallback: use larger offset
-            offset = min_clearance * 2.5
-            side_mult = 1.0 if (self.committed_direction == 'LEFT' or self.committed_direction is None) else -1.0
-            best_waypoint = waypoint_base + perpendicular * offset * side_mult
-            best_side = "LEFT" if side_mult > 0 else "RIGHT"
-            if self.committed_direction is None:
-                self.committed_direction = best_side
+            # Fallback: just go perpendicular at safe distance
+            best_waypoint = waypoint_base + perpendicular * 0.8
+            best_side = "LEFT"
         
         self.get_logger().info(
-            f"📍 Generated waypoint: ({best_waypoint[0]:.3f}, {best_waypoint[1]:.3f}) "
-            f"on {best_side} side, clearance={best_clearance:.2f}m"
+            f"📍 Tight waypoint at ({best_waypoint[0]:.2f}, {best_waypoint[1]:.2f}) - "
+            f"routing {best_side}, clearance={best_clearance:.2f}m"
         )
         
         return best_waypoint
     
     def compute_obstacles(self):
         """
-        Extract obstacles from Fast Local Grid ONLY.
-        Fast Local Grid stores obstacles in WORLD coordinates (map frame) - no drift!
-        Point cloud causes drift issues, so we use Fast Local Grid exclusively.
+        Extract obstacles with PRIORITY ordering.
+        Priority: Fast Local Grid > Scan-Matched Points > Raw LIDAR
         """
         if self.seeker_state is None:
             return []
         
         obstacles = []
         
-        # PRIORITY 1: Fast Local Grid (ONLY SOURCE - fixed in world frame, no drift)
-        # Fast Local Grid stores obstacles in world_obstacles dictionary in WORLD coordinates
-        # These don't drift as robot moves - they're fixed in the world frame
+        # PRIORITY 1: Fast Local Grid (HIGHEST - persistent, reliable memory)
         if self.local_map is not None:
             grid_obstacles = self.extract_map_obstacles_from_grid(self.local_map)
             obstacles.extend(grid_obstacles)
             if len(grid_obstacles) > 0 and not hasattr(self, '_grid_priority_logged'):
-                self.get_logger().info(f"✓ Using Fast Local Grid ONLY: {len(grid_obstacles)} obstacles (world frame, no drift)")
+                self.get_logger().info(f"✓ Using Fast Local Grid: {len(grid_obstacles)} obstacles")
                 self._grid_priority_logged = True
         
-        # DISABLED: Point cloud causes drift - Fast Local Grid is more reliable
-        # Fast Local Grid stores obstacles in world coordinates and doesn't drift
-        # if self.matched_points is not None and len(obstacles) < 5:
-        #     scan_obstacles = self.extract_scan_matched_obstacles()
-        #     if len(scan_obstacles) <= 5:
-        #         obstacles.extend(scan_obstacles)
+        # PRIORITY 2: Cartographer scan-matched points (MEDIUM - accurate but can be sparse)
+        if self.matched_points is not None and len(obstacles) < self.max_obstacles:
+            scan_obstacles = self.extract_scan_matched_obstacles()
+            obstacles.extend(scan_obstacles)
+        
+        # PRIORITY 3: Raw LIDAR (LOWEST - backup only)
+        if self.latest_scan is not None and len(obstacles) < self.max_obstacles:
+            lidar_obstacles = self.extract_lidar_obstacles()
+            obstacles.extend(lidar_obstacles)
         
         # Remove duplicates and limit total
         obstacles = self.merge_obstacles(obstacles)
@@ -795,23 +764,25 @@ class MPCNode(Node):
         
         try:
             # Extract points from PointCloud2
-            # CRITICAL: These points are ALREADY in MAP FRAME from Cartographer!
-            # Do NOT adjust them based on robot position - they're fixed in world coordinates
             for point in point_cloud2.read_points(self.matched_points, 
                                                   field_names=("x", "y", "z"), 
                                                   skip_nans=True):
                 px, py, pz = point
                 
-                # CRITICAL: Points are already in map frame - use them directly!
-                # Only compute distance for filtering, not for correction
+                # Distance from robot
                 dx = px - robot_x
                 dy = py - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
+
+                ux = dx / dist
+                uy = dy / dist
+
+                corrected_x = px + ux * obstacle_radius
+                corrected_y = py + uy * obstacle_radius
                 
-                # Only within 1.0m (reduced from 2.0m to avoid false positives)
-                # Obstacle position is FIXED in map frame - don't adjust it!
-                if 0.15 < dist < 1.0:
-                    obstacles.append((np.array([px, py]), obstacle_radius))
+                # Only within 2m
+                if 0.1 < dist < 2.0:
+                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
         except Exception as e:
             # Point cloud parsing can fail, fall back to LIDAR
             if not hasattr(self, '_pointcloud_error_logged'):
@@ -878,22 +849,59 @@ class MPCNode(Node):
             )
     
     def extract_lidar_obstacles(self):
-        """Convert LIDAR scan to immediate obstacles - DISABLED to prevent frame drift"""
-        # DISABLED: LIDAR obstacles cause frame drift issues
-        # Use map-based obstacles instead which are fixed in map frame
-        return []
+        """Convert LIDAR scan to immediate obstacles AND store persistently"""
+        if self.latest_scan is None or self.seeker_state is None:
+            return []
         
-        # OLD CODE (disabled):
-        # LIDAR scans are in base_link frame, converting to map frame causes drift
-        # Better to use map-based obstacles which are already in map frame
+        obstacles = []
+        robot_x = self.seeker_state[0]
+        robot_y = self.seeker_state[1]
+        robot_theta = self.seeker_state[2]
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        
+        # LIDAR scan parameters
+        angle_min = self.latest_scan.angle_min
+        angle_increment = self.latest_scan.angle_increment
+        ranges = self.latest_scan.ranges
+        range_max = self.latest_scan.range_max
+        
+        # Convert LIDAR points to obstacles
+        obstacle_radius = self.obstacle_radius_param  # From parameter
+        
+        for i, r in enumerate(ranges):
+            # Skip invalid readings
+            if r < 0.1 or r > range_max or not np.isfinite(r):
+                continue
+            
+            # Only consider obstacles within 2m
+            if r > 2.0:
+                continue
+            
+            # Angle of this ray in robot frame
+            ray_angle = angle_min + i * angle_increment
+            
+            # Convert to world frame
+            # CRITICAL: Add LIDAR frame offset to correct for mounting orientation
+            world_angle = robot_theta + ray_angle + self.lidar_angle_offset
+            obstacle_x = robot_x + (r + obstacle_radius) * np.cos(world_angle)
+            obstacle_y = robot_y + (r + obstacle_radius) * np.sin(world_angle)
+            
+            obstacle_pos = np.array([obstacle_x, obstacle_y])
+            obstacles.append((obstacle_pos, obstacle_radius))
+            
+            # Add to persistent storage
+            self.persistent_obstacles.append((obstacle_pos, obstacle_radius, current_time))
+        
+        # Clean up old obstacles (older than timeout)
+        self.persistent_obstacles = [
+            (pos, radius, t) for pos, radius, t in self.persistent_obstacles
+            if current_time - t < self.obstacle_timeout
+        ]
+        
+        return obstacles
     
     def extract_map_obstacles_from_grid(self, grid_map):
-        """
-        Extract obstacles from Fast Local Grid occupancy grid.
-        CRITICAL: Fast Local Grid stores obstacles in WORLD coordinates (map frame).
-        The grid origin moves with robot, but obstacles are stored in world frame.
-        We must convert grid coordinates back to world coordinates using the grid origin.
-        """
+        """Extract obstacles from occupancy grid with clustering to reduce noise"""
         if grid_map is None or self.seeker_state is None:
             return []
         
@@ -907,44 +915,25 @@ class MPCNode(Node):
         origin_x = grid_map.info.origin.position.x
         origin_y = grid_map.info.origin.position.y
         
-        # CRITICAL: Fast Local Grid publishes grid with robot-centric origin that MOVES with robot.
-        # The origin is: (robot_x - grid_size/2, robot_y - grid_size/2)
-        # But obstacles stored in world_obstacles are in FIXED world coordinates.
-        # When we extract, we must convert grid cell coordinates to world coordinates correctly.
-        # 
-        # Grid cell (gx, gy) in grid with origin (origin_x, origin_y):
-        #   world_x = origin_x + gx * resolution + resolution/2  (cell center)
-        #   world_y = origin_y + gy * resolution + resolution/2
-        #
-        # This should give us the FIXED world coordinates, not relative to robot!
-        
         # First pass: find all occupied cells within range
         occupied_cells = []
         for i in range(width * height):
-            if grid_map.data[i] > 80:  # High threshold to reduce noise
+            if grid_map.data[i] > 65:  # Higher threshold to reduce noise
                 gx = i % width
                 gy = i // width
+                world_x = gx * resolution + origin_x + resolution / 2
+                world_y = gy * resolution + origin_y + resolution / 2
                 
-                # CRITICAL: Convert grid coordinates to WORLD coordinates
-                # Use the grid origin from the message (which is robot-centric but correct at publish time)
-                # The world coordinate is: origin + grid_position + cell_center_offset
-                world_x = origin_x + gx * resolution + resolution / 2
-                world_y = origin_y + gy * resolution + resolution / 2
-                
-                # Verify: This world coordinate should be FIXED and not change as robot moves
-                # (assuming the obstacle is actually fixed in the world)
-                
-                # Distance from robot (for filtering only - not for correction!)
                 dx = world_x - robot_x
                 dy = world_y - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
                 
-                if 0.15 < dist < 1.5:  # Within 1.5m, ignore cells very close to robot
+                if 0.1 < dist < 2.0:  # Within 2m, ignore cells on robot
                     occupied_cells.append((world_x, world_y))
         
         # Second pass: cluster nearby cells into single obstacles
         obstacles = []
-        cluster_dist = 0.20  # 20cm clustering
+        cluster_dist = 0.15  # 15cm clustering
         obstacle_radius = self.obstacle_radius_param  # From parameter
         
         used = set()
@@ -963,30 +952,30 @@ class MPCNode(Node):
                     cluster.append((ox, oy))
                     used.add(j)
             
-            # Use cluster center as obstacle - REQUIRE MORE CELLS to be real obstacle
-            if len(cluster) >= 5:  # At least 5 cells to be real obstacle
+            # Use cluster center as obstacle
+            if len(cluster) >= 2:  # At least 2 cells to be real obstacle
                 center_x = sum(x for x, y in cluster) / len(cluster)
                 center_y = sum(y for x, y in cluster) / len(cluster)
                 
-                # CRITICAL: Obstacles are in WORLD FRAME (map frame) - fixed coordinates!
-                # Fast Local Grid stores obstacles in world_obstacles dictionary in world coordinates
-                # These don't drift as robot moves - they're fixed in the world
-                # 
-                # VERIFICATION: These world coordinates should be FIXED and not change
-                # as the robot moves. The grid origin moves, but we convert back to
-                # world coordinates correctly using the origin from the message.
-                obstacle_world_pos = np.array([center_x, center_y])
-                obstacles.append((obstacle_world_pos, obstacle_radius))
-        
-        # DEBUG: Verify obstacles are in world frame (optional logging)
-        if len(obstacles) > 0 and not hasattr(self, '_obstacle_world_frame_verified'):
-            self.get_logger().info(
-                f"✓ Extracted {len(obstacles)} obstacles from Fast Local Grid in WORLD frame. "
-                f"Robot at ({robot_x:.3f}, {robot_y:.3f}), "
-                f"First obstacle at ({obstacles[0][0][0]:.3f}, {obstacles[0][0][1]:.3f})"
-            )
-            self._obstacle_world_frame_verified = True
-        
+                # Normalize direction vector FROM robot TO obstacle center
+                robot_x = self.seeker_state[0]
+                robot_y = self.seeker_state[1]
+                dx = center_x - robot_x
+                dy = center_y - robot_y
+                dist = np.sqrt(dx*dx + dy*dy)
+                
+                if dist > 0.01 and dist < 2.0:  # Avoid division by zero, within range
+                    ux = dx / dist
+                    uy = dy / dist
+                    
+                    # Push obstacle center AWAY from robot by radius (more conservative)
+                    corrected_x = center_x + ux * obstacle_radius
+                    corrected_y = center_y + uy * obstacle_radius
+                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
+                else:
+                    # Too close or too far, use center as-is
+                    obstacles.append((np.array([center_x, center_y]), obstacle_radius))
+
         return obstacles
 
     
@@ -1010,27 +999,31 @@ class MPCNode(Node):
         obstacle_radius = self.obstacle_radius_param * 1.2  # Slightly larger for map obstacles
         
         for i in range(width * height):
-            if self.map.data[i] > 80:  # MUCH HIGHER threshold - only very occupied cells (was 30)
+            if self.map.data[i] > 30:  # Occupied
                 gx = i % width
                 gy = i // width
                 world_x = gx * resolution + origin_x + resolution / 2  # Cell center
                 world_y = gy * resolution + origin_y + resolution / 2
                 
-                # CRITICAL: Obstacles are in MAP FRAME (fixed world frame)
-                # Distance from robot (for filtering only, not for correction)
+                # Distance from robot
                 dx = world_x - robot_x
                 dy = world_y - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
+
+                ux = dx / dist
+                uy = dy / dist
+
+                corrected_x = world_x + ux * obstacle_radius
+                corrected_y = world_y + uy * obstacle_radius
                 
-                # Only within 0.8m of robot (reduced to avoid random obstacles, was 1.0m)
-                # Obstacle position is FIXED in map frame, don't adjust it!
-                if dist < 0.8 and dist > 0.15:  # Increased min distance to 15cm
-                    obstacles.append((np.array([world_x, world_y]), obstacle_radius))
+                # Only within 1.5m of robot (reduced range for performance)
+                if dist < 1.5 and dist > 0.02:
+                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
         
-        # Limit to closest 10 obstacles (reduced from 30 to avoid false positives)
-        if len(obstacles) > 10:
+        # Limit to closest 30 obstacles (for performance)
+        if len(obstacles) > 30:
             obstacles.sort(key=lambda obs: np.sqrt((obs[0][0]-robot_x)**2 + (obs[0][1]-robot_y)**2))
-            obstacles = obstacles[:10]
+            obstacles = obstacles[:30]
         
         # DEBUG
         if not hasattr(self, '_obstacle_count'):
@@ -1054,13 +1047,6 @@ class MPCNode(Node):
     def handle_emergency_recovery(self):
         """Handle emergency backup and recovery along known-safe path"""
         elapsed = (self.get_clock().now() - self.emergency_start_time).nanoseconds / 1e9
-        
-        # Force exit emergency state if stuck too long
-        if elapsed > self.emergency_timeout:
-            self.get_logger().warn('⚠️ Emergency timeout - forcing exit to NORMAL state')
-            self.emergency_state = 'NORMAL'
-            return
-        
         twist = Twist()
         
         if self.emergency_state == 'BACKUP':
@@ -1073,25 +1059,11 @@ class MPCNode(Node):
                     current_x = self.seeker_state[0]
                     current_y = self.seeker_state[1]
                     # Look at position from 0.5s ago (5 steps at 10Hz)
-                    prev_entry = self.trajectory_history[-5]
-                    
-                    # Extract pose from new format
-                    if 'pose' in prev_entry:
-                        prev_pose = prev_entry['pose']
-                        prev_x = prev_pose[0]
-                        prev_y = prev_pose[1]
-                    elif 'x' in prev_entry:
-                        # Old format fallback
-                        prev_x = prev_entry['x']
-                        prev_y = prev_entry['y']
-                    else:
-                        # No valid history, use current position
-                        prev_x = current_x
-                        prev_y = current_y
+                    prev_pos = self.trajectory_history[-5]
                     
                     # Calculate direction back to previous position
-                    dx = prev_x - current_x
-                    dy = prev_y - current_y
+                    dx = prev_pos['x'] - current_x
+                    dy = prev_pos['y'] - current_y
                     
                     # If significant distance, align to back up along that path
                     if np.sqrt(dx*dx + dy*dy) > 0.05:
@@ -1122,8 +1094,7 @@ class MPCNode(Node):
         elif self.emergency_state == 'ROTATE':
             # Phase 2: Rotate to find clear direction
             if elapsed < self.rotate_duration:
-                # Check if path ahead is clear (use less strict check)
-                # Just check if we can proceed forward slowly
+                # Check if path ahead is clear
                 if not self.check_immediate_collision():
                     # Found clear path!
                     self.emergency_state = 'RECOVERY'
@@ -1134,10 +1105,10 @@ class MPCNode(Node):
                     twist.angular.z = 0.5  # Rotate at 0.5 rad/s
                     self.get_logger().info(f'🔄 Rotating to find path... ({elapsed:.1f}s)')
             else:
-                # After rotation, just exit emergency - let MPC handle it
-                # Don't loop back to backup, just resume normal operation
-                self.emergency_state = 'NORMAL'
-                self.get_logger().info('✅ Exiting emergency recovery - resuming normal operation')
+                # Couldn't find clear path, try backing up more
+                self.emergency_state = 'BACKUP'
+                self.emergency_start_time = self.get_clock().now()
+                self.get_logger().warn('⚠️ No clear path found, backing up more...')
         
         elif self.emergency_state == 'RECOVERY':
             # Phase 3: Slowly resume - let MPC take over
@@ -1158,40 +1129,24 @@ class MPCNode(Node):
         if self.latest_scan is None or self.seeker_state is None:
             return False
         
-        # Don't trigger emergency if we haven't been running long enough
-        # Prevents false triggers at startup - MUCH LONGER DELAY
-        elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
-        if elapsed < self.startup_delay + 10.0:  # Wait 10 seconds after startup delay (was 2s)
-            return False
-        
         # Check LIDAR rays in front (±30 degrees)
         ranges = self.latest_scan.ranges
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.08  # 8cm emergency threshold - ONLY trigger when VERY close (was 15cm)
+        emergency_dist = 0.25  # 25cm emergency threshold - TIGHT for curved navigation
         front_range = np.pi / 6  # ±30 degrees
         
-        # Count valid readings in front
-        valid_readings = 0
-        close_readings = 0
-        
         for i, r in enumerate(ranges):
-            if not np.isfinite(r) or r > self.latest_scan.range_max or r < 0.01:
+            if not np.isfinite(r) or r > self.latest_scan.range_max:
                 continue
             
             angle = angle_min + i * angle_increment + self.lidar_angle_offset
             
             # Check if ray is pointing forward
             if abs(angle) < front_range:
-                valid_readings += 1
                 if r < emergency_dist:
-                    close_readings += 1
-        
-        # VERY STRICT: Need MANY close readings to trigger (avoid false positives)
-        # This prevents triggering on single noisy readings or walls far away
-        if valid_readings > 20 and close_readings >= 12:  # At least 12 close readings (was 8)
-            return True
+                    return True
         
         return False
     
@@ -1351,34 +1306,21 @@ class MPCNode(Node):
         if self.seeker_state is None:
             return
         
-        # For single robot navigation, use goal point if target not available
-        use_goal = (self.target_pose is None)
-        
-        # OFFLINE TRAJECTORY PLANNING: Compute full trajectory once at startup
-        if not self.offline_trajectory_computed and use_goal:
-            # Only for goal-based navigation (not target tracking)
-            if hasattr(self, 'goal_x') and hasattr(self, 'goal_y'):
-                self.compute_and_visualize_offline_trajectory()
-                self.offline_trajectory_computed = True
-        
         # EMERGENCY RECOVERY SYSTEM
         if self.emergency_state != 'NORMAL':
             self.handle_emergency_recovery()
             return
         
-        # Check for immediate collision danger - ONLY if we have valid sensor data
-        # Don't trigger on startup when sensors aren't ready
-        # Also don't trigger if we just exited emergency (give it time)
-        # MUCH LONGER DELAY to prevent false triggers
-        elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
-        if (self.latest_scan is not None and self.seeker_state is not None and 
-            self.emergency_state == 'NORMAL' and elapsed > self.startup_delay + 10.0):
-            if self.check_immediate_collision():
-                self.get_logger().warn('🚨 EMERGENCY: Obstacle ahead! Starting backup...')
-                self.emergency_state = 'BACKUP'
-                self.emergency_start_time = self.get_clock().now()
-                self.handle_emergency_recovery()
-                return
+        # Check for immediate collision danger
+        if self.check_immediate_collision():
+            self.get_logger().error('🚨 EMERGENCY: Obstacle ahead! Starting backup...')
+            self.emergency_state = 'BACKUP'
+            self.emergency_start_time = self.get_clock().now()
+            self.handle_emergency_recovery()
+            return
+        
+        # For single robot navigation, use goal point if target not available
+        use_goal = (self.target_pose is None)
 
         # Build initial state
         x0 = self.seeker_state.copy()
@@ -1399,13 +1341,6 @@ class MPCNode(Node):
             final_goal = np.array([self.goal_x, self.goal_y])
             dist_to_final_goal = np.linalg.norm(final_goal - x0[:2])
             
-            # GOAL REACHED: Generate final analysis and shutdown
-            if dist_to_final_goal < 0.08 and not self.goal_reached:  # Within 8cm - goal reached!
-                self.get_logger().info(f"🎉 GOAL REACHED! Distance: {dist_to_final_goal:.3f}m")
-                self.goal_reached = True
-                self.generate_final_analysis_and_shutdown()
-                return  # Stop MPC execution
-            
             # CRITICAL: If very close to FINAL goal, ignore obstacles and just go for it!
             if dist_to_final_goal < 0.15:  # Within 15cm of final goal
                 self.get_logger().info(f"🎯 Close to final goal ({dist_to_final_goal:.3f}m), ignoring obstacles!")
@@ -1418,9 +1353,6 @@ class MPCNode(Node):
                     self.get_logger().info(f"✓ Reached waypoint, clearing and resuming to final goal")
                     self.current_waypoint = None
                     self.waypoint_cleared_time = self.get_clock().now()  # Mark when cleared
-                    # Reset committed direction after reaching waypoint
-                    self.committed_direction = None
-                    self.waypoint_generated_this_obstacle = False  # Reset flag - can generate new one if needed
                     target_pos = final_goal
                 else:
                     target_pos = self.current_waypoint
@@ -1453,45 +1385,26 @@ class MPCNode(Node):
         # ALGORITHMIC IMPROVEMENT 2: Adaptive velocity scaling based on proximity
         self.velocity_scale_factor = self.compute_velocity_scale(self.min_obstacle_distance)
         
-        # Initialize debug counter if needed (must be before first use)
+        # WAYPOINT GENERATION: Check if path to goal is blocked and generate waypoint
+        # BUT: Don't generate new waypoint immediately after clearing one (cooldown period)
+        if use_goal and self.current_waypoint is None:
+            can_generate = True
+            if self.waypoint_cleared_time is not None:
+                time_since_clear = (self.get_clock().now() - self.waypoint_cleared_time).nanoseconds / 1e9
+                if time_since_clear < self.waypoint_cooldown:
+                    can_generate = False
+                    if self._obstacle_debug_count % 10 == 0:
+                        self.get_logger().info(
+                            f"⏳ Waypoint cooldown: {time_since_clear:.1f}s / {self.waypoint_cooldown}s"
+                        )
+            
+            if can_generate:
+                self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
+        
+        # DEBUG: Log obstacles periodically - MORE FREQUENT
         if not hasattr(self, '_obstacle_debug_count'):
             self._obstacle_debug_count = 0
         self._obstacle_debug_count += 1
-        
-        # WAYPOINT GENERATION: Only generate ONE waypoint per obstacle, then go to final goal
-        # After reaching a waypoint, go to final goal - don't generate new waypoints
-        if use_goal and self.current_waypoint is None:
-            # Check if we just cleared a waypoint - if so, DON'T generate new one (go to final goal)
-            if self.waypoint_cleared_time is not None:
-                time_since_clear = (self.get_clock().now() - self.waypoint_cleared_time).nanoseconds / 1e9
-                if time_since_clear < self.waypoint_cooldown:  # Within cooldown period
-                    # Don't generate new waypoint - go to final goal
-                    pass
-                elif not self.waypoint_generated_this_obstacle:
-                    # Cooldown passed and haven't generated waypoint for this obstacle yet
-                    # Only generate if path to FINAL GOAL is truly blocked
-                    dist_to_final = np.linalg.norm(final_goal - x0[:2])
-                    if dist_to_final > 0.15:  # Not very close to final goal
-                        new_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
-                        if new_waypoint is not None:
-                            self.current_waypoint = new_waypoint
-                            self.waypoint_generated_this_obstacle = True  # Mark that we've generated one
-                            self.get_logger().warn(
-                                f"✅ ONE WAYPOINT GENERATED: ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f}) - then to goal"
-                            )
-            else:
-                # No previous waypoint, generate ONE if truly blocked
-                if not self.waypoint_generated_this_obstacle:
-                    new_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
-                    if new_waypoint is not None:
-                        self.current_waypoint = new_waypoint
-                        self.waypoint_generated_this_obstacle = True  # Mark that we've generated one
-                        self.get_logger().warn(
-                            f"✅ ONE WAYPOINT GENERATED: ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f}) - then to goal"
-                        )
-                    
-        
-        # DEBUG: Log obstacles periodically - MORE FREQUENT
         if self._obstacle_debug_count % 10 == 0:  # Every 1 second
             total_occupied = np.sum(np.array(self.map.data) > 30) if self.map else 0
             if obstacles and len(obstacles) > 0:
@@ -1640,27 +1553,25 @@ class MPCNode(Node):
         twist.angular.z = float(omega_cmd)
         self.cmd_pub.publish(twist)
         
-        # SAFETY FILTER: Check if command would cause collision
-        # MUCH LONGER DELAY to prevent false triggers at startup
-        elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
-        if elapsed > self.startup_delay + 10.0:  # Wait 10 seconds after startup
-            if not self.is_command_safe(v_cmd, omega_cmd):
-                self.get_logger().error('🛑 SAFETY FILTER: MPC planned unsafe path! Starting backup...')
-                # Trigger emergency backup - we know the path behind is safe
-                self.emergency_state = 'BACKUP'
-                self.emergency_start_time = self.get_clock().now()
-                self.handle_emergency_recovery()
-                return
-        
-        # Record trajectory history for final analysis (full format) - AFTER safety check
+        # Record successful position in trajectory history (for safe backup)
         if self.seeker_state is not None:
             self.trajectory_history.append({
-                'time': self.get_clock().now().nanoseconds / 1e9,
-                'pose': self.seeker_state.copy(),  # [x, y, theta, v]
-                'command': {'v': v_cmd, 'omega': omega_cmd},
-                'goal': [self.goal_x, self.goal_y] if hasattr(self, 'goal_x') else None
+                'x': self.seeker_state[0],
+                'y': self.seeker_state[1],
+                'theta': self.seeker_state[2]
             })
-            # Keep full history for final analysis (don't limit)
+            # Keep only recent history
+            if len(self.trajectory_history) > self.max_history_length:
+                self.trajectory_history.pop(0)
+        
+        # SAFETY FILTER: Check if command would cause collision
+        if not self.is_command_safe(v_cmd, omega_cmd):
+            self.get_logger().error('🛑 SAFETY FILTER: MPC planned unsafe path! Starting backup...')
+            # Trigger emergency backup - we know the path behind is safe
+            self.emergency_state = 'BACKUP'
+            self.emergency_start_time = self.get_clock().now()
+            self.handle_emergency_recovery()
+            return
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
@@ -1691,28 +1602,28 @@ class MPCNode(Node):
     def compute_velocity_scale(self, min_obs_dist):
         """
         ALGORITHMIC IMPROVEMENT: Adaptive velocity scaling based on obstacle proximity.
-        MORE AGGRESSIVE: Robot should commit to trajectories, not slow down too much.
+        Automatically slow down near obstacles for better reaction time and safety.
         
-        Returns: scale factor in [0.5, 1.0] - less conservative
+        Returns: scale factor in [0.3, 1.0]
         """
-        if min_obs_dist >= 0.8:
+        if min_obs_dist >= 1.0:
             # Far from obstacles - full speed
             return 1.0
-        elif min_obs_dist >= 0.4:
+        elif min_obs_dist >= 0.5:
             # Moderate distance - slight slowdown (linear interpolation)
-            # 0.8m -> 1.0, 0.4m -> 0.85
-            return 0.85 + 0.15 * (min_obs_dist - 0.4) / 0.4
-        elif min_obs_dist >= 0.25:
-            # Close - moderate slowdown
-            # 0.4m -> 0.85, 0.25m -> 0.7
-            return 0.7 + 0.15 * (min_obs_dist - 0.25) / 0.15
+            # 1.0m -> 1.0, 0.5m -> 0.8
+            return 0.8 + 0.2 * (min_obs_dist - 0.5) / 0.5
+        elif min_obs_dist >= 0.3:
+            # Close - significant slowdown
+            # 0.5m -> 0.8, 0.3m -> 0.5
+            return 0.5 + 0.3 * (min_obs_dist - 0.3) / 0.2
         elif min_obs_dist >= 0.15:
-            # Very close - significant slowdown but still moving
-            # 0.25m -> 0.7, 0.15m -> 0.5
-            return 0.5 + 0.2 * (min_obs_dist - 0.15) / 0.1
+            # Very close - major slowdown
+            # 0.3m -> 0.5, 0.15m -> 0.3
+            return 0.3 + 0.2 * (min_obs_dist - 0.15) / 0.15
         else:
             # Extremely close - minimum speed (but don't stop)
-            return 0.5
+            return 0.3
     
     def verify_full_trajectory_safety(self, x0, v, omega, obstacles, horizon_steps=10):
         """
@@ -1744,139 +1655,15 @@ class MPCNode(Node):
                 min_clearance = min(min_clearance, clearance)
                 
                 # If collision imminent, trajectory is unsafe
-                if clearance < 0.03:  # 3cm safety margin - only trigger when truly about to hit
+                if clearance < 0.05:  # 5cm safety margin
                     return False, clearance
         
         return True, min_clearance
-    
-    def generate_final_analysis_and_shutdown(self):
-        """Generate final trajectory analysis and shutdown gracefully"""
-        try:
-            from turtlebot_interceptor.final_analysis import FinalTrajectoryAnalysis
-            
-            self.get_logger().info("📊 Generating final trajectory analysis...")
-            
-            # Get final obstacles and map
-            obstacles = self.compute_obstacles()
-            map_data = None
-            if self.map is not None:
-                map_data = {
-                    'map': self.map,
-                    'origin': [self.map.info.origin.position.x, self.map.info.origin.position.y],
-                    'resolution': self.map.info.resolution
-                }
-            
-            goal_pos = np.array([self.goal_x, self.goal_y]) if hasattr(self, 'goal_x') else None
-            
-            # Generate analysis
-            analyzer = FinalTrajectoryAnalysis()
-            analyzer.analyze_and_visualize(
-                self.trajectory_history,
-                obstacles,
-                map_data,
-                goal_pos,
-                save_dir="/tmp"
-            )
-            
-            self.get_logger().info("✅ Final analysis complete. Shutting down...")
-            
-            # Stop publishing commands
-            stop_cmd = Twist()
-            self.cmd_pub.publish(stop_cmd)
-            
-            # Shutdown node
-            import sys
-            sys.exit(0)
-            
-        except Exception as e:
-            self.get_logger().error(f"⚠️ Final analysis failed: {e}")
-            import traceback
-            self.get_logger().error(traceback.format_exc())
-    
-    def compute_and_visualize_offline_trajectory(self):
-        """Compute full offline trajectory from current pose to goal using MPC with full environment"""
-        try:
-            from turtlebot_interceptor.offline_trajectory_planner import OfflineTrajectoryPlanner
-            
-            if self.seeker_state is None:
-                return
-            
-            # Get obstacles from current map - ensure we have obstacles!
-            obstacles = self.compute_obstacles()
-            
-            # If no obstacles from compute_obstacles, try extracting directly from map
-            if len(obstacles) == 0 and self.map is not None:
-                obstacles = self.extract_map_obstacles()
-                if len(obstacles) > 0:
-                    self.get_logger().info(f"✅ Extracted {len(obstacles)} obstacles directly from map")
-            
-            # Get goal
-            goal_pos = np.array([self.goal_x, self.goal_y])
-            start_pose = self.seeker_state.copy()
-            
-            self.get_logger().info(
-                f"📊 Computing offline trajectory: start=({start_pose[0]:.2f}, {start_pose[1]:.2f}), "
-                f"goal=({goal_pos[0]:.2f}, {goal_pos[1]:.2f}), obstacles={len(obstacles)}"
-            )
-            
-            # Prepare map data for visualization
-            map_data = None
-            if self.map is not None:
-                map_data = {
-                    'map': self.map,
-                    'origin': [self.map.info.origin.position.x, self.map.info.origin.position.y],
-                    'resolution': self.map.info.resolution
-                }
-                self.get_logger().info(f"📋 Map available: {self.map.info.width}x{self.map.info.height}, "
-                                     f"resolution={self.map.info.resolution:.3f}m")
-            
-            # Create planner
-            planner = OfflineTrajectoryPlanner(
-                dt=self.dt,
-                N=self.N,
-                v_max=self.v_max_base,
-                omega_max=self.omega_max
-            )
-            
-            # Plan trajectory
-            trajectory, commands = planner.plan_trajectory(start_pose, goal_pos, obstacles, max_steps=300)
-            
-            self.get_logger().info(
-                f"✅ Offline trajectory computed: {len(trajectory)} steps, {len(commands)} commands"
-            )
-            
-            # Visualize and save with full environment
-            import os
-            save_dir = "/tmp"
-            os.makedirs(save_dir, exist_ok=True)
-            save_path = os.path.join(save_dir, "offline_trajectory_full_environment.png")
-            
-            self.get_logger().info(
-                f"📊 Computing and displaying offline trajectory visualization..."
-            )
-            
-            # This will show the plot interactively and block until user closes it
-            planner.visualize_trajectory(trajectory, obstacles, goal_pos, map_data=map_data, save_path=save_path)
-            
-            self.get_logger().info(
-                f"✅ Offline trajectory visualization complete. Saved to: {save_path}"
-            )
-            
-        except Exception as e:
-            self.get_logger().warn(f"⚠️ Offline trajectory planning failed: {e}")
-            import traceback
-            self.get_logger().warn(traceback.format_exc())
     
     def is_command_safe(self, v_cmd, omega_cmd):
         """Check if executing this command would cause collision"""
         if self.latest_scan is None or self.seeker_state is None:
             return True  # No sensor data, allow
-        
-        # Don't trigger safety filter if we haven't been running long enough
-        # Prevents false triggers at startup - MUCH LONGER DELAY
-        elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
-        if elapsed < self.startup_delay + 10.0:  # Wait 10 seconds after startup delay (was 2s)
-            return True  # Allow commands during startup
         
         # Simulate one step forward with this command
         dt = 0.1
@@ -1894,25 +1681,8 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        # FIRST: Check obstacles directly - MORE RELIABLE
-        obstacles = self.compute_obstacles()
-        if obstacles:
-            robot_pos = np.array([x, y])
-            predicted_pos = np.array([new_x, new_y])
-            
-            # Check both current and predicted positions
-            for pos in [robot_pos, predicted_pos]:
-                for center, radius in obstacles:
-                    dist_to_center = np.linalg.norm(center - pos)
-                    clearance = dist_to_center - radius - 0.105  # Robot radius
-                    
-                    # VERY RELAXED: Stop if within 8cm (only when extremely close)
-                    if clearance < 0.08:
-                        return False
+        safety_dist = 0.2  # 20cm safety threshold - TIGHT for curved navigation
         
-        safety_dist = 0.08  # 8cm safety threshold - only trigger when extremely close
-        
-        # ALSO check LIDAR for immediate obstacles ahead
         # Check direction we're moving
         move_direction = np.arctan2(new_y - y, new_x - x) - theta
         move_direction = np.arctan2(np.sin(move_direction), np.cos(move_direction))  # Wrap
