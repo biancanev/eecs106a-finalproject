@@ -162,6 +162,8 @@ class MPCNode(Node):
         # Waypoint system for routing around obstacles
         self.current_waypoint = None  # If set, use this instead of final goal
         self.waypoint_reached_threshold = 0.20  # 20cm to consider waypoint "reached" - more forgiving
+        self.waypoint_cleared_time = None  # Track when waypoint was last cleared
+        self.waypoint_cooldown = 2.0  # Don't generate new waypoint for 2 seconds after clearing
         
         # ALGORITHMIC IMPROVEMENTS
         self.min_obstacle_distance = float('inf')  # Track closest obstacle
@@ -591,7 +593,7 @@ class MPCNode(Node):
             dist_to_obstacle = np.linalg.norm(to_obstacle)
             
             # Skip if not close enough
-            if dist_to_obstacle > 0.10:
+            if dist_to_obstacle > 0.15:
                 continue
             
             # Check if it's ahead of us
@@ -618,18 +620,28 @@ class MPCNode(Node):
         closest_obstacle = blocking_obstacles[0]
         key_center, key_radius, key_dist = closest_obstacle
         
-        # Calculate minimum clearance needed - TIGHT to stay close to path
-        min_clearance = key_radius + 0.15 + 0.05  # obstacle + robot + 5cm safety (very tight!)
+        # CRITICAL: Generate waypoint ALONG the path to goal, not perpendicular!
+        # We want to stay on the line to the goal, just shift slightly to avoid obstacle
         
-        # Perpendicular direction (rotate 90 degrees from FORWARD direction, not goal)
-        perpendicular = np.array([-forward_dir[1], forward_dir[0]])
+        # Direction to GOAL (not just forward!)
+        goal_dir = goal_pos - robot_xy
+        goal_dist = np.linalg.norm(goal_dir)
+        if goal_dist > 0:
+            goal_dir = goal_dir / goal_dist
+        else:
+            goal_dir = forward_dir  # Fallback
         
-        # Position waypoint CLOSE to the path - minimal deviation
-        waypoint_base = robot_xy + forward_dir * 0.10  # Just 15cm ahead (tighter!)
+        # Perpendicular to GOAL direction (not robot heading)
+        perpendicular = np.array([-goal_dir[1], goal_dir[0]])
         
-        # Try TIGHT offsets - stay close to the direct path
-        # Minimize lateral deviation for skinny trajectories
-        offset_candidates = [min_clearance, min_clearance * 1.2, min_clearance * 1.4, 0.20]
+        # Position waypoint ON THE PATH to goal, just shifted laterally
+        # Stay close to the direct line!
+        progress_distance = min(0.3, goal_dist * 0.3)  # 30% toward goal or 30cm max
+        waypoint_base = robot_xy + goal_dir * progress_distance
+        
+        # MINIMAL lateral offsets - just enough to clear obstacle
+        min_clearance = key_radius + 0.15 + 0.05  # obstacle + robot + 5cm
+        offset_candidates = [min_clearance, min_clearance * 1.1, min_clearance * 1.2, 0.25]
         
         best_waypoint = None
         best_clearance = -999.0
@@ -1274,8 +1286,9 @@ class MPCNode(Node):
             if self.current_waypoint is not None:
                 dist_to_waypoint = np.linalg.norm(self.current_waypoint - x0[:2])
                 if dist_to_waypoint < self.waypoint_reached_threshold:
-                    self.get_logger().info(f"✓ Reached waypoint, switching to final goal")
+                    self.get_logger().info(f"✓ Reached waypoint, clearing and resuming to final goal")
                     self.current_waypoint = None
+                    self.waypoint_cleared_time = self.get_clock().now()  # Mark when cleared
                     target_pos = final_goal
                 else:
                     target_pos = self.current_waypoint
@@ -1309,8 +1322,20 @@ class MPCNode(Node):
         self.velocity_scale_factor = self.compute_velocity_scale(self.min_obstacle_distance)
         
         # WAYPOINT GENERATION: Check if path to goal is blocked and generate waypoint
+        # BUT: Don't generate new waypoint immediately after clearing one (cooldown period)
         if use_goal and self.current_waypoint is None:
-            self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
+            can_generate = True
+            if self.waypoint_cleared_time is not None:
+                time_since_clear = (self.get_clock().now() - self.waypoint_cleared_time).nanoseconds / 1e9
+                if time_since_clear < self.waypoint_cooldown:
+                    can_generate = False
+                    if self._obstacle_debug_count % 10 == 0:
+                        self.get_logger().info(
+                            f"⏳ Waypoint cooldown: {time_since_clear:.1f}s / {self.waypoint_cooldown}s"
+                        )
+            
+            if can_generate:
+                self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
         
         # DEBUG: Log obstacles periodically - MORE FREQUENT
         if not hasattr(self, '_obstacle_debug_count'):
