@@ -226,27 +226,12 @@ class FastLocalGrid(Node):
             # Pose not initialized yet - skip to avoid storing obstacles at origin
             return
         
-        # CRITICAL: Use robot pose AT THE TIME THE SCAN WAS TAKEN, not current pose!
-        # This prevents obstacles from moving when robot rotates.
-        # The scan was taken at msg.header.stamp, so we should use the pose at that time.
-        # For now, we'll use the stored scan pose (updated in pose_callback to match scan timing)
-        # If scan is too old (>100ms), skip it to avoid using stale pose
-        scan_time = self.get_clock().now()
-        if msg.header.stamp.sec > 0 or msg.header.stamp.nanosec > 0:
-            # Convert scan timestamp to ROS time
-            from builtin_interfaces.msg import Time
-            scan_stamp = Time(sec=msg.header.stamp.sec, nanosec=msg.header.stamp.nanosec)
-            # For simplicity, use current pose if scan is recent (<100ms old)
-            # Otherwise, we'd need pose history which is complex
-            # The key fix: use scan_pose_* which is frozen at scan time, not robot_* which updates
-            scan_x = self.scan_pose_x if self.scan_pose_x != 0.0 else self.robot_x
-            scan_y = self.scan_pose_y if self.scan_pose_y != 0.0 else self.robot_y
-            scan_theta = self.scan_pose_theta if self.scan_pose_theta != 0.0 else self.robot_theta
-        else:
-            # No timestamp - use current pose (fallback)
-            scan_x = self.robot_x
-            scan_y = self.robot_y
-            scan_theta = self.robot_theta
+        # CRITICAL: Freeze robot pose at scan start to ensure all rays use SAME pose
+        # This prevents obstacles from being stored at wrong coordinates if robot moves during scan
+        # Store pose IMMEDIATELY at start of callback (before any processing)
+        scan_x = self.robot_x
+        scan_y = self.robot_y
+        scan_theta = self.robot_theta
         
         # CRITICAL: Skip scans during fast rotation to prevent scan smearing
         # During rotation, LIDAR scan takes time and robot orientation changes,
@@ -277,13 +262,6 @@ class FastLocalGrid(Node):
         self.prev_theta = self.robot_theta
         self.prev_theta_time = current_time
         
-        # CRITICAL: Store pose at scan time for this scan processing
-        # This ensures all rays use the SAME robot pose (at scan time)
-        # preventing obstacles from moving when robot rotates
-        self.scan_pose_x = self.robot_x
-        self.scan_pose_y = self.robot_y
-        self.scan_pose_theta = self.robot_theta
-        
         # Ray-cast each LIDAR beam
         angle = msg.angle_min
         
@@ -303,14 +281,16 @@ class FastLocalGrid(Node):
                 continue
             
             # Ray endpoint in WORLD frame
-            # CRITICAL: Obstacles are FIXED in world coordinates, independent of robot orientation!
-            # LIDAR angle is relative to robot's forward direction
-            # World angle = robot_orientation + lidar_angle + lidar_offset
-            # We use scan_theta (frozen) so all rays in scan use same robot orientation
+            # CRITICAL: Obstacles MUST be FIXED in world coordinates!
+            # LIDAR angle is relative to robot's forward direction (in robot frame)
+            # To convert to world frame: world_angle = robot_theta + lidar_angle + lidar_offset
+            # We use scan_theta (frozen at scan start) so all rays use SAME robot orientation
+            # This ensures obstacles are stored at CORRECT, FIXED world coordinates
             # MIRRORING FIX: Negate angle to flip left/right
-            world_angle = scan_theta + (-angle) + self.lidar_angle_offset  # Add robot orientation to LIDAR angle
-            end_x = scan_x + r * np.cos(world_angle)  # World coordinate - FIXED in world frame
-            end_y = scan_y + r * np.sin(world_angle)  # World coordinate - FIXED in world frame
+            world_angle = scan_theta + (-angle) + self.lidar_angle_offset
+            # CRITICAL: These are ABSOLUTE world coordinates - they don't change when robot rotates!
+            end_x = scan_x + r * np.cos(world_angle)  # FIXED world X coordinate
+            end_y = scan_y + r * np.sin(world_angle)  # FIXED world Y coordinate
             
             # Update world obstacles (stores in world coordinates)
             # CRITICAL: Using scan_pose_* ensures obstacles are stored at FIXED world coordinates
