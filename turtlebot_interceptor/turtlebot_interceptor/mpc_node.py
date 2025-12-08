@@ -1462,6 +1462,86 @@ class MPCNode(Node):
         if self.current_waypoint is not None:
             self.publish_waypoint(self.current_waypoint)
     
+    def compute_min_obstacle_distance(self, x0, obstacles):
+        """
+        ALGORITHMIC IMPROVEMENT: Compute minimum distance to any obstacle.
+        Used for adaptive velocity scaling and planning horizon adjustment.
+        """
+        if not obstacles or len(obstacles) == 0:
+            return float('inf')
+        
+        robot_pos = x0[:2]
+        min_dist = float('inf')
+        
+        for center, radius in obstacles:
+            # Distance from robot center to obstacle surface
+            dist_to_center = np.linalg.norm(center - robot_pos)
+            dist_to_surface = dist_to_center - radius
+            min_dist = min(min_dist, dist_to_surface)
+        
+        return max(0.0, min_dist)  # Clamp to non-negative
+    
+    def compute_velocity_scale(self, min_obs_dist):
+        """
+        ALGORITHMIC IMPROVEMENT: Adaptive velocity scaling based on obstacle proximity.
+        Automatically slow down near obstacles for better reaction time and safety.
+        
+        Returns: scale factor in [0.3, 1.0]
+        """
+        if min_obs_dist >= 1.0:
+            # Far from obstacles - full speed
+            return 1.0
+        elif min_obs_dist >= 0.5:
+            # Moderate distance - slight slowdown (linear interpolation)
+            # 1.0m -> 1.0, 0.5m -> 0.8
+            return 0.8 + 0.2 * (min_obs_dist - 0.5) / 0.5
+        elif min_obs_dist >= 0.3:
+            # Close - significant slowdown
+            # 0.5m -> 0.8, 0.3m -> 0.5
+            return 0.5 + 0.3 * (min_obs_dist - 0.3) / 0.2
+        elif min_obs_dist >= 0.15:
+            # Very close - major slowdown
+            # 0.3m -> 0.5, 0.15m -> 0.3
+            return 0.3 + 0.2 * (min_obs_dist - 0.15) / 0.15
+        else:
+            # Extremely close - minimum speed (but don't stop)
+            return 0.3
+    
+    def verify_full_trajectory_safety(self, x0, v, omega, obstacles, horizon_steps=10):
+        """
+        ALGORITHMIC IMPROVEMENT: Verify safety of ENTIRE predicted trajectory, not just first step.
+        Simulates robot motion forward and checks for collisions at each step.
+        
+        Returns: (is_safe, min_clearance_along_path)
+        """
+        if not obstacles or len(obstacles) == 0:
+            return True, float('inf')
+        
+        # Simulate forward motion
+        dt = 0.1  # 100ms steps
+        x, y, theta, v_curr = x0[0], x0[1], x0[2], x0[3]
+        min_clearance = float('inf')
+        
+        for step in range(horizon_steps):
+            # Simple kinematic model (same as MPC)
+            x += v_curr * np.cos(theta) * dt
+            y += v_curr * np.sin(theta) * dt
+            theta += omega * dt
+            v_curr = v  # Assume velocity reaches commanded value
+            
+            # Check clearance to all obstacles
+            robot_pos = np.array([x, y])
+            for obs_center, obs_radius in obstacles:
+                dist_to_center = np.linalg.norm(obs_center - robot_pos)
+                clearance = dist_to_center - obs_radius - 0.105  # Robot radius
+                min_clearance = min(min_clearance, clearance)
+                
+                # If collision imminent, trajectory is unsafe
+                if clearance < 0.05:  # 5cm safety margin
+                    return False, clearance
+        
+        return True, min_clearance
+    
     def is_command_safe(self, v_cmd, omega_cmd):
         """Check if executing this command would cause collision"""
         if self.latest_scan is None or self.seeker_state is None:
