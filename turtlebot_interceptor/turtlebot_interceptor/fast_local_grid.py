@@ -52,6 +52,11 @@ class FastLocalGrid(Node):
         self.robot_y = 0.0
         self.robot_theta = 0.0
         
+        # Track angular velocity to filter scans during rotation
+        self.prev_theta = 0.0
+        self.prev_theta_time = None
+        self.max_angular_velocity = 0.5  # rad/s - skip scans if rotating faster than this
+        
         # CRITICAL: LIDAR frame offset - ADJUST THIS TO FIX ALIGNMENT!
         # Test each value to find correct orientation:
         #   0.0      = No rotation (0°)
@@ -128,10 +133,24 @@ class FastLocalGrid(Node):
     def pose_callback(self, msg: PoseWithCovarianceStamped):
         """Update robot pose and reinitialize grid from global map"""
         old_x, old_y = self.robot_x, self.robot_y
+        old_theta = self.robot_theta
         self.robot_x = msg.pose.pose.position.x
         self.robot_y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
         _, _, self.robot_theta = euler.quat2euler([q.w, q.x, q.y, q.z])
+        
+        # Update angular velocity tracking for rotation filter
+        current_time = self.get_clock().now()
+        if self.prev_theta_time is None:
+            # First pose update - initialize
+            self.prev_theta = self.robot_theta
+            self.prev_theta_time = current_time
+        else:
+            # Update tracking (used by scan_callback to detect rotation)
+            dt = (current_time - self.prev_theta_time).nanoseconds / 1e9
+            if dt > 0.01:  # At least 10ms
+                self.prev_theta = old_theta  # Use previous theta for accurate omega calculation
+                self.prev_theta_time = current_time
         
         # If robot moved significantly, reinitialize grid from global map (feed forward the prior)
         moved = np.sqrt((self.robot_x - old_x)**2 + (self.robot_y - old_y)**2)
@@ -199,6 +218,35 @@ class FastLocalGrid(Node):
         if self.robot_x == 0.0 and self.robot_y == 0.0 and self.robot_theta == 0.0:
             # Pose not initialized yet - skip to avoid storing obstacles at origin
             return
+        
+        # CRITICAL: Skip scans during fast rotation to prevent scan smearing
+        # During rotation, LIDAR scan takes time and robot orientation changes,
+        # causing obstacles to appear everywhere around the robot
+        current_time = self.get_clock().now()
+        if self.prev_theta_time is not None:
+            dt = (current_time - self.prev_theta_time).nanoseconds / 1e9
+            if dt > 0.01:  # At least 10ms between scans
+                # Calculate angular velocity
+                dtheta = self.robot_theta - self.prev_theta
+                # Normalize angle difference to [-pi, pi]
+                dtheta = np.arctan2(np.sin(dtheta), np.cos(dtheta))
+                omega = abs(dtheta / dt)
+                
+                # Skip scan if rotating too fast
+                if omega > self.max_angular_velocity:
+                    # Aggressively decay obstacles during rotation instead of adding new ones
+                    for key in list(self.world_obstacles.keys()):
+                        self.world_obstacles[key] *= 0.8  # Fast decay
+                        if abs(self.world_obstacles[key]) < 1.0:
+                            del self.world_obstacles[key]
+                    # Regenerate grid and return (don't process this scan)
+                    self.regenerate_grid_from_world()
+                    self.publish_map()
+                    return
+        
+        # Update angular velocity tracking
+        self.prev_theta = self.robot_theta
+        self.prev_theta_time = current_time
         
         # Ray-cast each LIDAR beam
         angle = msg.angle_min
