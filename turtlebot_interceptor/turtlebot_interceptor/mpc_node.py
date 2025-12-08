@@ -591,7 +591,7 @@ class MPCNode(Node):
             dist_to_obstacle = np.linalg.norm(to_obstacle)
             
             # Skip if not close enough
-            if dist_to_obstacle > 0.20:
+            if dist_to_obstacle > 0.10:
                 continue
             
             # Check if it's ahead of us
