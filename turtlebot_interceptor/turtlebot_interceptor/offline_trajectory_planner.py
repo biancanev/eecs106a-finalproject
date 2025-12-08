@@ -14,7 +14,13 @@ class OfflineTrajectoryPlanner:
     def __init__(self, dt=0.1, N=15, v_max=0.35, omega_max=2.84):
         self.dt = dt
         self.N = N
-        self.mpc = SimpleUnicycleMPC(dt=dt, N=N, v_max=v_max, omega_max=omega_max)
+        # MPC uses 'horizon' not 'N', and doesn't accept v_max/omega_max in constructor
+        self.mpc = SimpleUnicycleMPC(horizon=N, dt=dt)
+        # Set velocity limits after initialization
+        self.mpc.v_max = v_max
+        self.mpc.vx_max = v_max  # Also set vx_max
+        self.mpc.omega_max = omega_max
+        self.mpc.wz_max = omega_max  # Also set wz_max
         
     def plan_trajectory(self, start_pose, goal_pos, obstacles, max_steps=200):
         """
