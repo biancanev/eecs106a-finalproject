@@ -152,9 +152,9 @@ class MPCNode(Node):
         # Emergency recovery state machine
         self.emergency_state = 'NORMAL'  # NORMAL, BACKUP, ROTATE, RECOVERY
         self.emergency_start_time = None
-        self.backup_duration = 0.8  # Back up for 0.8 seconds (shorter, less aggressive)
-        self.rotate_duration = 2.0  # Rotate for up to 2 seconds to find clear path
-        self.emergency_timeout = 5.0  # Maximum time in emergency state before forcing exit
+        self.backup_duration = 0.1  # Back up for 0.1 seconds (very brief, just to re-evaluate)
+        self.rotate_duration = 1.0  # Rotate for up to 1 second to find clear path
+        self.emergency_timeout = 1.5  # Maximum time in emergency state before forcing exit
         
         # Track safe trajectory for backing up along known-good path
         self.trajectory_history = []  # Store recent positions
@@ -164,8 +164,9 @@ class MPCNode(Node):
         self.current_waypoint = None  # If set, use this instead of final goal
         self.waypoint_reached_threshold = 0.20  # 20cm to consider waypoint "reached" - more forgiving
         self.waypoint_cleared_time = None  # Track when waypoint was last cleared
-        self.waypoint_cooldown = 1.0  # Don't generate new waypoint for 1 second after clearing (reduced from 3.0)
+        self.waypoint_cooldown = 30.0  # Don't generate new waypoint for 10 seconds after clearing (prevent continuous generation)
         self.committed_direction = None  # 'LEFT' or 'RIGHT' - commit to a direction when blocked
+        self.waypoint_generated_this_obstacle = False  # Track if we've generated a waypoint for current obstacle
         
         # ALGORITHMIC IMPROVEMENTS
         self.min_obstacle_distance = float('inf')  # Track closest obstacle
@@ -675,7 +676,7 @@ class MPCNode(Node):
         
         # Position waypoint ON THE PATH to goal, just shifted laterally
         # Stay close to the direct line but commit to a direction!
-        progress_distance = min(0.30, goal_dist * 0.30)  # 30% toward goal or 30cm max
+        progress_distance = min(0.20, goal_dist * 0.20)  # 20% toward goal or 20cm max (closer to path)
         waypoint_base = robot_xy + goal_dir * progress_distance
         
         # COMMIT TO A DIRECTION: Use committed direction if we have one, otherwise pick best
@@ -1027,9 +1028,9 @@ class MPCNode(Node):
                 dy = world_y - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
                 
-                # Only within 2.0m of robot (for performance)
+                # Only within 1.0m of robot (reduced to avoid random obstacles)
                 # Obstacle position is FIXED in map frame, don't adjust it!
-                if dist < 2.0 and dist > 0.02:
+                if dist < 1.0 and dist > 0.02:
                     obstacles.append((np.array([world_x, world_y]), obstacle_radius))
         
         # Limit to closest 30 obstacles (for performance)
@@ -1425,6 +1426,7 @@ class MPCNode(Node):
                     self.waypoint_cleared_time = self.get_clock().now()  # Mark when cleared
                     # Reset committed direction after reaching waypoint
                     self.committed_direction = None
+                    self.waypoint_generated_this_obstacle = False  # Reset flag - can generate new one if needed
                     target_pos = final_goal
                 else:
                     target_pos = self.current_waypoint
@@ -1462,45 +1464,37 @@ class MPCNode(Node):
             self._obstacle_debug_count = 0
         self._obstacle_debug_count += 1
         
-        # WAYPOINT GENERATION: Only generate if path to FINAL GOAL is blocked
-        # After reaching a waypoint, go to final goal - don't generate new waypoints unless truly blocked
+        # WAYPOINT GENERATION: Only generate ONE waypoint per obstacle, then go to final goal
+        # After reaching a waypoint, go to final goal - don't generate new waypoints
         if use_goal and self.current_waypoint is None:
-            # Check if we just cleared a waypoint - if so, only generate new one if path to FINAL GOAL is blocked
-            just_cleared_waypoint = False
+            # Check if we just cleared a waypoint - if so, DON'T generate new one (go to final goal)
             if self.waypoint_cleared_time is not None:
                 time_since_clear = (self.get_clock().now() - self.waypoint_cleared_time).nanoseconds / 1e9
-                if time_since_clear < 3.0:  # Within 3 seconds of clearing waypoint
-                    just_cleared_waypoint = True
-                    # Only generate new waypoint if path to FINAL GOAL is blocked (not just any obstacle)
+                if time_since_clear < self.waypoint_cooldown:  # Within cooldown period
+                    # Don't generate new waypoint - go to final goal
+                    pass
+                elif not self.waypoint_generated_this_obstacle:
+                    # Cooldown passed and haven't generated waypoint for this obstacle yet
+                    # Only generate if path to FINAL GOAL is truly blocked
                     dist_to_final = np.linalg.norm(final_goal - x0[:2])
-                    if dist_to_final < 0.15:  # Very close to final goal, don't generate waypoint
-                        pass  # Don't generate
-                    else:
-                        # Check if path to FINAL GOAL is blocked
+                    if dist_to_final > 0.15:  # Not very close to final goal
                         new_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
                         if new_waypoint is not None:
                             self.current_waypoint = new_waypoint
+                            self.waypoint_generated_this_obstacle = True  # Mark that we've generated one
                             self.get_logger().warn(
-                                f"✅ NEW WAYPOINT (path to goal blocked): ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f})"
+                                f"✅ ONE WAYPOINT GENERATED: ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f}) - then to goal"
                             )
-                else:
-                    # Enough time has passed, can generate normally
+            else:
+                # No previous waypoint, generate ONE if truly blocked
+                if not self.waypoint_generated_this_obstacle:
                     new_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
                     if new_waypoint is not None:
                         self.current_waypoint = new_waypoint
+                        self.waypoint_generated_this_obstacle = True  # Mark that we've generated one
                         self.get_logger().warn(
-                            f"✅ WAYPOINT GENERATED: ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f}) "
-                            f"Direction: {self.committed_direction}"
+                            f"✅ ONE WAYPOINT GENERATED: ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f}) - then to goal"
                         )
-            else:
-                # No previous waypoint, generate normally
-                new_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
-                if new_waypoint is not None:
-                    self.current_waypoint = new_waypoint
-                    self.get_logger().warn(
-                        f"✅ WAYPOINT GENERATED: ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f}) "
-                        f"Direction: {self.committed_direction}"
-                    )
                     
         
         # DEBUG: Log obstacles periodically - MORE FREQUENT
