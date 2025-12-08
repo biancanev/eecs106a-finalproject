@@ -32,12 +32,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'max_obstacles',
-            default_value='3',
+            default_value='5',
             description='Maximum number of obstacles to track'
         ),
         DeclareLaunchArgument(
             'obstacle_radius',
-            default_value='0.03',
+            default_value='0.20',
             description='Obstacle radius in meters (smaller = less conservative)'
         ),
         

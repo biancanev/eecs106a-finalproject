@@ -163,7 +163,7 @@ class MPCNode(Node):
         self.current_waypoint = None  # If set, use this instead of final goal
         self.waypoint_reached_threshold = 0.20  # 20cm to consider waypoint "reached" - more forgiving
         self.waypoint_cleared_time = None  # Track when waypoint was last cleared
-        self.waypoint_cooldown = 2.0  # Don't generate new waypoint for 2 seconds after clearing
+        self.waypoint_cooldown = 10.0  # Don't generate new waypoint for 2 seconds after clearing
         
         # ALGORITHMIC IMPROVEMENTS
         self.min_obstacle_distance = float('inf')  # Track closest obstacle
@@ -180,9 +180,9 @@ class MPCNode(Node):
         # Initialize MPC
         self.mpc = SimpleUnicycleMPC(horizon=self.N, dt=self.dt)
 
-        # Startup delay: Wait 20 seconds for LIDAR, SLAM, and MCL to initialize
+        # Startup delay: Wait 60 seconds for LIDAR, SLAM, and MCL to initialize
         self.startup_time = self.get_clock().now()
-        self.startup_delay = 20.0  # 20 seconds delay (increased for sensor stabilization)
+        self.startup_delay = 60.0  # 60 seconds delay (increased for sensor stabilization)
 
         # Timer for MPC updates
         # Start timer immediately, but check startup delay in callback
