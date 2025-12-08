@@ -163,7 +163,7 @@ class MPCNode(Node):
         self.current_waypoint = None  # If set, use this instead of final goal
         self.waypoint_reached_threshold = 0.20  # 20cm to consider waypoint "reached" - more forgiving
         self.waypoint_cleared_time = None  # Track when waypoint was last cleared
-        self.waypoint_cooldown = 10.0  # Don't generate new waypoint for 2 seconds after clearing
+        self.waypoint_cooldown = 30.0  # Don't generate new waypoint for 2 seconds after clearing
         
         # ALGORITHMIC IMPROVEMENTS
         self.min_obstacle_distance = float('inf')  # Track closest obstacle
@@ -503,7 +503,19 @@ class MPCNode(Node):
             
             # Accept reasonable obstacle sizes (cones are typically 0.1-0.2m radius)
             if 0.05 < radius < 0.6:  # Expanded range - was 0.06-0.5
-                obstacles.append((np.array([center_x, center_y]), radius))
+                # Normalize direction vector
+                current_x = self.seeker_state[0]
+                current_y = self.seeker_state[1]
+                dx = center_x - current_x
+                dy = center_y - current_y
+                dist = np.sqrt(dx**2 + dy**2)
+                ux = dx / dist
+                uy = dy / dist
+
+                # Push obstacle center backwards along ray
+                corrected_x = world_x + ux * radius
+                corrected_y = world_y + uy * radius
+                obstacles.append((np.array([corrected_x, corrected_y]), radius))
                 # DEBUG: Log each extracted obstacle
                 if self._occupied_debug_count % 20 == 0:
                     self.get_logger().error(
@@ -750,10 +762,16 @@ class MPCNode(Node):
                 dx = px - robot_x
                 dy = py - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
+
+                ux = dx / dist
+                uy = dy / dist
+
+                corrected_x = px + ux * obstacle_radius
+                corrected_y = py + uy * obstacle_radius
                 
                 # Only within 2m
                 if 0.1 < dist < 2.0:
-                    obstacles.append((np.array([px, py]), obstacle_radius))
+                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
         except Exception as e:
             # Point cloud parsing can fail, fall back to LIDAR
             if not hasattr(self, '_pointcloud_error_logged'):
@@ -974,10 +992,16 @@ class MPCNode(Node):
                 dx = world_x - robot_x
                 dy = world_y - robot_y
                 dist = np.sqrt(dx*dx + dy*dy)
+
+                ux = dx / dist
+                uy = dy / dist
+
+                corrected_x = world_x + ux * obstacle_radius
+                corrected_y = world_y + uy * obstacle_radius
                 
                 # Only within 1.5m of robot (reduced range for performance)
                 if dist < 1.5 and dist > 0.02:
-                    obstacles.append((np.array([world_x, world_y]), obstacle_radius))
+                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
         
         # Limit to closest 30 obstacles (for performance)
         if len(obstacles) > 30:
