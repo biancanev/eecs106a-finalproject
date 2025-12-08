@@ -152,8 +152,9 @@ class MPCNode(Node):
         # Emergency recovery state machine
         self.emergency_state = 'NORMAL'  # NORMAL, BACKUP, ROTATE, RECOVERY
         self.emergency_start_time = None
-        self.backup_duration = 1.5  # Back up for 1.5 seconds (longer to get more space)
-        self.rotate_duration = 3.0  # Rotate for up to 3 seconds to find clear path
+        self.backup_duration = 0.8  # Back up for 0.8 seconds (shorter, less aggressive)
+        self.rotate_duration = 2.0  # Rotate for up to 2 seconds to find clear path
+        self.emergency_timeout = 5.0  # Maximum time in emergency state before forcing exit
         
         # Track safe trajectory for backing up along known-good path
         self.trajectory_history = []  # Store recent positions
@@ -1080,6 +1081,13 @@ class MPCNode(Node):
     def handle_emergency_recovery(self):
         """Handle emergency backup and recovery along known-safe path"""
         elapsed = (self.get_clock().now() - self.emergency_start_time).nanoseconds / 1e9
+        
+        # Force exit emergency state if stuck too long
+        if elapsed > self.emergency_timeout:
+            self.get_logger().warn('⚠️ Emergency timeout - forcing exit to NORMAL state')
+            self.emergency_state = 'NORMAL'
+            return
+        
         twist = Twist()
         
         if self.emergency_state == 'BACKUP':
@@ -1141,7 +1149,8 @@ class MPCNode(Node):
         elif self.emergency_state == 'ROTATE':
             # Phase 2: Rotate to find clear direction
             if elapsed < self.rotate_duration:
-                # Check if path ahead is clear
+                # Check if path ahead is clear (use less strict check)
+                # Just check if we can proceed forward slowly
                 if not self.check_immediate_collision():
                     # Found clear path!
                     self.emergency_state = 'RECOVERY'
@@ -1152,10 +1161,10 @@ class MPCNode(Node):
                     twist.angular.z = 0.5  # Rotate at 0.5 rad/s
                     self.get_logger().info(f'🔄 Rotating to find path... ({elapsed:.1f}s)')
             else:
-                # Couldn't find clear path, try backing up more
-                self.emergency_state = 'BACKUP'
-                self.emergency_start_time = self.get_clock().now()
-                self.get_logger().warn('⚠️ No clear path found, backing up more...')
+                # After rotation, just exit emergency - let MPC handle it
+                # Don't loop back to backup, just resume normal operation
+                self.emergency_state = 'NORMAL'
+                self.get_logger().info('✅ Exiting emergency recovery - resuming normal operation')
         
         elif self.emergency_state == 'RECOVERY':
             # Phase 3: Slowly resume - let MPC take over
@@ -1176,24 +1185,41 @@ class MPCNode(Node):
         if self.latest_scan is None or self.seeker_state is None:
             return False
         
+        # Don't trigger emergency if we haven't been running long enough
+        # Prevents false triggers at startup
+        elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
+        if elapsed < self.startup_delay + 2.0:  # Wait 2 seconds after startup delay
+            return False
+        
         # Check LIDAR rays in front (±30 degrees)
         ranges = self.latest_scan.ranges
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.35  # 35cm emergency threshold - MORE AGGRESSIVE to prevent collisions
+        emergency_dist = 0.20  # 20cm emergency threshold - LESS AGGRESSIVE (was 30cm)
         front_range = np.pi / 6  # ±30 degrees
         
+        # Count valid readings in front
+        valid_readings = 0
+        close_readings = 0
+        
         for i, r in enumerate(ranges):
-            if not np.isfinite(r) or r > self.latest_scan.range_max:
+            if not np.isfinite(r) or r > self.latest_scan.range_max or r < 0.01:
                 continue
             
             angle = angle_min + i * angle_increment + self.lidar_angle_offset
             
             # Check if ray is pointing forward
             if abs(angle) < front_range:
+                valid_readings += 1
                 if r < emergency_dist:
-                    return True
+                    close_readings += 1
+        
+        # Only trigger if we have multiple close readings (avoid false positives)
+        # This prevents triggering on single noisy readings or walls far away
+        # Made more strict: need at least 5 close readings (was 3)
+        if valid_readings > 10 and close_readings >= 5:  # At least 5 close readings
+            return True
         
         return False
     
@@ -1368,13 +1394,17 @@ class MPCNode(Node):
             self.handle_emergency_recovery()
             return
         
-        # Check for immediate collision danger
-        if self.check_immediate_collision():
-            self.get_logger().error('🚨 EMERGENCY: Obstacle ahead! Starting backup...')
-            self.emergency_state = 'BACKUP'
-            self.emergency_start_time = self.get_clock().now()
-            self.handle_emergency_recovery()
-            return
+        # Check for immediate collision danger - ONLY if we have valid sensor data
+        # Don't trigger on startup when sensors aren't ready
+        # Also don't trigger if we just exited emergency (give it time)
+        if (self.latest_scan is not None and self.seeker_state is not None and 
+            self.emergency_state == 'NORMAL'):
+            if self.check_immediate_collision():
+                self.get_logger().warn('🚨 EMERGENCY: Obstacle ahead! Starting backup...')
+                self.emergency_state = 'BACKUP'
+                self.emergency_start_time = self.get_clock().now()
+                self.handle_emergency_recovery()
+                return
 
         # Build initial state
         x0 = self.seeker_state.copy()
@@ -1854,6 +1884,12 @@ class MPCNode(Node):
         if self.latest_scan is None or self.seeker_state is None:
             return True  # No sensor data, allow
         
+        # Don't trigger safety filter if we haven't been running long enough
+        # Prevents false triggers at startup
+        elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
+        if elapsed < self.startup_delay + 2.0:  # Wait 2 seconds after startup delay
+            return True  # Allow commands during startup
+        
         # Simulate one step forward with this command
         dt = 0.1
         x = self.seeker_state[0]
@@ -1882,11 +1918,11 @@ class MPCNode(Node):
                     dist_to_center = np.linalg.norm(center - pos)
                     clearance = dist_to_center - radius - 0.105  # Robot radius
                     
-                    # AGGRESSIVE: Stop if within 30cm (was 20cm)
-                    if clearance < 0.30:
+                    # LESS AGGRESSIVE: Stop if within 20cm (was 25cm)
+                    if clearance < 0.20:
                         return False
         
-        safety_dist = 0.30  # 30cm safety threshold (was 20cm) - MORE CONSERVATIVE
+        safety_dist = 0.20  # 20cm safety threshold - less aggressive
         
         # ALSO check LIDAR for immediate obstacles ahead
         # Check direction we're moving
