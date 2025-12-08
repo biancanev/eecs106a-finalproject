@@ -1387,8 +1387,9 @@ class MPCNode(Node):
                     marker.type = Marker.CYLINDER
                     marker.action = Marker.ADD
                     
-                    marker.pose.position.x = center[0]
-                    marker.pose.position.y = center[1]
+                    # Convert numpy types to Python float for ROS2
+                    marker.pose.position.x = float(center[0])
+                    marker.pose.position.y = float(center[1])
                     marker.pose.position.z = 0.0
 
                     marker.pose.orientation.x = 0.0
@@ -1396,8 +1397,8 @@ class MPCNode(Node):
                     marker.pose.orientation.z = 0.0
                     marker.pose.orientation.w = 1.0
 
-                    marker.scale.x = 2.0*radius
-                    marker.scale.y = 2.0*radius
+                    marker.scale.x = float(2.0*radius)
+                    marker.scale.y = float(2.0*radius)
                     marker.scale.z = 0.1
 
                     marker.color.r = 1.0
