@@ -189,11 +189,23 @@ class FastLocalGrid(Node):
         self.regenerate_grid_from_world()
     
     def scan_callback(self, msg: LaserScan):
-        """Process LIDAR scan and update WORLD obstacles"""
+        """
+        Process LIDAR scan and update WORLD obstacles.
+        CRITICAL: Uses robot pose to convert LIDAR to world coordinates.
+        If /amcl_pose drifts, world coordinates will drift!
+        Ensure /amcl_pose is from stable source (Cartographer/MCL, not raw odometry).
+        """
+        # CRITICAL: Verify robot pose is valid and initialized
+        if self.robot_x == 0.0 and self.robot_y == 0.0 and self.robot_theta == 0.0:
+            # Pose not initialized yet - skip to avoid storing obstacles at origin
+            return
+        
         # Ray-cast each LIDAR beam
         angle = msg.angle_min
         
-        # Decay all existing obstacles slightly
+        # Decay all existing obstacles slightly (but keep their world coordinates fixed)
+        # CRITICAL: The keys (world_x, world_y) in world_obstacles are FIXED world coordinates
+        # They should NOT change - only the log_odds values change
         for key in list(self.world_obstacles.keys()):
             self.world_obstacles[key] *= self.obstacle_decay_rate
             # Remove very weak obstacles
@@ -208,28 +220,44 @@ class FastLocalGrid(Node):
             
             # Ray endpoint in WORLD frame
             # CRITICAL: Add LIDAR frame offset to correct for mounting orientation
+            # CRITICAL: These coordinates are computed from robot pose in map frame
+            # If robot pose (self.robot_x, self.robot_y) drifts, these will drift too!
+            # Solution: Ensure /amcl_pose is from stable source (Cartographer/MCL)
             world_angle = self.robot_theta + angle + self.lidar_angle_offset
-            end_x = self.robot_x + r * np.cos(world_angle)
-            end_y = self.robot_y + r * np.sin(world_angle)
+            end_x = self.robot_x + r * np.cos(world_angle)  # World coordinate
+            end_y = self.robot_y + r * np.sin(world_angle)  # World coordinate
             
             # Update world obstacles (stores in world coordinates)
+            # CRITICAL: If robot pose drifts, end_x/end_y will drift, and obstacles
+            # will be stored at wrong world coordinates, causing drift!
+            # Ensure /amcl_pose is stable (Cartographer/MCL, not raw odometry)
             self.update_world_obstacles(self.robot_x, self.robot_y, end_x, end_y, 
                                        r < msg.range_max * 0.95)
             
             angle += msg.angle_increment
         
         # Regenerate robot-centric grid from world obstacles
+        # This projects FIXED world obstacles (if pose is stable) into moving grid
         self.regenerate_grid_from_world()
     
     def update_world_obstacles(self, x0, y0, x1, y1, hit_obstacle):
-        """Update obstacles in WORLD coordinates (not grid coordinates)"""
+        """
+        Update obstacles in WORLD coordinates (not grid coordinates).
+        CRITICAL: x0, y0, x1, y1 are already in WORLD coordinates from scan_callback.
+        We discretize to store in world_obstacles dictionary, but the coordinates
+        themselves are FIXED in world frame and don't change as robot moves.
+        """
         # Discretize to world grid (not robot-centric)
-        # Use resolution for discretization
+        # Use resolution for discretization - this creates a key for the dictionary
+        # The key is a discretized world coordinate, but the actual value is still world coordinate
         def discretize(wx, wy):
+            # Round to nearest resolution step - this is just for dictionary key
+            # The actual world coordinate is preserved
             return (round(wx / self.resolution) * self.resolution,
                    round(wy / self.resolution) * self.resolution)
         
         # Mark endpoint as occupied or free
+        # CRITICAL: end_key is a discretized world coordinate - FIXED in world frame
         end_key = discretize(x1, y1)
         
         if hit_obstacle:
@@ -248,9 +276,9 @@ class FastLocalGrid(Node):
         
         for i in range(1, num_samples):  # Skip start and end
             t = i / num_samples
-            wx = x0 + t * (x1 - x0)
-            wy = y0 + t * (y1 - y0)
-            free_key = discretize(wx, wy)
+            wx = x0 + t * (x1 - x0)  # World coordinate - FIXED
+            wy = y0 + t * (y1 - y0)  # World coordinate - FIXED
+            free_key = discretize(wx, wy)  # Discretized key - still world coordinate
             
             if free_key in self.world_obstacles:
                 self.world_obstacles[free_key] += self.log_odds_free
@@ -259,21 +287,29 @@ class FastLocalGrid(Node):
                     del self.world_obstacles[free_key]
     
     def regenerate_grid_from_world(self):
-        """Regenerate robot-centric grid from world obstacles"""
+        """
+        Regenerate robot-centric grid from world obstacles.
+        CRITICAL: world_obstacles dictionary contains FIXED world coordinates.
+        Grid origin moves with robot, but obstacles stay fixed in world frame.
+        """
         # Clear grid
         self.grid = np.zeros((self.width, self.height), dtype=np.float32)
         
-        # Grid bounds in world frame
+        # Grid bounds in world frame (moves with robot)
         min_x = self.robot_x - self.grid_size / 2
         min_y = self.robot_y - self.grid_size / 2
         max_x = self.robot_x + self.grid_size / 2
         max_y = self.robot_y + self.grid_size / 2
         
         # Project world obstacles into current robot-centric grid
+        # CRITICAL: world_obstacles keys are FIXED world coordinates (world_x, world_y)
+        # These don't change as robot moves - they're absolute positions in map frame
         for (world_x, world_y), log_odds in self.world_obstacles.items():
             # Check if obstacle is in current grid window
+            # world_x, world_y are FIXED - they don't change!
             if min_x <= world_x <= max_x and min_y <= world_y <= max_y:
-                # Convert to grid coordinates
+                # Convert FIXED world coordinates to grid coordinates
+                # Grid origin moves, but world coordinates are fixed
                 gx = int((world_x - min_x) / self.resolution)
                 gy = int((world_y - min_y) / self.resolution)
                 
