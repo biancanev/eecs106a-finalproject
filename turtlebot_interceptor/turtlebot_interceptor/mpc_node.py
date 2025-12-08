@@ -163,7 +163,7 @@ class MPCNode(Node):
         self.current_waypoint = None  # If set, use this instead of final goal
         self.waypoint_reached_threshold = 0.20  # 20cm to consider waypoint "reached" - more forgiving
         self.waypoint_cleared_time = None  # Track when waypoint was last cleared
-        self.waypoint_cooldown = 50.0  # Don't generate new waypoint for 5 seconds after clearing (longer!)
+        self.waypoint_cooldown = 3.0  # Don't generate new waypoint for 3 seconds after clearing
         
         # ALGORITHMIC IMPROVEMENTS
         self.min_obstacle_distance = float('inf')  # Track closest obstacle
@@ -184,7 +184,10 @@ class MPCNode(Node):
         self.startup_time = self.get_clock().now()
         self.startup_delay = 60.0  # 60 seconds delay (increased for sensor stabilization)
         self.offline_trajectory_computed = False  # Track if we've computed offline trajectory
-
+        self.goal_reached = False  # Track if goal has been reached
+        self.trajectory_history = []  # Store full trajectory history for analysis
+        self.command_history = []  # Store command history
+        
         # Timer for MPC updates
         # Start timer immediately, but check startup delay in callback
         self.timer = self.create_timer(self.dt, self.timer_callback)
@@ -635,12 +638,13 @@ class MPCNode(Node):
                 if forward_alignment < 0.866:
                     continue
                 
-                # REQUIREMENT 3: Must actually block path to GOAL
+                # REQUIREMENT 3: Must actually block path to GOAL (RELAXED)
                 # Project obstacle onto goal line
                 goal_alignment = np.dot(to_obstacle_norm, goal_dir)
                 
                 # Check if obstacle is on the path to goal (not just in front)
-                if goal_alignment > 0.7:  # Obstacle is in direction of goal
+                # RELAXED: Lower threshold from 0.7 to 0.5 - more lenient
+                if goal_alignment > 0.5:  # Obstacle is in direction of goal (more lenient)
                     # Check if obstacle actually blocks the direct path
                     # Project obstacle center onto goal line
                     proj_length = np.dot(to_obstacle, goal_dir)
@@ -649,8 +653,9 @@ class MPCNode(Node):
                         closest_pt_on_goal_line = robot_xy + goal_dir * proj_length
                         perp_dist = np.linalg.norm(center - closest_pt_on_goal_line)
                         
+                        # RELAXED: Larger margin from (radius + 0.15) to (radius + 0.25)
                         # If obstacle is within (radius + safety) of goal line, it's blocking
-                        if perp_dist < (radius + 0.15):  # Robot radius + margin
+                        if perp_dist < (radius + 0.25):  # Robot radius + larger margin
                             blocking_obstacles.append((center, radius, dist_to_obstacle))
         
         if not blocking_obstacles:
@@ -1376,6 +1381,13 @@ class MPCNode(Node):
             final_goal = np.array([self.goal_x, self.goal_y])
             dist_to_final_goal = np.linalg.norm(final_goal - x0[:2])
             
+            # GOAL REACHED: Generate final analysis and shutdown
+            if dist_to_final_goal < 0.08 and not self.goal_reached:  # Within 8cm - goal reached!
+                self.get_logger().info(f"🎉 GOAL REACHED! Distance: {dist_to_final_goal:.3f}m")
+                self.goal_reached = True
+                self.generate_final_analysis_and_shutdown()
+                return  # Stop MPC execution
+            
             # CRITICAL: If very close to FINAL goal, ignore obstacles and just go for it!
             if dist_to_final_goal < 0.15:  # Within 15cm of final goal
                 self.get_logger().info(f"🎯 Close to final goal ({dist_to_final_goal:.3f}m), ignoring obstacles!")
@@ -1434,7 +1446,22 @@ class MPCNode(Node):
                         )
             
             if can_generate:
-                self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
+                new_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
+                if new_waypoint is not None:
+                    self.current_waypoint = new_waypoint
+                    self.get_logger().warn(
+                        f"✅ WAYPOINT GENERATED: ({new_waypoint[0]:.2f}, {new_waypoint[1]:.2f})"
+                    )
+                else:
+                    # DEBUG: Log why waypoint wasn't generated
+                    if self._obstacle_debug_count % 10 == 0 and len(obstacles) > 0:
+                        # Check closest obstacle
+                        closest_obs = min(obstacles, key=lambda obs: np.linalg.norm(obs[0] - x0[:2]))
+                        obs_dist = np.linalg.norm(closest_obs[0] - x0[:2])
+                        self.get_logger().warn(
+                            f"⚠️ No waypoint generated. Closest obstacle: {obs_dist:.3f}m away, "
+                            f"threshold: 0.25m"
+                        )
         
         # DEBUG: Log obstacles periodically - MORE FREQUENT
         if not hasattr(self, '_obstacle_debug_count'):
@@ -1588,16 +1615,15 @@ class MPCNode(Node):
         twist.angular.z = float(omega_cmd)
         self.cmd_pub.publish(twist)
         
-        # Record successful position in trajectory history (for safe backup)
+        # Record trajectory history for final analysis (full format)
         if self.seeker_state is not None:
             self.trajectory_history.append({
-                'x': self.seeker_state[0],
-                'y': self.seeker_state[1],
-                'theta': self.seeker_state[2]
+                'time': self.get_clock().now().nanoseconds / 1e9,
+                'pose': self.seeker_state.copy(),  # [x, y, theta, v]
+                'command': {'v': v_cmd, 'omega': omega_cmd},
+                'goal': [self.goal_x, self.goal_y] if hasattr(self, 'goal_x') else None
             })
-            # Keep only recent history
-            if len(self.trajectory_history) > self.max_history_length:
-                self.trajectory_history.pop(0)
+            # Keep full history for final analysis (don't limit)
         
         # SAFETY FILTER: Check if command would cause collision
         if not self.is_command_safe(v_cmd, omega_cmd):
@@ -1607,6 +1633,15 @@ class MPCNode(Node):
             self.emergency_start_time = self.get_clock().now()
             self.handle_emergency_recovery()
             return
+        
+        # Store trajectory history for final analysis
+        if self.seeker_state is not None:
+            self.trajectory_history.append({
+                'time': self.get_clock().now().nanoseconds / 1e9,
+                'pose': self.seeker_state.copy(),
+                'command': {'v': v_cmd, 'omega': omega_cmd},
+                'goal': [self.goal_x, self.goal_y] if hasattr(self, 'goal_x') else None
+            })
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
@@ -1695,6 +1730,50 @@ class MPCNode(Node):
         
         return True, min_clearance
     
+    def generate_final_analysis_and_shutdown(self):
+        """Generate final trajectory analysis and shutdown gracefully"""
+        try:
+            from turtlebot_interceptor.final_analysis import FinalTrajectoryAnalysis
+            
+            self.get_logger().info("📊 Generating final trajectory analysis...")
+            
+            # Get final obstacles and map
+            obstacles = self.compute_obstacles()
+            map_data = None
+            if self.map is not None:
+                map_data = {
+                    'map': self.map,
+                    'origin': [self.map.info.origin.position.x, self.map.info.origin.position.y],
+                    'resolution': self.map.info.resolution
+                }
+            
+            goal_pos = np.array([self.goal_x, self.goal_y]) if hasattr(self, 'goal_x') else None
+            
+            # Generate analysis
+            analyzer = FinalTrajectoryAnalysis()
+            analyzer.analyze_and_visualize(
+                self.trajectory_history,
+                obstacles,
+                map_data,
+                goal_pos,
+                save_dir="/tmp"
+            )
+            
+            self.get_logger().info("✅ Final analysis complete. Shutting down...")
+            
+            # Stop publishing commands
+            stop_cmd = Twist()
+            self.cmd_pub.publish(stop_cmd)
+            
+            # Shutdown node
+            import sys
+            sys.exit(0)
+            
+        except Exception as e:
+            self.get_logger().error(f"⚠️ Final analysis failed: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+    
     def compute_and_visualize_offline_trajectory(self):
         """Compute full offline trajectory from current pose to goal using MPC with full environment"""
         try:
@@ -1747,9 +1826,16 @@ class MPCNode(Node):
             os.makedirs(save_dir, exist_ok=True)
             save_path = os.path.join(save_dir, "offline_trajectory_full_environment.png")
             
+            self.get_logger().info(
+                f"📊 Computing and displaying offline trajectory visualization..."
+            )
+            
+            # This will show the plot interactively and block until user closes it
             planner.visualize_trajectory(trajectory, obstacles, goal_pos, map_data=map_data, save_path=save_path)
             
-            self.get_logger().info(f"📈 Comprehensive offline trajectory saved to: {save_path}")
+            self.get_logger().info(
+                f"✅ Offline trajectory visualization complete. Saved to: {save_path}"
+            )
             
         except Exception as e:
             self.get_logger().warn(f"⚠️ Offline trajectory planning failed: {e}")
