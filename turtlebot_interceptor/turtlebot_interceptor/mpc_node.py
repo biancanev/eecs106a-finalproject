@@ -120,6 +120,7 @@ class MPCNode(Node):
         # Trajectory visualization
         from visualization_msgs.msg import Marker
         self.traj_pub = self.create_publisher(Marker, '/mpc_trajectory', 10)
+        self.waypoint_pub = self.create_publisher(Marker, '/mpc_waypoint', 10)
 
         # State
         self.seeker_pose = None
@@ -157,6 +158,11 @@ class MPCNode(Node):
         # Track safe trajectory for backing up along known-good path
         self.trajectory_history = []  # Store recent positions
         self.max_history_length = 50  # Keep last 5 seconds at 10Hz
+        
+        # Waypoint system for routing around obstacles
+        self.current_waypoint = None  # If set, use this instead of final goal
+        self.waypoint_reached_threshold = 0.2  # 20cm to consider waypoint "reached" (tight!)
+        
         self.map = None
         self.seeker_state = None  # [px, py, theta, v]
         self.prev_state = None  # Previous state for velocity estimation
@@ -474,6 +480,126 @@ class MPCNode(Node):
                 obstacles.append((np.array([world_x, world_y]), min_obstacle_radius))
         
         return obstacles
+    
+    def generate_waypoint_if_blocked(self, robot_pos, goal_pos, obstacles):
+        """
+        Check if path to goal is blocked by obstacles and generate intermediate waypoint.
+        This solves the "zig-zag problem" where MPC can't route around obstacles in a straight line.
+        
+        Returns: waypoint position [x, y] if path is blocked, None otherwise
+        """
+        if not obstacles or len(obstacles) == 0:
+            return None
+        
+        robot_xy = robot_pos[:2]
+        direction_to_goal = goal_pos - robot_xy
+        dist_to_goal = np.linalg.norm(direction_to_goal)
+        
+        if dist_to_goal < 0.3:  # Close to goal, don't generate waypoints
+            return None
+        
+        direction_to_goal_norm = direction_to_goal / dist_to_goal
+        
+        # Check if any obstacle is "blocking" the direct path to goal
+        blocking_obstacles = []
+        for center, radius in obstacles:
+            # Vector from robot to obstacle
+            to_obstacle = center - robot_xy
+            
+            # Project obstacle onto robot-goal line
+            projection_length = np.dot(to_obstacle, direction_to_goal_norm)
+            
+            # Only consider obstacles that are:
+            # 1. In front of us (projection > 0)
+            # 2. Not beyond the goal (projection < dist_to_goal)
+            # 3. Close to the direct line (perpendicular distance small)
+            if 0 < projection_length < dist_to_goal:
+                # Point on line closest to obstacle
+                closest_point_on_line = robot_xy + projection_length * direction_to_goal_norm
+                perpendicular_dist = np.linalg.norm(center - closest_point_on_line)
+                
+                # Consider it "blocking" if it's within 0.5m of the direct path
+                if perpendicular_dist < (radius + 0.5):
+                    blocking_obstacles.append((center, radius, perpendicular_dist))
+        
+        if not blocking_obstacles:
+            return None  # Path is clear
+        
+        # Path is blocked! Generate TIGHT waypoint
+        self.get_logger().info(
+            f"🚧 Path blocked by {len(blocking_obstacles)} obstacles! Generating tight waypoint..."
+        )
+        
+        # Find the furthest blocking obstacle (this is our "keyhole" to pass through)
+        blocking_obstacles.sort(key=lambda x: np.dot(x[0] - robot_xy, direction_to_goal_norm), reverse=True)
+        furthest_obstacle = blocking_obstacles[0]
+        key_center, key_radius, _ = furthest_obstacle
+        
+        # Calculate minimum clearance needed (obstacle radius + robot radius + small margin)
+        min_clearance = key_radius + 0.15 + 0.15  # obstacle + robot + 15cm safety
+        
+        # Perpendicular direction (rotate 90 degrees)
+        perpendicular = np.array([-direction_to_goal_norm[1], direction_to_goal_norm[0]])
+        
+        # Position waypoint PAST the obstacle cluster (not at center) for better flow
+        # Place it at the furthest obstacle's position along the path
+        projection_dist = np.dot(key_center - robot_xy, direction_to_goal_norm)
+        waypoint_base = robot_xy + direction_to_goal_norm * (projection_dist + 0.3)  # 30cm past obstacle
+        
+        # Try progressively wider offsets until we find clear path
+        # Start tight (just enough to clear), expand if needed
+        offset_candidates = [min_clearance, min_clearance * 1.5, min_clearance * 2.0, 0.8]
+        
+        best_waypoint = None
+        best_clearance = -999.0
+        best_side = "LEFT"
+        
+        for offset in offset_candidates:
+            # Try both sides
+            for side_mult, side_name in [(1.0, "LEFT"), (-1.0, "RIGHT")]:
+                candidate = waypoint_base + perpendicular * (offset * side_mult)
+                
+                # Check clearance to ALL obstacles
+                clearances = [np.linalg.norm(obs[0] - candidate) - obs[1] for obs in obstacles]
+                min_clearance_val = min(clearances) if clearances else 999.0
+                
+                # Also check if path from robot to waypoint is clear
+                path_clear = True
+                for obs_center, obs_radius in obstacles:
+                    # Check if obstacle intersects robot-waypoint line
+                    to_candidate = candidate - robot_xy
+                    dist_to_candidate = np.linalg.norm(to_candidate)
+                    if dist_to_candidate > 0:
+                        to_candidate_norm = to_candidate / dist_to_candidate
+                        proj = np.dot(obs_center - robot_xy, to_candidate_norm)
+                        if 0 < proj < dist_to_candidate:
+                            closest_pt = robot_xy + to_candidate_norm * proj
+                            perp_dist = np.linalg.norm(obs_center - closest_pt)
+                            if perp_dist < (obs_radius + 0.25):  # 25cm margin for path
+                                path_clear = False
+                                break
+                
+                # Keep best candidate
+                if path_clear and min_clearance_val > best_clearance:
+                    best_clearance = min_clearance_val
+                    best_waypoint = candidate
+                    best_side = side_name
+            
+            # If we found a good waypoint, use it (prefer tighter offsets)
+            if best_waypoint is not None and best_clearance > 0.1:
+                break
+        
+        if best_waypoint is None:
+            # Fallback: just go perpendicular at safe distance
+            best_waypoint = waypoint_base + perpendicular * 0.8
+            best_side = "LEFT"
+        
+        self.get_logger().info(
+            f"📍 Tight waypoint at ({best_waypoint[0]:.2f}, {best_waypoint[1]:.2f}) - "
+            f"routing {best_side}, clearance={best_clearance:.2f}m"
+        )
+        
+        return best_waypoint
     
     def compute_obstacles(self):
         """Extract obstacles - PRIMARY SOURCE: Cartographer scan-matched points!"""
@@ -914,6 +1040,34 @@ class MPCNode(Node):
         
         self.traj_pub.publish(marker)
     
+    def publish_waypoint(self, waypoint):
+        """Publish waypoint marker for visualization in RViz"""
+        from visualization_msgs.msg import Marker
+        from geometry_msgs.msg import Point
+        
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'waypoint'
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        
+        # Sphere properties
+        marker.scale.x = 0.3
+        marker.scale.y = 0.3
+        marker.scale.z = 0.3
+        marker.color.r = 1.0  # Orange color
+        marker.color.g = 0.5
+        marker.color.b = 0.0
+        marker.color.a = 0.8
+        
+        marker.pose.position.x = float(waypoint[0])
+        marker.pose.position.y = float(waypoint[1])
+        marker.pose.position.z = 0.2
+        
+        self.waypoint_pub.publish(marker)
+    
     def merge_obstacles(self, obstacles):
         """Remove duplicate obstacles and limit count"""
         if len(obstacles) == 0:
@@ -1032,8 +1186,21 @@ class MPCNode(Node):
 
         # Get target/goal position
         if use_goal:
-            # Use goal point for navigation
-            target_pos = np.array([self.goal_x, self.goal_y])
+            # Check if we need to use a waypoint or go directly to goal
+            final_goal = np.array([self.goal_x, self.goal_y])
+            
+            # If we have a waypoint and haven't reached it, use waypoint
+            if self.current_waypoint is not None:
+                dist_to_waypoint = np.linalg.norm(self.current_waypoint - x0[:2])
+                if dist_to_waypoint < self.waypoint_reached_threshold:
+                    self.get_logger().info(f"✓ Reached waypoint, switching to final goal")
+                    self.current_waypoint = None
+                    target_pos = final_goal
+                else:
+                    target_pos = self.current_waypoint
+            else:
+                target_pos = final_goal
+            
             # Create constant target sequence
             target_seq = np.zeros((2, self.N + 1))
             target_seq[0, :] = target_pos[0]
@@ -1053,6 +1220,10 @@ class MPCNode(Node):
 
         # Compute obstacles with uncertainty inflation
         obstacles = self.compute_obstacles()  # Enable obstacle avoidance
+        
+        # WAYPOINT GENERATION: Check if path to goal is blocked and generate waypoint
+        if use_goal and self.current_waypoint is None:
+            self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
         
         # DEBUG: Log obstacles periodically - MORE FREQUENT
         if not hasattr(self, '_obstacle_debug_count'):
@@ -1173,6 +1344,10 @@ class MPCNode(Node):
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
+        
+        # Visualize waypoint if active
+        if self.current_waypoint is not None:
+            self.publish_waypoint(self.current_waypoint)
     
     def is_command_safe(self, v_cmd, omega_cmd):
         """Check if executing this command would cause collision"""
