@@ -30,6 +30,16 @@ def generate_launch_description():
             default_value='0.0',
             description='Goal Y position (meters)'
         ),
+        DeclareLaunchArgument(
+            'max_obstacles',
+            default_value='3',
+            description='Maximum number of obstacles to track'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_radius',
+            default_value='0.05',
+            description='Obstacle radius in meters (smaller = less conservative)'
+        ),
         
         # Static TF publisher (map to base_scan for RViz)
         # CRITICAL: This allows RViz to display the occupancy grid map
@@ -136,6 +146,8 @@ def generate_launch_description():
                 'Kd_w': 0.5,
                 'goal_x': LaunchConfiguration('goal_x'),
                 'goal_y': LaunchConfiguration('goal_y'),
+                'max_obstacles': LaunchConfiguration('max_obstacles'),
+                'obstacle_radius': LaunchConfiguration('obstacle_radius'),
             }],
             output='screen'
         ),
