@@ -345,7 +345,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 8000000.0  # Very high - obstacles still critical but position matters
+            repulsion_weight = 20000000.0  # EXTREMELY HIGH - obstacles MUST be avoided at all costs!
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -373,23 +373,23 @@ class SimpleUnicycleMPC:
                     dy = py - center[1]
                     dist_sq = dx*dx + dy*dy
                     
-                    # Safety radius - robust margin for reliable avoidance
-                    safety_radius = radius + 0.10  # 10cm buffer for safety
+                    # Safety radius - LARGER margin for reliable avoidance
+                    safety_radius = radius + 0.15  # 15cm buffer (was 10cm) - MORE CONSERVATIVE
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # Tiered proximity-based penalties - balanced and robust
-                    if dist_sq < safety_radius_sq * 0.2:  # VERY CLOSE - DANGER!
-                        obstacle_cost_value += repulsion_weight * 10000.0 / (dist_sq + 0.0001)
-                    elif dist_sq < safety_radius_sq * 0.5:  # CLOSE - WARNING!
-                        obstacle_cost_value += repulsion_weight * 1000.0 / (dist_sq + 0.001)
-                    elif dist_sq < safety_radius_sq:  # Within safety radius
-                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.01)
+                    # Tiered proximity-based penalties - MUCH MORE AGGRESSIVE
+                    if dist_sq < safety_radius_sq * 0.2:  # VERY CLOSE - EXTREME DANGER!
+                        obstacle_cost_value += repulsion_weight * 100000.0 / (dist_sq + 0.00001)  # 10x stronger!
+                    elif dist_sq < safety_radius_sq * 0.5:  # CLOSE - DANGER!
+                        obstacle_cost_value += repulsion_weight * 10000.0 / (dist_sq + 0.0001)  # 10x stronger!
+                    elif dist_sq < safety_radius_sq:  # Within safety radius - CRITICAL!
+                        obstacle_cost_value += repulsion_weight * 1000.0 / (dist_sq + 0.001)  # 10x stronger!
                     elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
-                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.1)
+                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.01)  # 10x stronger!
                     elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
-                        obstacle_cost_value += repulsion_weight / (dist_sq + 0.5)
+                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.1)  # 10x stronger!
                     else:  # Far away
-                        obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + safety_radius_sq)
+                        obstacle_cost_value += repulsion_weight / (dist_sq + safety_radius_sq)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
         # CRITICAL: Scale obstacle cost based on proximity to make it act like hard constraint

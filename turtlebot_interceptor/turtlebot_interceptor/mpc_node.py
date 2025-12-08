@@ -1167,7 +1167,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.25  # 25cm emergency threshold - TIGHT for curved navigation
+        emergency_dist = 0.35  # 35cm emergency threshold - MORE AGGRESSIVE to prevent collisions
         front_range = np.pi / 6  # ±30 degrees
         
         for i, r in enumerate(ranges):
@@ -1865,8 +1865,25 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        safety_dist = 0.2  # 20cm safety threshold - TIGHT for curved navigation
+        # FIRST: Check obstacles directly - MORE RELIABLE
+        obstacles = self.compute_obstacles()
+        if obstacles:
+            robot_pos = np.array([x, y])
+            predicted_pos = np.array([new_x, new_y])
+            
+            # Check both current and predicted positions
+            for pos in [robot_pos, predicted_pos]:
+                for center, radius in obstacles:
+                    dist_to_center = np.linalg.norm(center - pos)
+                    clearance = dist_to_center - radius - 0.105  # Robot radius
+                    
+                    # AGGRESSIVE: Stop if within 30cm (was 20cm)
+                    if clearance < 0.30:
+                        return False
         
+        safety_dist = 0.30  # 30cm safety threshold (was 20cm) - MORE CONSERVATIVE
+        
+        # ALSO check LIDAR for immediate obstacles ahead
         # Check direction we're moving
         move_direction = np.arctan2(new_y - y, new_x - x) - theta
         move_direction = np.arctan2(np.sin(move_direction), np.cos(move_direction))  # Wrap
