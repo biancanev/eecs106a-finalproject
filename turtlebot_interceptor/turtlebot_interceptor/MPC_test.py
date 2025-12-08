@@ -48,8 +48,8 @@ class SimpleUnicycleMPC:
         self.omega_max = self.wz_max
 
         # Base weights - CRITICAL: Balance between reaching target and avoiding obstacles
-        # Position weight must be high but not so high that obstacle costs are ignored
-        self.Qp_base = 50.0  # REDUCED 10x - Obstacles MUST dominate over position tracking!
+        # Position weight must be VERY LOW to allow zig-zag/detour paths
+        self.Qp_base = 5.0  # ULTRA-LOW - Let obstacles dictate path, position is secondary!
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
         self.Ra_base = 0.1  # Allow movement but penalize excessive acceleration
         self.Rw_base = 0.01  # ULTRA-LOW - encourage simultaneous turning + forward motion (curved paths)
