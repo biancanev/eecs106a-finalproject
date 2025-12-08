@@ -22,7 +22,7 @@ class MPCNode(Node):
         # Declare parameters (lab4 + lab8 pattern)
         self.declare_parameter('mpc_horizon', 15)
         self.declare_parameter('dt', 0.1)
-        self.declare_parameter('v_max_base', 0.6)
+        self.declare_parameter('v_max_base', 1.0)  # INCREASED: Faster movement
         self.declare_parameter('v_min', 0.0)
         self.declare_parameter('omega_max', 1.5)
         # use_sim_time may be passed from launch file - declare only if not already set
@@ -1691,28 +1691,28 @@ class MPCNode(Node):
     def compute_velocity_scale(self, min_obs_dist):
         """
         ALGORITHMIC IMPROVEMENT: Adaptive velocity scaling based on obstacle proximity.
-        Automatically slow down near obstacles for better reaction time and safety.
+        MORE AGGRESSIVE: Robot should commit to trajectories, not slow down too much.
         
-        Returns: scale factor in [0.3, 1.0]
+        Returns: scale factor in [0.5, 1.0] - less conservative
         """
-        if min_obs_dist >= 1.0:
+        if min_obs_dist >= 0.8:
             # Far from obstacles - full speed
             return 1.0
-        elif min_obs_dist >= 0.5:
+        elif min_obs_dist >= 0.4:
             # Moderate distance - slight slowdown (linear interpolation)
-            # 1.0m -> 1.0, 0.5m -> 0.8
-            return 0.8 + 0.2 * (min_obs_dist - 0.5) / 0.5
-        elif min_obs_dist >= 0.3:
-            # Close - significant slowdown
-            # 0.5m -> 0.8, 0.3m -> 0.5
-            return 0.5 + 0.3 * (min_obs_dist - 0.3) / 0.2
+            # 0.8m -> 1.0, 0.4m -> 0.85
+            return 0.85 + 0.15 * (min_obs_dist - 0.4) / 0.4
+        elif min_obs_dist >= 0.25:
+            # Close - moderate slowdown
+            # 0.4m -> 0.85, 0.25m -> 0.7
+            return 0.7 + 0.15 * (min_obs_dist - 0.25) / 0.15
         elif min_obs_dist >= 0.15:
-            # Very close - major slowdown
-            # 0.3m -> 0.5, 0.15m -> 0.3
-            return 0.3 + 0.2 * (min_obs_dist - 0.15) / 0.15
+            # Very close - significant slowdown but still moving
+            # 0.25m -> 0.7, 0.15m -> 0.5
+            return 0.5 + 0.2 * (min_obs_dist - 0.15) / 0.1
         else:
             # Extremely close - minimum speed (but don't stop)
-            return 0.3
+            return 0.5
     
     def verify_full_trajectory_safety(self, x0, v, omega, obstacles, horizon_steps=10):
         """

@@ -68,8 +68,8 @@ class FastLocalGrid(Node):
         #    - Behind → Add π (180°)
         #    - To left → Add π/2 (90°)
         #    - To right → Subtract π/2 (-90°)
-        #
-        self.lidar_angle_offset = np.pi/2  # ← CHANGE THIS VALUE!
+        # MIRRORING FIX: If obstacles are mirrored (left/right swapped), flip sign
+        self.lidar_angle_offset = -np.pi/2  # FIXED: Negative to fix mirroring
         
         self.get_logger().info(f'🔧 LIDAR offset: {self.lidar_angle_offset:.4f} rad = {np.degrees(self.lidar_angle_offset):.1f}°')
         
@@ -251,13 +251,22 @@ class FastLocalGrid(Node):
         # Use resolution for discretization - this creates a key for the dictionary
         # The key is a discretized world coordinate, but the actual value is still world coordinate
         def discretize(wx, wy):
-            # Round to nearest resolution step - this is just for dictionary key
-            # The actual world coordinate is preserved
-            return (round(wx / self.resolution) * self.resolution,
-                   round(wy / self.resolution) * self.resolution)
+            """
+            Discretize world coordinates to resolution steps for dictionary key.
+            CRITICAL: The discretized coordinate IS the world coordinate we store.
+            This coordinate is FIXED in world frame - it doesn't change as robot moves.
+            If this drifts, it means the input x1, y1 (from robot pose) is drifting.
+            """
+            # Round to nearest resolution step - this IS the world coordinate we store
+            # This coordinate is FIXED and should not change
+            discretized_x = round(wx / self.resolution) * self.resolution
+            discretized_y = round(wy / self.resolution) * self.resolution
+            return (discretized_x, discretized_y)
         
         # Mark endpoint as occupied or free
         # CRITICAL: end_key is a discretized world coordinate - FIXED in world frame
+        # If x1, y1 drift (from robot pose drift), end_key will drift
+        # Solution: Ensure /amcl_pose is stable (Cartographer/MCL, not odometry)
         end_key = discretize(x1, y1)
         
         if hit_obstacle:
