@@ -47,11 +47,11 @@ class SimpleUnicycleMPC:
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - OPTIMIZED for smooth curves around cones
-        self.Qp_base = 50.0  # STRONG goal tracking - robot should actively pursue target
+        # Base weights - OPTIMIZED for COMMITTED trajectories (less hesitant)
+        self.Qp_base = 100.0  # MUCH STRONGER goal tracking - commit to path!
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.02  # VERY LOW acceleration penalty - allow quick movements
-        self.Rw_base = 0.005  # ULTRA LOW turn penalty - smooth curves are critical!
+        self.Ra_base = 0.01  # EVEN LOWER acceleration penalty - allow quick movements
+        self.Rw_base = 0.002  # EVEN LOWER turn penalty - commit to curves!
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -345,7 +345,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 20000000.0  # EXTREMELY HIGH - obstacles MUST be avoided at all costs!
+            repulsion_weight = 5000000.0  # REDUCED: Still high but allow commitment to trajectories
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -412,8 +412,8 @@ class SimpleUnicycleMPC:
             
             # If getting close, increase obstacle cost even more
             if min_dist_to_obstacle < float('inf'):
-                # Scale obstacle cost based on proximity - up to 10x when very close
-                proximity_factor = max(1.0, (1.0 / (min_dist_to_obstacle + 0.1)))  # Up to 10x when very close
+                # Scale obstacle cost based on proximity - REDUCED to allow commitment
+                proximity_factor = max(1.0, (0.5 / (min_dist_to_obstacle + 0.1)))  # Reduced from 1.0 to 0.5
                 obstacle_cost_value *= proximity_factor
                 
                 # DEBUG: Log obstacle cost
