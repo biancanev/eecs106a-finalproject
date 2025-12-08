@@ -1164,9 +1164,9 @@ class MPCNode(Node):
             return False
         
         # Don't trigger emergency if we haven't been running long enough
-        # Prevents false triggers at startup
+        # Prevents false triggers at startup - MUCH LONGER DELAY
         elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
-        if elapsed < self.startup_delay + 2.0:  # Wait 2 seconds after startup delay
+        if elapsed < self.startup_delay + 10.0:  # Wait 10 seconds after startup delay (was 2s)
             return False
         
         # Check LIDAR rays in front (±30 degrees)
@@ -1174,7 +1174,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.20  # 20cm emergency threshold - LESS AGGRESSIVE (was 30cm)
+        emergency_dist = 0.15  # 15cm emergency threshold - VERY RELAXED (was 20cm)
         front_range = np.pi / 6  # ±30 degrees
         
         # Count valid readings in front
@@ -1193,10 +1193,9 @@ class MPCNode(Node):
                 if r < emergency_dist:
                     close_readings += 1
         
-        # Only trigger if we have multiple close readings (avoid false positives)
+        # VERY STRICT: Need MANY close readings to trigger (avoid false positives)
         # This prevents triggering on single noisy readings or walls far away
-        # Made more strict: need at least 5 close readings (was 3)
-        if valid_readings > 10 and close_readings >= 5:  # At least 5 close readings
+        if valid_readings > 15 and close_readings >= 8:  # At least 8 close readings (was 5)
             return True
         
         return False
@@ -1375,8 +1374,10 @@ class MPCNode(Node):
         # Check for immediate collision danger - ONLY if we have valid sensor data
         # Don't trigger on startup when sensors aren't ready
         # Also don't trigger if we just exited emergency (give it time)
+        # MUCH LONGER DELAY to prevent false triggers
+        elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
         if (self.latest_scan is not None and self.seeker_state is not None and 
-            self.emergency_state == 'NORMAL'):
+            self.emergency_state == 'NORMAL' and elapsed > self.startup_delay + 10.0):
             if self.check_immediate_collision():
                 self.get_logger().warn('🚨 EMERGENCY: Obstacle ahead! Starting backup...')
                 self.emergency_state = 'BACKUP'
@@ -1652,13 +1653,16 @@ class MPCNode(Node):
         self.cmd_pub.publish(twist)
         
         # SAFETY FILTER: Check if command would cause collision
-        if not self.is_command_safe(v_cmd, omega_cmd):
-            self.get_logger().error('🛑 SAFETY FILTER: MPC planned unsafe path! Starting backup...')
-            # Trigger emergency backup - we know the path behind is safe
-            self.emergency_state = 'BACKUP'
-            self.emergency_start_time = self.get_clock().now()
-            self.handle_emergency_recovery()
-            return
+        # MUCH LONGER DELAY to prevent false triggers at startup
+        elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
+        if elapsed > self.startup_delay + 10.0:  # Wait 10 seconds after startup
+            if not self.is_command_safe(v_cmd, omega_cmd):
+                self.get_logger().error('🛑 SAFETY FILTER: MPC planned unsafe path! Starting backup...')
+                # Trigger emergency backup - we know the path behind is safe
+                self.emergency_state = 'BACKUP'
+                self.emergency_start_time = self.get_clock().now()
+                self.handle_emergency_recovery()
+                return
         
         # Record trajectory history for final analysis (full format) - AFTER safety check
         if self.seeker_state is not None:
@@ -1881,9 +1885,9 @@ class MPCNode(Node):
             return True  # No sensor data, allow
         
         # Don't trigger safety filter if we haven't been running long enough
-        # Prevents false triggers at startup
+        # Prevents false triggers at startup - MUCH LONGER DELAY
         elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
-        if elapsed < self.startup_delay + 2.0:  # Wait 2 seconds after startup delay
+        if elapsed < self.startup_delay + 10.0:  # Wait 10 seconds after startup delay (was 2s)
             return True  # Allow commands during startup
         
         # Simulate one step forward with this command
@@ -1914,11 +1918,11 @@ class MPCNode(Node):
                     dist_to_center = np.linalg.norm(center - pos)
                     clearance = dist_to_center - radius - 0.105  # Robot radius
                     
-                    # LESS AGGRESSIVE: Stop if within 20cm (was 25cm)
-                    if clearance < 0.20:
+                    # VERY RELAXED: Stop if within 15cm (very close only)
+                    if clearance < 0.15:
                         return False
         
-        safety_dist = 0.20  # 20cm safety threshold - less aggressive
+        safety_dist = 0.15  # 15cm safety threshold - very relaxed
         
         # ALSO check LIDAR for immediate obstacles ahead
         # Check direction we're moving
