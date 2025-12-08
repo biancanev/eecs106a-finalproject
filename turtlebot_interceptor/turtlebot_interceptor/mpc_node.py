@@ -180,9 +180,10 @@ class MPCNode(Node):
         # Initialize MPC
         self.mpc = SimpleUnicycleMPC(horizon=self.N, dt=self.dt)
 
-        # Startup delay: Wait 60 seconds for LIDAR, SLAM, and MCL to initialize
+        # Startup delay: Wait 20 seconds for LIDAR, SLAM, and MCL to initialize
         self.startup_time = self.get_clock().now()
-        self.startup_delay = 60.0  # 60 seconds delay (increased for sensor stabilization)
+        self.startup_delay = 20.0  # 20 seconds delay (increased for sensor stabilization)
+        self.offline_trajectory_computed = False  # Track if we've computed offline trajectory
 
         # Timer for MPC updates
         # Start timer immediately, but check startup delay in callback
@@ -587,8 +588,8 @@ class MPCNode(Node):
     
     def generate_waypoint_if_blocked(self, robot_pos, goal_pos, obstacles):
         """
-        Check if there's an obstacle directly ahead and generate waypoint.
-        Triggers for obstacles within 0.20m straight ahead - proactive avoidance.
+        Check if there's an obstacle DIRECTLY blocking the path to goal.
+        STRICT requirements: Very close, very directly ahead, AND actually blocking goal path.
         
         Returns: waypoint position [x, y] if blocked NOW, None otherwise
         """
@@ -598,39 +599,66 @@ class MPCNode(Node):
         robot_xy = robot_pos[:2]
         robot_theta = robot_pos[2]  # Current heading
         
-        # Forward direction based on CURRENT heading (not goal direction)
+        # Direction to GOAL (not just forward!)
+        goal_dir = goal_pos - robot_xy
+        goal_dist = np.linalg.norm(goal_dir)
+        if goal_dist > 0:
+            goal_dir = goal_dir / goal_dist
+        else:
+            return None  # Already at goal
+        
+        # Forward direction based on CURRENT heading
         forward_dir = np.array([np.cos(robot_theta), np.sin(robot_theta)])
         
-        # Only check obstacles that are:
-        # 1. CLOSE (within 0.20m)
-        # 2. DIRECTLY AHEAD (within ±30 degrees of forward direction)
+        # STRICT REQUIREMENTS: Only generate waypoint if obstacle is:
+        # 1. VERY CLOSE (within 0.10m - was 0.15m)
+        # 2. VERY DIRECTLY AHEAD (within ±15 degrees - was ±30 degrees)
+        # 3. ACTUALLY BLOCKING the path to goal (not just in front)
         blocking_obstacles = []
         for center, radius in obstacles:
             # Vector from robot to obstacle
             to_obstacle = center - robot_xy
             dist_to_obstacle = np.linalg.norm(to_obstacle)
             
-            # Skip if not close enough
-            if dist_to_obstacle > 0.15:
+            # REQUIREMENT 1: Must be close (relaxed from 0.10 to 0.12 for better balance)
+            if dist_to_obstacle > 0.12:  # 12cm - balanced between too strict and too loose
                 continue
             
-            # Check if it's ahead of us
+            # REQUIREMENT 2: Must be directly ahead (relaxed from ±15° to ±20°)
             if dist_to_obstacle > 0:
                 to_obstacle_norm = to_obstacle / dist_to_obstacle
                 
                 # Dot product = cos(angle) - close to 1.0 means straight ahead
                 forward_alignment = np.dot(to_obstacle_norm, forward_dir)
                 
-                # Only consider if within ±30 degrees (cos(30°) ≈ 0.866)
-                if forward_alignment > 0.866:
-                    blocking_obstacles.append((center, radius, dist_to_obstacle))
+                # Only consider if within ±20 degrees (cos(20°) ≈ 0.940) - balanced
+                if forward_alignment < 0.940:
+                    continue
+                
+                # REQUIREMENT 3: Must actually block path to GOAL
+                # Project obstacle onto goal line
+                goal_alignment = np.dot(to_obstacle_norm, goal_dir)
+                
+                # Check if obstacle is on the path to goal (not just in front)
+                if goal_alignment > 0.7:  # Obstacle is in direction of goal
+                    # Check if obstacle actually blocks the direct path
+                    # Project obstacle center onto goal line
+                    proj_length = np.dot(to_obstacle, goal_dir)
+                    if 0 < proj_length < goal_dist:  # Obstacle is between robot and goal
+                        # Check perpendicular distance to goal line
+                        closest_pt_on_goal_line = robot_xy + goal_dir * proj_length
+                        perp_dist = np.linalg.norm(center - closest_pt_on_goal_line)
+                        
+                        # If obstacle is within (radius + safety) of goal line, it's blocking
+                        if perp_dist < (radius + 0.15):  # Robot radius + margin
+                            blocking_obstacles.append((center, radius, dist_to_obstacle))
         
         if not blocking_obstacles:
             return None  # No immediate obstacle ahead
         
-        # Close obstacle detected! Generate waypoint
+        # CRITICAL obstacle detected! Generate waypoint (very strict requirements met)
         self.get_logger().warn(
-            f"🚨 Obstacle within 0.20m ahead! Generating waypoint for {len(blocking_obstacles)} obstacles..."
+            f"🚨 CRITICAL: Obstacle <10cm, ±15°, blocking goal path! Generating waypoint for {len(blocking_obstacles)} obstacles..."
         )
         
         # Find the closest blocking obstacle
@@ -1306,6 +1334,16 @@ class MPCNode(Node):
         if self.seeker_state is None:
             return
         
+        # For single robot navigation, use goal point if target not available
+        use_goal = (self.target_pose is None)
+        
+        # OFFLINE TRAJECTORY PLANNING: Compute full trajectory once at startup
+        if not self.offline_trajectory_computed and use_goal:
+            # Only for goal-based navigation (not target tracking)
+            if hasattr(self, 'goal_x') and hasattr(self, 'goal_y'):
+                self.compute_and_visualize_offline_trajectory()
+                self.offline_trajectory_computed = True
+        
         # EMERGENCY RECOVERY SYSTEM
         if self.emergency_state != 'NORMAL':
             self.handle_emergency_recovery()
@@ -1318,9 +1356,6 @@ class MPCNode(Node):
             self.emergency_start_time = self.get_clock().now()
             self.handle_emergency_recovery()
             return
-        
-        # For single robot navigation, use goal point if target not available
-        use_goal = (self.target_pose is None)
 
         # Build initial state
         x0 = self.seeker_state.copy()
@@ -1659,6 +1694,67 @@ class MPCNode(Node):
                     return False, clearance
         
         return True, min_clearance
+    
+    def compute_and_visualize_offline_trajectory(self):
+        """Compute full offline trajectory from current pose to goal using MPC with full environment"""
+        try:
+            from turtlebot_interceptor.offline_trajectory_planner import OfflineTrajectoryPlanner
+            
+            if self.seeker_state is None:
+                return
+            
+            # Get obstacles from current map
+            obstacles = self.compute_obstacles()
+            
+            # Get goal
+            goal_pos = np.array([self.goal_x, self.goal_y])
+            start_pose = self.seeker_state.copy()
+            
+            self.get_logger().info(
+                f"📊 Computing offline trajectory: start=({start_pose[0]:.2f}, {start_pose[1]:.2f}), "
+                f"goal=({goal_pos[0]:.2f}, {goal_pos[1]:.2f}), obstacles={len(obstacles)}"
+            )
+            
+            # Prepare map data for visualization
+            map_data = None
+            if self.map is not None:
+                map_data = {
+                    'map': self.map,
+                    'origin': [self.map.info.origin.position.x, self.map.info.origin.position.y],
+                    'resolution': self.map.info.resolution
+                }
+                self.get_logger().info(f"📋 Map available: {self.map.info.width}x{self.map.info.height}, "
+                                     f"resolution={self.map.info.resolution:.3f}m")
+            
+            # Create planner
+            planner = OfflineTrajectoryPlanner(
+                dt=self.dt,
+                N=self.N,
+                v_max=self.v_max_base,
+                omega_max=self.omega_max
+            )
+            
+            # Plan trajectory
+            trajectory, commands = planner.plan_trajectory(start_pose, goal_pos, obstacles, max_steps=300)
+            
+            self.get_logger().info(
+                f"✅ Offline trajectory computed: {len(trajectory)} steps, {len(commands)} commands"
+            )
+            
+            # Visualize and save with full environment
+            import os
+            save_dir = "/tmp"
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, "offline_trajectory_full_environment.png")
+            
+            planner.visualize_trajectory(trajectory, obstacles, goal_pos, map_data=map_data, save_path=save_path)
+            
+            self.get_logger().info(f"📈 Comprehensive offline trajectory saved to: {save_path}")
+            
+        except Exception as e:
+            self.get_logger().warn(f"⚠️ Offline trajectory planning failed: {e}")
+            import traceback
+            self.get_logger().warn(traceback.format_exc())
     
     def is_command_safe(self, v_cmd, omega_cmd):
         """Check if executing this command would cause collision"""
