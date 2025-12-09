@@ -244,8 +244,9 @@ class CameraConeDetector(Node):
         
         # ALWAYS convert and publish debug image first (even without intrinsics)
         try:
-            # Convert ROS image to OpenCV
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            # Convert ROS image to OpenCV - use 'bgr8' to ensure correct color space
+            # This ensures blue stays blue, not orange
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
             self.get_logger().warn(f'Failed to convert image: {e}')
             return
@@ -875,9 +876,10 @@ class CameraConeDetector(Node):
             self.cones_local_pub.publish(marker_array)
     
     def publish_debug_image(self, cv_image, cones):
-        """Publish debug image with detections overlaid (original image, no hue overlay)"""
-        # Just use the original image - no hue/mask overlay
-        debug_image = cv_image.copy()
+        """Publish debug image - EXACT COPY of original with only bounding boxes/text overlays"""
+        # DIRECT COPY - no modifications to image data, no color conversions
+        # This ensures blue stays blue, colors are preserved exactly
+        debug_image = np.copy(cv_image)  # Use np.copy to ensure no reference issues
         
         # Store processed cone positions for overlay
         processed_positions = {}
@@ -922,6 +924,7 @@ class CameraConeDetector(Node):
         cv2.putText(debug_image, status_text, (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
+        # Publish EXACT copy - use same encoding as input
         try:
             debug_msg = self.bridge.cv2_to_imgmsg(debug_image, "bgr8")
             self.debug_image_pub.publish(debug_msg)
