@@ -107,6 +107,17 @@ def generate_launch_description():
             output='screen'
         ),
         
+        # Target estimator node (align target map to seeker map)
+        Node(
+            package='turtlebot_interceptor',
+            executable='target_est_node',
+            name='target_estimator',
+            parameters=[{
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+            }],
+            output='screen'
+        ),
+        
         # MCL node (localization using map and LIDAR)
         # OPTIONAL: Cartographer already provides pose tracking
         # Can disable this and use Cartographer's pose directly from /tracked_pose
