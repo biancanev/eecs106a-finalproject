@@ -436,24 +436,46 @@ class CameraConeDetector(Node):
             self.get_logger().warn(f'Failed to convert to HSV: {e}, image shape: {cv_image.shape}')
             return []
         
-        # LAYER 1: Initial yellow color mask
-        mask1 = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
+        # DEBUG: Sample HSV values from center of image (where cone might be)
+        if not hasattr(self, '_hsv_sampled'):
+            center_y, center_x = hsv.shape[0] // 2, hsv.shape[1] // 2
+            sample_hsv = hsv[center_y-50:center_y+50, center_x-50:center_x+50]
+            if sample_hsv.size > 0:
+                avg_h = np.mean(sample_hsv[:, :, 0])
+                avg_s = np.mean(sample_hsv[:, :, 1])
+                avg_v = np.mean(sample_hsv[:, :, 2])
+                self.get_logger().info(f'🔍 Sample HSV (center): H={avg_h:.1f}, S={avg_s:.1f}, V={avg_v:.1f}')
+                self.get_logger().info(f'🔍 Using range: H=[{self.lower_yellow[0]}-{self.upper_yellow[0]}], S=[{self.lower_yellow[1]}-{self.upper_yellow[1]}], V=[{self.lower_yellow[2]}-{self.upper_yellow[2]}]')
+                self._hsv_sampled = True
+        
+        # LAYER 1: Detect both yellow AND green (cones might appear as either)
+        # Yellow range (hue 0-60 in OpenCV HSV)
+        mask_yellow = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
+        
+        # Green range (hue 40-80 in OpenCV HSV) - in case yellow appears as green
+        lower_green = np.array([40, 30, 30])
+        upper_green = np.array([80, 255, 255])
+        mask_green = cv2.inRange(hsv, lower_green, upper_green)
+        
+        # Combine yellow and green masks
+        mask1 = cv2.bitwise_or(mask_yellow, mask_green)
         
         # LAYER 2: Convolution-based refinement
-        # Use small convolution kernel to smooth and enhance yellow regions
+        # Use small convolution kernel to smooth and enhance regions
         kernel_smooth = np.ones((3, 3), np.uint8) / 9.0
         mask1_float = mask1.astype(np.float32)
         mask2 = cv2.filter2D(mask1_float, -1, kernel_smooth)
         mask2 = (mask2 > 100).astype(np.uint8) * 255  # Threshold after convolution
         
         # Combine both layers (OR operation - more permissive, either layer can detect)
-        # Changed from AND to OR to catch more yellow regions
         mask = cv2.bitwise_or(mask1, mask2)
         
-        # Morphological operations to clean up mask
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)  # Remove noise
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)  # Fill gaps
+        # REDUCED morphological operations - they might be removing the yellow
+        # Use smaller kernel and less aggressive operations
+        kernel = np.ones((3, 3), np.uint8)  # Smaller kernel
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)  # Remove noise (less aggressive)
+        # Skip CLOSE for now - it might be removing valid yellow regions
+        # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)  # DISABLED
         
         # Find contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -785,20 +807,29 @@ class CameraConeDetector(Node):
             )
     
     def publish_debug_image(self, cv_image, cones):
-        """Publish debug image with detections overlaid and yellow mask visualization"""
+        """Publish debug image with detections overlaid and mask visualization"""
         debug_image = cv_image.copy()
         
-        # Show yellow mask overlay (for debugging) - use green channel for better visibility
+        # Show actual mask overlay (for debugging) - show the REAL mask, not a tint
         try:
             hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
-            yellow_mask = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
-            # Overlay mask in green channel with transparency (yellow areas get green tint)
-            mask_overlay = yellow_mask.astype(np.float32) / 255.0 * 0.3  # 30% opacity
+            # Use same detection logic as detect_yellow_cones
+            mask_yellow = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
+            lower_green = np.array([40, 30, 30])
+            upper_green = np.array([80, 255, 255])
+            mask_green = cv2.inRange(hsv, lower_green, upper_green)
+            actual_mask = cv2.bitwise_or(mask_yellow, mask_green)
+            
+            # Show mask as red overlay (so you can see what's being detected)
+            # Convert mask to 3-channel and overlay in red
+            mask_3channel = cv2.cvtColor(actual_mask, cv2.COLOR_GRAY2BGR)
+            mask_overlay = mask_3channel.astype(np.float32) / 255.0 * 0.5  # 50% opacity
             debug_image = debug_image.astype(np.float32)
-            debug_image[:, :, 1] = np.minimum(255, debug_image[:, :, 1] + mask_overlay * 100)  # Add green tint
+            # Overlay mask in red channel (so detected areas show as red)
+            debug_image = debug_image * (1 - mask_overlay) + np.array([0, 0, 255], dtype=np.float32) * mask_overlay
             debug_image = debug_image.astype(np.uint8)
-        except:
-            pass  # If mask fails, just show original image
+        except Exception as e:
+            self.get_logger().warn(f'Failed to create mask overlay: {e}')
         
         # Handle format: (cx, cy, w, h, area, mask_pixels)
         for cone_data in cones:
