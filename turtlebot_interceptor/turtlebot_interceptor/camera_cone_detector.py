@@ -96,11 +96,25 @@ class CameraConeDetector(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
+        # Topic names (configurable via parameters)
+        self.declare_parameter('image_topic', '/camera/image_raw')
+        self.declare_parameter('camera_info_topic', '/camera/camera_info')
+        self.declare_parameter('pose_topic', '/amcl_pose')
+        
+        image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
+        camera_info_topic = self.get_parameter('camera_info_topic').get_parameter_value().string_value
+        pose_topic = self.get_parameter('pose_topic').get_parameter_value().string_value
+        
+        self.get_logger().info(f'📷 Subscribing to:')
+        self.get_logger().info(f'   Image: {image_topic}')
+        self.get_logger().info(f'   Camera Info: {camera_info_topic}')
+        self.get_logger().info(f'   Pose: {pose_topic}')
+        
         # Subscriptions
         # Camera image (use sensor data QoS)
         self.image_sub = self.create_subscription(
             Image,
-            '/camera/image_raw',  # Standard ROS2 camera topic
+            image_topic,
             self.image_callback,
             qos_profile_sensor_data
         )
@@ -108,15 +122,16 @@ class CameraConeDetector(Node):
         # Camera info (for intrinsic parameters)
         self.camera_info_sub = self.create_subscription(
             CameraInfo,
-            '/camera/camera_info',
+            camera_info_topic,
             self.camera_info_callback,
             10
         )
+        self.get_logger().info(f'📷 Subscribed to camera_info: {camera_info_topic}')
         
         # Robot pose (for coordinate transforms)
         self.pose_sub = self.create_subscription(
             PoseWithCovarianceStamped,
-            '/amcl_pose',
+            pose_topic,
             self.pose_callback,
             10
         )
@@ -159,26 +174,41 @@ class CameraConeDetector(Node):
     
     def camera_info_callback(self, msg: CameraInfo):
         """Store camera intrinsic parameters (lab8 pattern)"""
-        self.camera_info = msg
-        
-        # Extract intrinsics from camera matrix K (lab8 pattern)
-        K = msg.k.flatten()
-        self.fx = K[0]  # Focal length x
-        self.fy = K[4]  # Focal length y
-        self.cx = K[2]  # Principal point x
-        self.cy = K[5]  # Principal point y
-        self.image_width = msg.width
-        self.image_height = msg.height
-        
-        # Store as tuple (lab8 pattern)
-        self.camera_intrinsics = (self.fx, self.fy, self.cx, self.cy)
-        
-        if not hasattr(self, '_camera_info_logged'):
-            self.get_logger().info(
-                f'📷 Camera intrinsics: {self.image_width}x{self.image_height}, '
-                f'fx={self.fx:.1f}, fy={self.fy:.1f}, cx={self.cx:.1f}, cy={self.cy:.1f}'
-            )
-            self._camera_info_logged = True
+        try:
+            self.camera_info = msg
+            
+            # Extract intrinsics from camera matrix K (lab8 pattern)
+            # K matrix is 3x3: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+            K = msg.k
+            if len(K) != 9:
+                self.get_logger().error(f'Invalid K matrix size: {len(K)}, expected 9')
+                return
+            
+            self.fx = float(K[0])  # Focal length x
+            self.fy = float(K[4])  # Focal length y
+            self.cx = float(K[2])  # Principal point x
+            self.cy = float(K[5])  # Principal point y
+            self.image_width = msg.width
+            self.image_height = msg.height
+            
+            # Store as tuple (lab8 pattern)
+            self.camera_intrinsics = (self.fx, self.fy, self.cx, self.cy)
+            
+            if not hasattr(self, '_camera_info_logged'):
+                self.get_logger().info(
+                    f'✅ Camera intrinsics received: {self.image_width}x{self.image_height}, '
+                    f'fx={self.fx:.1f}, fy={self.fy:.1f}, cx={self.cx:.1f}, cy={self.cy:.1f}'
+                )
+                self._camera_info_logged = True
+            else:
+                # Log periodically to confirm it's still being called
+                if not hasattr(self, '_camera_info_count'):
+                    self._camera_info_count = 0
+                self._camera_info_count += 1
+                if self._camera_info_count % 100 == 0:
+                    self.get_logger().debug(f'📷 Camera info received {self._camera_info_count} times')
+        except Exception as e:
+            self.get_logger().error(f'❌ Error in camera_info_callback: {e}', exc_info=True)
     
     def pose_callback(self, msg: PoseWithCovarianceStamped):
         """Store robot pose"""
@@ -186,12 +216,7 @@ class CameraConeDetector(Node):
     
     def image_callback(self, msg: Image):
         """Process camera image to detect yellow cones (lab8 pattern)"""
-        if self.camera_intrinsics is None:
-            if not hasattr(self, '_no_intrinsics_logged'):
-                self.get_logger().warn('⚠️ Waiting for camera_info... (camera_intrinsics is None)')
-                self._no_intrinsics_logged = True
-            return
-        
+        # ALWAYS convert and publish debug image first (even without intrinsics)
         try:
             # Convert ROS image to OpenCV
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
@@ -204,22 +229,35 @@ class CameraConeDetector(Node):
             self.get_logger().info(f'✅ Received first image: {cv_image.shape[1]}x{cv_image.shape[0]}')
             self._first_image_logged = True
         
+        # Initialize detection count
+        if not hasattr(self, '_detection_count'):
+            self._detection_count = 0
+        self._detection_count += 1
+        
+        # If no intrinsics, just publish raw image with status
+        if self.camera_intrinsics is None:
+            if not hasattr(self, '_no_intrinsics_logged'):
+                self.get_logger().warn('⚠️ Waiting for camera_info... (camera_intrinsics is None)')
+                self._no_intrinsics_logged = True
+            # Publish debug image anyway (raw image with status)
+            self.publish_debug_image(cv_image, [])
+            return
+        
         # Detect cones using heuristic-based color detection
         cones = self.detect_yellow_cones(cv_image)
         
         # Log detection results periodically
-        if not hasattr(self, '_detection_count'):
-            self._detection_count = 0
-        self._detection_count += 1
         if self._detection_count % 30 == 0:  # Log every 30 frames (~1 second at 30fps)
             self.get_logger().info(f'📷 Processed {self._detection_count} frames, found {len(cones)} cone candidates')
+        
+        # ALWAYS publish debug image (even if no cones) so we can see what camera sees
+        self.publish_debug_image(cv_image, cones)
         
         # Process detections and convert to world coordinates
         if len(cones) > 0:
             processed_cones = self.process_cone_detections(cones, cv_image)
             if len(processed_cones) > 0:
                 self.publish_cones(processed_cones, msg.header)
-                self.publish_debug_image(cv_image, cones)
             elif self.robot_pose is None:
                 if not hasattr(self, '_no_pose_logged'):
                     self.get_logger().warn('⚠️ Cones detected but robot_pose is None (waiting for /amcl_pose)')
@@ -701,8 +739,17 @@ class CameraConeDetector(Node):
             )
     
     def publish_debug_image(self, cv_image, cones):
-        """Publish debug image with detections overlaid"""
+        """Publish debug image with detections overlaid and yellow mask visualization"""
         debug_image = cv_image.copy()
+        
+        # Show yellow mask overlay (for debugging)
+        try:
+            hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+            yellow_mask = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
+            # Overlay mask in red channel (so yellow areas show as red overlay)
+            debug_image[:, :, 2] = np.maximum(debug_image[:, :, 2], yellow_mask // 3)
+        except:
+            pass  # If mask fails, just show original image
         
         # Handle format: (cx, cy, w, h, area, mask_pixels)
         for cone_data in cones:
@@ -726,6 +773,11 @@ class CameraConeDetector(Node):
             info_text = f'{area:.0f}px, {mask_pixels:.0f}mask'
             cv2.putText(debug_image, info_text, (x, y - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+        
+        # Add status text
+        status_text = f'Cones: {len(cones)} | Intrinsics: {"OK" if self.camera_intrinsics else "WAIT"} | Pose: {"OK" if self.robot_pose else "WAIT"}'
+        cv2.putText(debug_image, status_text, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
         try:
             debug_msg = self.bridge.cv2_to_imgmsg(debug_image, "bgr8")
