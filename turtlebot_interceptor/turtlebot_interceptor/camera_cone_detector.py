@@ -89,6 +89,11 @@ class CameraConeDetector(Node):
         # Maximum detection range (meters) - only detect close cones
         self.max_range = 2.0  # 2 meters
         
+        # Cone physical dimensions
+        self.cone_diameter = 0.15  # 15 cm diameter
+        self.cone_radius = self.cone_diameter / 2.0  # 7.5 cm radius
+        self.cone_height = 0.3  # 30 cm height (typical traffic cone)
+        
         # Robot pose (for transforming to map frame)
         self.robot_pose = None
         
@@ -187,6 +192,7 @@ class CameraConeDetector(Node):
         self.get_logger().info(f'   Yellow range: HSV {self.lower_yellow} - {self.upper_yellow}')
         self.get_logger().info(f'   Min cone area: {self.min_cone_area} pixels')
         self.get_logger().info(f'   Max range: {self.max_range}m')
+        self.get_logger().info(f'   Cone diameter: {self.cone_diameter*100:.1f}cm, height: {self.cone_height*100:.1f}cm')
     
     def camera_info_callback(self, msg: CameraInfo):
         """Store camera intrinsic parameters (lab8 pattern)"""
@@ -508,23 +514,22 @@ class CameraConeDetector(Node):
             center_y = y + h / 2
             
             # Heuristic 2: Aspect ratio (cones are roughly vertical/tall)
-            # DISABLED - accept any aspect ratio for now
+            # Cones are taller than they are wide
             aspect_ratio = h / w if w > 0 else 0
-            # if aspect_ratio < 0.5 or aspect_ratio > 10.0:  # DISABLED - too permissive
-            #     debug_info['filtered']['aspect'] = debug_info['filtered'].get('aspect', 0) + 1
-            #     continue
+            if aspect_ratio < 0.8 or aspect_ratio > 5.0:  # Reasonable range for cones
+                debug_info['filtered']['aspect'] = debug_info['filtered'].get('aspect', 0) + 1
+                continue
             
             # Heuristic 3: TRIANGULAR SHAPE DETECTION (cones are triangular)
             # Approximate contour to polygon
             epsilon = 0.02 * cv2.arcLength(contour, True)
             approx = cv2.approxPolyDP(contour, epsilon, True)
             
-            # Check if shape is roughly triangular (3-5 vertices for cone)
-            # DISABLED - accept any shape
+            # Check if shape is roughly triangular (3-8 vertices for cone - allows for some noise)
             num_vertices = len(approx)
-            # if num_vertices < 3 or num_vertices > 20:  # DISABLED
-            #     debug_info['filtered']['vertices'] = debug_info['filtered'].get('vertices', 0) + 1
-            #     continue
+            if num_vertices < 3 or num_vertices > 12:  # Too few or too many vertices = not cone-like
+                debug_info['filtered']['vertices'] = debug_info['filtered'].get('vertices', 0) + 1
+                continue
             
             # Check triangularity: top point should be narrow, base should be wide
             # Create ROI mask for this contour
@@ -545,19 +550,19 @@ class CameraConeDetector(Node):
                 bottom_width = np.sum(bottom_slice > 0)
                 
                 # Heuristic: Bottom should be wider than top (cone shape)
-                # DISABLED - accept any shape
-                # if bottom_width > 0 and top_width / bottom_width > 0.99:  # DISABLED
-                #     debug_info['filtered']['triangle'] = debug_info['filtered'].get('triangle', 0) + 1
-                #     continue
+                # Cones are wider at the base than at the top
+                if bottom_width > 0 and top_width / bottom_width > 0.85:  # Top should be at least 15% narrower
+                    debug_info['filtered']['triangle'] = debug_info['filtered'].get('triangle', 0) + 1
+                    continue
             
             # Heuristic 4: Solidity (cones are relatively solid shapes)
-            # DISABLED - accept any solidity
-            # hull = cv2.convexHull(contour)
-            # hull_area = cv2.contourArea(hull)
-            # solidity = area / hull_area if hull_area > 0 else 0
-            # if solidity < 0.1:  # DISABLED
-            #     debug_info['filtered']['solidity'] = debug_info['filtered'].get('solidity', 0) + 1
-            #     continue
+            # Cones should be fairly solid (not too hollow or fragmented)
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = area / hull_area if hull_area > 0 else 0
+            if solidity < 0.5:  # At least 50% solid (allows for some noise/occlusion)
+                debug_info['filtered']['solidity'] = debug_info['filtered'].get('solidity', 0) + 1
+                continue
             
             # Heuristic 5: Sample pixels within contour to validate yellow color
             # mask_roi already created above for triangular check
@@ -572,11 +577,11 @@ class CameraConeDetector(Node):
                 continue
             
             # Heuristic 6: Check if region is in lower half of image (cones are on ground)
-            # DISABLED - accept anywhere in image
-            # img_height = cv_image.shape[0]
-            # if center_y < img_height * 0.05:  # DISABLED
-            #     debug_info['filtered']['position'] = debug_info['filtered'].get('position', 0) + 1
-            #     continue
+            # Cones should be in the lower portion of the image (they sit on the ground)
+            img_height = cv_image.shape[0]
+            if center_y < img_height * 0.2:  # Too high in image (unlikely to be a cone on ground)
+                debug_info['filtered']['position'] = debug_info['filtered'].get('position', 0) + 1
+                continue
             
             # Get actual mask pixels for depth estimation (lab8 pattern)
             mask_pixels = yellow_pixels
@@ -772,11 +777,10 @@ class CameraConeDetector(Node):
             
             marker.pose.orientation.w = 1.0
             
-            # Estimate cone size from pixel size
-            estimated_radius = 0.1  # Default 10cm
-            marker.scale.x = estimated_radius * 2  # Diameter
-            marker.scale.y = estimated_radius * 2  # Diameter
-            marker.scale.z = 0.3  # Cone height
+            # Use actual cone dimensions (15 cm diameter)
+            marker.scale.x = self.cone_diameter  # 15 cm diameter
+            marker.scale.y = self.cone_diameter  # 15 cm diameter
+            marker.scale.z = self.cone_height  # 30 cm height
             
             # BRIGHT YELLOW color (255, 255, 0 in RGB = yellow)
             # Make it very visible and clear
@@ -858,11 +862,10 @@ class CameraConeDetector(Node):
             
             marker.pose.orientation.w = 1.0
             
-            # Estimate cone size
-            estimated_radius = 0.1
-            marker.scale.x = estimated_radius * 2
-            marker.scale.y = estimated_radius * 2
-            marker.scale.z = 0.3
+            # Use actual cone dimensions (15 cm diameter)
+            marker.scale.x = self.cone_diameter  # 15 cm diameter
+            marker.scale.y = self.cone_diameter  # 15 cm diameter
+            marker.scale.z = self.cone_height  # 30 cm height
             
             # BRIGHT YELLOW
             marker.color.r = 1.0
@@ -913,9 +916,20 @@ class CameraConeDetector(Node):
             pixel_pos = (int(cx), int(cy))
             if pixel_pos in processed_positions:
                 world_x, world_y, depth, confidence = processed_positions[pixel_pos]
-                info_text = f'Map: ({world_x:.2f}, {world_y:.2f}) | {depth:.2f}m | {confidence:.2f}'
+                # Show detailed position info with diameter
+                info_text = f'Map: ({world_x:.2f}, {world_y:.2f}) | {depth:.2f}m | conf:{confidence:.2f} | D:{self.cone_diameter*100:.0f}cm'
+                # Also show base_link position if available
+                if self.robot_pose is not None:
+                    robot_x = self.robot_pose.position.x
+                    robot_y = self.robot_pose.position.y
+                    rel_x = world_x - robot_x
+                    rel_y = world_y - robot_y
+                    dist = np.sqrt(rel_x**2 + rel_y**2)
+                    info_text2 = f'Rel: ({rel_x:.2f}, {rel_y:.2f}) | Dist: {dist:.2f}m'
+                    cv2.putText(debug_image, info_text2, (x, y + h + 15),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
             else:
-                info_text = f'{area:.0f}px, {mask_pixels:.0f}mask'
+                info_text = f'{area:.0f}px, {mask_pixels:.0f}mask (no pose) | D:{self.cone_diameter*100:.0f}cm'
             cv2.putText(debug_image, info_text, (x, y - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
         
