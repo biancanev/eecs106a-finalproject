@@ -48,7 +48,7 @@ class SimpleUnicycleMPC:
         self.omega_max = self.wz_max
 
         # Base weights - OPTIMIZED for progress + smooth curves
-        self.Qp_base = 100.0  # MUCH STRONGER goal tracking - must make progress! (was 50.0)
+        self.Qp_base = 200.0  # EVEN STRONGER goal tracking - MUST make progress! (was 100.0)
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
         self.Ra_base = 0.01  # LOW acceleration penalty for smoother curves
         self.Rw_base = 0.002  # LOW turn penalty for smoother curves
@@ -144,6 +144,10 @@ class SimpleUnicycleMPC:
                 self.X[3,k] <= self.vx_max,
             ]
             
+            # CRITICAL: Add minimum forward velocity constraint when far from obstacles
+            # This prevents MPC from solving to back up when obstacles are distant
+            # We'll add this dynamically in solve() based on obstacle distances
+            
             # Acceleration constraints
             constraints += [
                 self.a_min <= a,
@@ -169,8 +173,8 @@ class SimpleUnicycleMPC:
         # terminal cost - CRITICAL: Make terminal cost MUCH heavier to ensure convergence
         pxN = self.X[0,N] - self.T[0,N]
         pyN = self.X[1,N] - self.T[1,N]
-        # Terminal position penalty - make it 50x heavier than stage cost to ensure robot reaches goal
-        cost += 50.0 * self.Qp_param * (pxN**2 + pyN**2)
+        # Terminal position penalty - make it 100x heavier than stage cost to ensure robot reaches goal (was 50x)
+        cost += 100.0 * self.Qp_param * (pxN**2 + pyN**2)
         
         # Add obstacle cost parameter (will be updated in solve() method)
         # This allows obstacle avoidance without rebuilding the problem (DPP-compliant)
@@ -345,7 +349,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 200000.0  # Further reduced - allow progress while avoiding (was 500K)
+            repulsion_weight = 100000.0  # Even further reduced - goal must dominate! (was 200K)
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -411,9 +415,14 @@ class SimpleUnicycleMPC:
                         closest_obstacle = (center, radius, dist)
             
             # If getting close, increase obstacle cost moderately (not too much - allow progress)
+            # BUT: If obstacles are far (>1m), don't scale up at all - let goal dominate
             if min_dist_to_obstacle < float('inf'):
-                # Scale obstacle cost based on proximity - up to 3x when very close (was 10x - too aggressive)
-                proximity_factor = max(1.0, min(3.0, 1.0 / (min_dist_to_obstacle + 0.2)))  # Max 3x, smoother
+                if min_dist_to_obstacle > 1.0:
+                    # Obstacles are far - don't scale up obstacle cost, let goal cost dominate
+                    proximity_factor = 1.0  # No scaling when far
+                else:
+                    # Scale obstacle cost based on proximity - up to 2x when very close (was 3x)
+                    proximity_factor = max(1.0, min(2.0, 1.0 / (min_dist_to_obstacle + 0.3)))  # Max 2x, smoother
                 obstacle_cost_value *= proximity_factor
                 
                 # DEBUG: Log obstacle cost
@@ -520,6 +529,38 @@ class SimpleUnicycleMPC:
         # Convert acceleration to velocity command
         current_v = x0[3] if len(x0) > 3 else 0.0
         v_cmd = np.clip(current_v + a_cmd * self.dt, self.vx_min, self.vx_max)
+        
+        # CRITICAL FIX: If obstacles are far (>1m), enforce minimum forward velocity
+        # This prevents MPC from backing up when obstacles are distant
+        if obstacles is not None and len(obstacles) > 0:
+            # Check minimum distance to obstacles
+            robot_pos = x0[:2]
+            min_obs_dist = float('inf')
+            for center, radius in obstacles:
+                dist = np.linalg.norm(center - robot_pos) - radius
+                min_obs_dist = min(min_obs_dist, dist)
+            
+            # If obstacles are far (>1m), enforce minimum forward velocity
+            if min_obs_dist > 1.0:
+                # Check distance to goal
+                if isinstance(target, np.ndarray) and target.ndim == 2:
+                    tgt = target[:, 0]
+                else:
+                    tgt = np.array(target)[:2]
+                dist_to_goal = np.linalg.norm(tgt - robot_pos)
+                
+                # If far from goal (>0.3m), enforce minimum forward velocity
+                if dist_to_goal > 0.3:
+                    min_v_forward = 0.15  # Minimum 15cm/s forward when obstacles are far
+                    if v_cmd < min_v_forward:
+                        # Force forward motion - MPC shouldn't back up when obstacles are far
+                        v_cmd = min_v_forward
+                        if not hasattr(self, '_min_v_enforced_count'):
+                            self._min_v_enforced_count = 0
+                        self._min_v_enforced_count += 1
+                        if self._min_v_enforced_count % 20 == 0:
+                            print(f"MPC FIX: Enforcing min forward velocity {min_v_forward:.3f}m/s "
+                                  f"(obstacles {min_obs_dist:.2f}m away, goal {dist_to_goal:.2f}m away)")
         
         # REMOVED: Don't limit turn rate - this was preventing MPC from working correctly
         # The MPC should handle turn rate limits through its constraints
