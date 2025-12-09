@@ -16,36 +16,12 @@ def generate_launch_description():
     return LaunchDescription([
         # Launch arguments
         DeclareLaunchArgument(
-            'use_camera',
-            default_value='true',
-            description='Launch camera node (v4l2)'
-        ),
-        DeclareLaunchArgument(
             'use_rviz',
             default_value='true',
             description='Launch RViz'
         ),
-        DeclareLaunchArgument(
-            'camera_device',
-            default_value='/dev/video0',
-            description='Camera device path'
-        ),
         
-        # Camera node (v4l2)
-        Node(
-            package='v4l2_camera',
-            executable='v4l2_camera_node',
-            name='v4l2_camera',
-            parameters=[{
-                'device': LaunchConfiguration('camera_device'),
-                'image_size': [640, 480],
-                'pixel_format': 'YUY2',
-            }],
-            condition=IfCondition(LaunchConfiguration('use_camera')),
-            output='screen'
-        ),
-        
-        # Camera cone detector
+        # Camera cone detector (assumes camera is already running on TurtleBot)
         Node(
             package='turtlebot_interceptor',
             executable='camera_cone_detector',
