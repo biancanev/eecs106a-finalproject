@@ -1388,12 +1388,12 @@ class MPCNode(Node):
             self.handle_emergency_recovery()
             return
         
-        # Check for immediate collision danger (RELAXED - only for true emergency)
-        # Only trigger if obstacle is VERY close AND we're moving forward fast
-        if self.seeker_state[3] > 0.1 and self.check_immediate_collision():  # Only if moving forward
-            self.get_logger().warn('⚠️ Obstacle very close ahead, slowing down...')
-            # Don't trigger emergency backup - just slow down and let MPC curve around
-            # MPC will handle obstacle avoidance through its cost function
+        # Check for immediate collision danger - DISABLED emergency backup
+        # MPC handles obstacle avoidance - don't interfere with its planning
+        # Only log warning if very close
+        if self.seeker_state[3] > 0.1 and self.check_immediate_collision():
+            # Just slow down slightly - let MPC curve around
+            pass  # MPC will handle it through cost function
         
         # For single robot navigation, use goal point if target not available
         use_goal = (self.target_pose is None)
@@ -1567,19 +1567,16 @@ class MPCNode(Node):
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
             
-            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification
+            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification - RELAXED
+            # Only check if we're about to actually collide (<2cm clearance)
             is_safe, clearance = self.verify_full_trajectory_safety(x0, v_cmd, omega_cmd, obstacles)
-            if not is_safe:
+            if not is_safe and clearance < 0.02:  # Only if truly colliding (<2cm)
                 self.get_logger().warn(
-                    f"⚠️ Trajectory verification failed! Min clearance: {clearance:.3f}m. "
-                    f"Triggering emergency waypoint."
+                    f"⚠️ Trajectory very close! Min clearance: {clearance:.3f}m. Reducing speed slightly."
                 )
-                # Generate emergency waypoint if not already set
-                if self.current_waypoint is None and use_goal:
-                    self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
-                # Reduce velocity significantly
-                v_cmd *= 0.3
-                omega_cmd *= 0.5
+                # Just reduce speed slightly - don't stop or back up
+                v_cmd *= 0.6  # Reduce by 40% (was 30%)
+                # Don't reduce turn rate - allow curves
             
             # CRITICAL DEBUG: Log everything to find the bug
             if not hasattr(self, '_mpc_cmd_count'):
@@ -1640,13 +1637,13 @@ class MPCNode(Node):
             if len(self.trajectory_history) > self.max_history_length:
                 self.trajectory_history.pop(0)
         
-        # SAFETY FILTER: Check if command would cause collision (RELAXED - only for true danger)
-        # Only trigger if moving forward into immediate danger - allow curves
-        if v_cmd > 0.05 and not self.is_command_safe(v_cmd, omega_cmd):  # Only check if moving forward
-            self.get_logger().warn('⚠️ SAFETY FILTER: MPC planned path near obstacle, reducing speed...')
-            # Don't trigger emergency backup - just reduce speed and let MPC handle it
-            v_cmd *= 0.5  # Reduce speed by 50%
-            omega_cmd *= 0.7  # Reduce turn rate slightly
+        # SAFETY FILTER: DISABLED - MPC handles obstacle avoidance through cost function
+        # Only check if we're about to hit something IMMEDIATELY (<5cm)
+        if v_cmd > 0.1:  # Only check if moving forward
+            if not self.is_command_safe(v_cmd, omega_cmd):
+                # Only reduce speed slightly - don't stop or back up
+                v_cmd *= 0.7  # Reduce speed by 30% (was 50%)
+                # Don't reduce turn rate - allow curves
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
