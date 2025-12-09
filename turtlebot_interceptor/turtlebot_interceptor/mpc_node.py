@@ -1679,28 +1679,28 @@ class MPCNode(Node):
     def compute_velocity_scale(self, min_obs_dist):
         """
         ALGORITHMIC IMPROVEMENT: Adaptive velocity scaling based on obstacle proximity.
-        Automatically slow down near obstacles for better reaction time and safety.
+        Less aggressive - allow progress even near obstacles.
         
-        Returns: scale factor in [0.3, 1.0]
+        Returns: scale factor in [0.5, 1.0] (was [0.3, 1.0] - too slow)
         """
-        if min_obs_dist >= 1.0:
+        if min_obs_dist >= 0.8:
             # Far from obstacles - full speed
             return 1.0
-        elif min_obs_dist >= 0.5:
-            # Moderate distance - slight slowdown (linear interpolation)
-            # 1.0m -> 1.0, 0.5m -> 0.8
-            return 0.8 + 0.2 * (min_obs_dist - 0.5) / 0.5
-        elif min_obs_dist >= 0.3:
-            # Close - significant slowdown
-            # 0.5m -> 0.8, 0.3m -> 0.5
-            return 0.5 + 0.3 * (min_obs_dist - 0.3) / 0.2
+        elif min_obs_dist >= 0.4:
+            # Moderate distance - slight slowdown
+            # 0.8m -> 1.0, 0.4m -> 0.8
+            return 0.8 + 0.2 * (min_obs_dist - 0.4) / 0.4
+        elif min_obs_dist >= 0.25:
+            # Close - moderate slowdown
+            # 0.4m -> 0.8, 0.25m -> 0.6
+            return 0.6 + 0.2 * (min_obs_dist - 0.25) / 0.15
         elif min_obs_dist >= 0.15:
-            # Very close - major slowdown
-            # 0.3m -> 0.5, 0.15m -> 0.3
-            return 0.3 + 0.2 * (min_obs_dist - 0.15) / 0.15
+            # Very close - significant slowdown but still move
+            # 0.25m -> 0.6, 0.15m -> 0.5
+            return 0.5 + 0.1 * (min_obs_dist - 0.15) / 0.1
         else:
-            # Extremely close - minimum speed (but don't stop)
-            return 0.3
+            # Extremely close - minimum speed (but still move!)
+            return 0.5  # Was 0.3 - too slow, now 0.5 for progress
     
     def verify_full_trajectory_safety(self, x0, v, omega, obstacles, horizon_steps=10):
         """

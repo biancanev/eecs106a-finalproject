@@ -47,11 +47,11 @@ class SimpleUnicycleMPC:
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - OPTIMIZED for smooth curves around cones
-        self.Qp_base = 50.0  # STRONG goal tracking - robot should actively pursue target
+        # Base weights - OPTIMIZED for progress + smooth curves
+        self.Qp_base = 100.0  # MUCH STRONGER goal tracking - must make progress! (was 50.0)
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.01  # EVEN LOWER acceleration penalty for smoother curves (was 0.02)
-        self.Rw_base = 0.002  # EVEN LOWER turn penalty for smoother curves (was 0.005)
+        self.Ra_base = 0.01  # LOW acceleration penalty for smoother curves
+        self.Rw_base = 0.002  # LOW turn penalty for smoother curves
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -345,7 +345,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 500000.0  # Reduced for smoother curves (was 8M - too high caused jerky motion)
+            repulsion_weight = 200000.0  # Further reduced - allow progress while avoiding (was 500K)
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -377,19 +377,19 @@ class SimpleUnicycleMPC:
                     safety_radius = radius + 0.05  # 5cm buffer (was 10cm - allows tighter curves)
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # Smoother tiered penalties for gradual curve generation
+                    # Balanced penalties - avoid but allow progress (much lower multipliers)
                     if dist_sq < safety_radius_sq * 0.2:  # VERY CLOSE - DANGER!
-                        obstacle_cost_value += repulsion_weight * 5000.0 / (dist_sq + 0.0001)
+                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.0001)
                     elif dist_sq < safety_radius_sq * 0.5:  # CLOSE - WARNING!
-                        obstacle_cost_value += repulsion_weight * 500.0 / (dist_sq + 0.001)
+                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.001)
                     elif dist_sq < safety_radius_sq:  # Within safety radius
-                        obstacle_cost_value += repulsion_weight * 50.0 / (dist_sq + 0.01)
+                        obstacle_cost_value += repulsion_weight * 1.0 / (dist_sq + 0.01)
                     elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
-                        obstacle_cost_value += repulsion_weight * 5.0 / (dist_sq + 0.1)
+                        obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + 0.1)
                     elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
-                        obstacle_cost_value += repulsion_weight * 0.5 / (dist_sq + 0.5)
-                    else:  # Far away
-                        obstacle_cost_value += repulsion_weight * 0.05 / (dist_sq + safety_radius_sq)
+                        obstacle_cost_value += repulsion_weight * 0.01 / (dist_sq + 0.5)
+                    else:  # Far away - minimal cost
+                        obstacle_cost_value += repulsion_weight * 0.001 / (dist_sq + safety_radius_sq)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
         # CRITICAL: Scale obstacle cost based on proximity to make it act like hard constraint
@@ -410,10 +410,10 @@ class SimpleUnicycleMPC:
                         min_dist_to_obstacle = dist
                         closest_obstacle = (center, radius, dist)
             
-            # If getting close, increase obstacle cost even more
+            # If getting close, increase obstacle cost moderately (not too much - allow progress)
             if min_dist_to_obstacle < float('inf'):
-                # Scale obstacle cost based on proximity - up to 10x when very close
-                proximity_factor = max(1.0, (1.0 / (min_dist_to_obstacle + 0.1)))  # Up to 10x when very close
+                # Scale obstacle cost based on proximity - up to 3x when very close (was 10x - too aggressive)
+                proximity_factor = max(1.0, min(3.0, 1.0 / (min_dist_to_obstacle + 0.2)))  # Max 3x, smoother
                 obstacle_cost_value *= proximity_factor
                 
                 # DEBUG: Log obstacle cost
