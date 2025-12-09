@@ -152,9 +152,9 @@ def generate_launch_description():
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
                 'mpc_horizon': 15,
                 'dt': 0.1,
-                'v_max_base': 0.6,  # TurtleBot safe max speed
+                'v_max_base': 0.35,  # Matches MPC v_max for smooth curves (was 0.6)
                 'v_min': 0.0,
-                'omega_max': 2.5,  # Higher for tight turns around cones
+                'omega_max': 2.0,  # Matches MPC wz_max for smooth curves (was 2.5)
                 'Kp_v': 2.0,  # Fallback control gains (lab8 pattern)
                 'Kp_w': 0.8,
                 'Kd_w': 0.5,

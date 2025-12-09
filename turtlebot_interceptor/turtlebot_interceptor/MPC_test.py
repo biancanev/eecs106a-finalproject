@@ -19,7 +19,7 @@ class SimpleUnicycleMPC:
         # Velocity constraints (Twist message format)
         # Linear velocities (m/s)
         self.vx_min = 0.0
-        self.vx_max = 0.2  # SLOW MODE: Test obstacle avoidance first! (was 1.2)
+        self.vx_max = 0.35  # Faster for smoother curves (was 0.2)
         self.vy_min = 0.0  # Unicycle: no lateral velocity
         self.vy_max = 0.0
         self.vz_min = 0.0  # Unicycle: no vertical velocity
@@ -30,8 +30,8 @@ class SimpleUnicycleMPC:
         self.wx_max = 0.0
         self.wy_min = 0.0  # Unicycle: no pitch
         self.wy_max = 0.0
-        self.wz_min = -1.0  # REDUCE max turn rate - too high causes spinning
-        self.wz_max = 1.0
+        self.wz_min = -2.0  # Higher turn rate for smooth curves (was -1.0)
+        self.wz_max = 2.0  # Higher turn rate for smooth curves (was 1.0)
         
         # Acceleration constraints (for MPC internal use)
         self.a_min = -0.4
@@ -40,7 +40,7 @@ class SimpleUnicycleMPC:
         self.alpha_max = 4.0
         
         # Turn angle constraint (maximum change in heading per step)
-        self.max_turn_angle = 0.5  # MUCH higher for tight optimal paths (was 0.3, ~17 deg, now ~29 deg)
+        self.max_turn_angle = 0.6  # Higher for smooth curves (was 0.5, ~29 deg, now ~34 deg)
         
         # Legacy constraints for backward compatibility
         self.v_min = self.vx_min
@@ -50,8 +50,8 @@ class SimpleUnicycleMPC:
         # Base weights - OPTIMIZED for smooth curves around cones
         self.Qp_base = 50.0  # STRONG goal tracking - robot should actively pursue target
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.02  # VERY LOW acceleration penalty - allow quick movements
-        self.Rw_base = 0.005  # ULTRA LOW turn penalty - smooth curves are critical!
+        self.Ra_base = 0.01  # EVEN LOWER acceleration penalty for smoother curves (was 0.02)
+        self.Rw_base = 0.002  # EVEN LOWER turn penalty for smoother curves (was 0.005)
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -345,7 +345,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 8000000.0  # Very high - obstacles still critical but position matters
+            repulsion_weight = 500000.0  # Reduced for smoother curves (was 8M - too high caused jerky motion)
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -373,23 +373,23 @@ class SimpleUnicycleMPC:
                     dy = py - center[1]
                     dist_sq = dx*dx + dy*dy
                     
-                    # Safety radius - robust margin for reliable avoidance
-                    safety_radius = radius + 0.10  # 10cm buffer for safety
+                    # Safety radius - tighter for smooth curves
+                    safety_radius = radius + 0.05  # 5cm buffer (was 10cm - allows tighter curves)
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # Tiered proximity-based penalties - balanced and robust
+                    # Smoother tiered penalties for gradual curve generation
                     if dist_sq < safety_radius_sq * 0.2:  # VERY CLOSE - DANGER!
-                        obstacle_cost_value += repulsion_weight * 10000.0 / (dist_sq + 0.0001)
+                        obstacle_cost_value += repulsion_weight * 5000.0 / (dist_sq + 0.0001)
                     elif dist_sq < safety_radius_sq * 0.5:  # CLOSE - WARNING!
-                        obstacle_cost_value += repulsion_weight * 1000.0 / (dist_sq + 0.001)
+                        obstacle_cost_value += repulsion_weight * 500.0 / (dist_sq + 0.001)
                     elif dist_sq < safety_radius_sq:  # Within safety radius
-                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.01)
+                        obstacle_cost_value += repulsion_weight * 50.0 / (dist_sq + 0.01)
                     elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
-                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.1)
+                        obstacle_cost_value += repulsion_weight * 5.0 / (dist_sq + 0.1)
                     elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
-                        obstacle_cost_value += repulsion_weight / (dist_sq + 0.5)
+                        obstacle_cost_value += repulsion_weight * 0.5 / (dist_sq + 0.5)
                     else:  # Far away
-                        obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + safety_radius_sq)
+                        obstacle_cost_value += repulsion_weight * 0.05 / (dist_sq + safety_radius_sq)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
         # CRITICAL: Scale obstacle cost based on proximity to make it act like hard constraint
@@ -403,7 +403,7 @@ class SimpleUnicycleMPC:
                 dx = px0 - center[0]
                 dy = py0 - center[1]
                 dist = np.sqrt(dx*dx + dy*dy)
-                safety_radius = radius + 0.05  # TIGHT margin (SAME AS ABOVE)
+                safety_radius = radius + 0.05  # TIGHT margin (matches above)
                 actual_clearance = dist - radius  # Actual distance to obstacle surface
                 if dist < safety_radius * 3.0:  # Within 3x safety radius
                     if dist < min_dist_to_obstacle:
