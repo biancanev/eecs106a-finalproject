@@ -1211,7 +1211,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.25  # 25cm emergency threshold - TIGHT for curved navigation
+        emergency_dist = 0.15  # 15cm emergency threshold - only trigger for real danger (was 25cm - too aggressive)
         front_range = np.pi / 6  # ±30 degrees
         
         for i, r in enumerate(ranges):
@@ -1388,13 +1388,12 @@ class MPCNode(Node):
             self.handle_emergency_recovery()
             return
         
-        # Check for immediate collision danger
-        if self.check_immediate_collision():
-            self.get_logger().error('🚨 EMERGENCY: Obstacle ahead! Starting backup...')
-            self.emergency_state = 'BACKUP'
-            self.emergency_start_time = self.get_clock().now()
-            self.handle_emergency_recovery()
-            return
+        # Check for immediate collision danger (RELAXED - only for true emergency)
+        # Only trigger if obstacle is VERY close AND we're moving forward fast
+        if self.seeker_state[3] > 0.1 and self.check_immediate_collision():  # Only if moving forward
+            self.get_logger().warn('⚠️ Obstacle very close ahead, slowing down...')
+            # Don't trigger emergency backup - just slow down and let MPC curve around
+            # MPC will handle obstacle avoidance through its cost function
         
         # For single robot navigation, use goal point if target not available
         use_goal = (self.target_pose is None)
@@ -1641,14 +1640,13 @@ class MPCNode(Node):
             if len(self.trajectory_history) > self.max_history_length:
                 self.trajectory_history.pop(0)
         
-        # SAFETY FILTER: Check if command would cause collision
-        if not self.is_command_safe(v_cmd, omega_cmd):
-            self.get_logger().error('🛑 SAFETY FILTER: MPC planned unsafe path! Starting backup...')
-            # Trigger emergency backup - we know the path behind is safe
-            self.emergency_state = 'BACKUP'
-            self.emergency_start_time = self.get_clock().now()
-            self.handle_emergency_recovery()
-            return
+        # SAFETY FILTER: Check if command would cause collision (RELAXED - only for true danger)
+        # Only trigger if moving forward into immediate danger - allow curves
+        if v_cmd > 0.05 and not self.is_command_safe(v_cmd, omega_cmd):  # Only check if moving forward
+            self.get_logger().warn('⚠️ SAFETY FILTER: MPC planned path near obstacle, reducing speed...')
+            # Don't trigger emergency backup - just reduce speed and let MPC handle it
+            v_cmd *= 0.5  # Reduce speed by 50%
+            omega_cmd *= 0.7  # Reduce turn rate slightly
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
@@ -1732,7 +1730,7 @@ class MPCNode(Node):
                 min_clearance = min(min_clearance, clearance)
                 
                 # If collision imminent, trajectory is unsafe
-                if clearance < 0.05:  # 5cm safety margin
+                if clearance < 0.02:  # 2cm safety margin - only reject if truly colliding (was 5cm - too aggressive)
                     return False, clearance
         
         return True, min_clearance
@@ -1758,7 +1756,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        safety_dist = 0.2  # 20cm safety threshold - TIGHT for curved navigation
+        safety_dist = 0.12  # 12cm safety threshold - relaxed to allow progress (was 20cm - too aggressive)
         
         # Check direction we're moving
         move_direction = np.arctan2(new_y - y, new_x - x) - theta
