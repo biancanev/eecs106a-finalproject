@@ -13,6 +13,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -41,6 +42,8 @@ setup(
                 'navigation_visualizer = turtlebot_interceptor.navigation_visualizer_node:main',  # RViz visualization
                 'animated_sim = turtlebot_interceptor.animated_sim:main',  # Standalone simulation
                 'target_est_node = turtlebot_interceptor.target_est_node:main',
+                'camera_cone_detector = turtlebot_interceptor.camera_cone_detector:main',  # Camera-based yellow cone detection
+                'test_camera_cones = turtlebot_interceptor.test_camera_cones:main',  # Test camera cone detection
             ],
         },
 )
