@@ -40,6 +40,7 @@ setup(
                 'fast_local_grid = turtlebot_interceptor.fast_local_grid:main',  # Fast local occupancy grid (5-10 Hz)
                 'navigation_visualizer = turtlebot_interceptor.navigation_visualizer_node:main',  # RViz visualization
                 'animated_sim = turtlebot_interceptor.animated_sim:main',  # Standalone simulation
+                'target_est_node = turtlebot_interceptor.target_est_node:main',
             ],
         },
 )
