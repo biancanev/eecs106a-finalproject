@@ -120,11 +120,12 @@ class CameraConeDetector(Node):
         )
         
         # Camera info (for intrinsic parameters)
+        # Use sensor data QoS to match image topic
         self.camera_info_sub = self.create_subscription(
             CameraInfo,
             camera_info_topic,
             self.camera_info_callback,
-            10
+            qos_profile_sensor_data  # Match image QoS
         )
         self.get_logger().info(f'📷 Subscribed to camera_info: {camera_info_topic}')
         
@@ -174,6 +175,11 @@ class CameraConeDetector(Node):
     
     def camera_info_callback(self, msg: CameraInfo):
         """Store camera intrinsic parameters (lab8 pattern)"""
+        # Log immediately when callback is called
+        if not hasattr(self, '_camera_info_callback_called'):
+            self.get_logger().info('🔔 camera_info_callback CALLED!')
+            self._camera_info_callback_called = True
+        
         try:
             self.camera_info = msg
             
@@ -216,6 +222,11 @@ class CameraConeDetector(Node):
     
     def image_callback(self, msg: Image):
         """Process camera image to detect yellow cones (lab8 pattern)"""
+        # Log immediately when callback is called
+        if not hasattr(self, '_image_callback_called'):
+            self.get_logger().info('🔔 image_callback CALLED!')
+            self._image_callback_called = True
+        
         # ALWAYS convert and publish debug image first (even without intrinsics)
         try:
             # Convert ROS image to OpenCV
