@@ -377,8 +377,8 @@ class SimpleUnicycleMPC:
                     dy = py - center[1]
                     dist_sq = dx*dx + dy*dy
                     
-                    # Safety radius - tighter for smooth curves
-                    safety_radius = radius + 0.05  # 5cm buffer (was 10cm - allows tighter curves)
+                    # Safety radius - TIGHT for navigation through spaces
+                    safety_radius = radius + 0.10  # 10cm buffer (allows navigation through tight spaces)
                     safety_radius_sq = safety_radius * safety_radius
                     
                     # Balanced penalties - avoid but allow progress (much lower multipliers)
@@ -530,39 +530,70 @@ class SimpleUnicycleMPC:
         current_v = x0[3] if len(x0) > 3 else 0.0
         v_cmd = np.clip(current_v + a_cmd * self.dt, self.vx_min, self.vx_max)
         
-        # CRITICAL FIX: ALWAYS enforce minimum forward velocity when far from goal
-        # This prevents MPC from backing up - robot MUST make progress!
+        # CRITICAL FIX: Force movement TOWARD goal - check direction!
         if isinstance(target, np.ndarray) and target.ndim == 2:
             tgt = target[:, 0]
         else:
             tgt = np.array(target)[:2]
         robot_pos = x0[:2]
+        robot_theta = x0[2]
         dist_to_goal = np.linalg.norm(tgt - robot_pos)
         
-        # ALWAYS enforce minimum forward velocity when >0.2m from goal
-        if dist_to_goal > 0.2:
-            # Check if obstacles are blocking (very close <0.3m)
+        # Calculate direction to goal
+        dx_goal = tgt[0] - robot_pos[0]
+        dy_goal = tgt[1] - robot_pos[1]
+        angle_to_goal = np.arctan2(dy_goal, dx_goal)
+        angle_err = angle_to_goal - robot_theta
+        angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
+        
+        # ALWAYS enforce minimum forward velocity when >0.15m from goal
+        if dist_to_goal > 0.15:
+            # Check if obstacles are blocking (very close <0.2m - REDUCED from 0.3m)
             min_obs_dist = float('inf')
             if obstacles is not None and len(obstacles) > 0:
                 for center, radius in obstacles:
                     dist = np.linalg.norm(center - robot_pos) - radius
                     min_obs_dist = min(min_obs_dist, dist)
             
-            # If obstacles are NOT blocking (far >0.3m), ALWAYS move forward
-            if min_obs_dist > 0.3:
-                min_v_forward = 0.25  # AGGRESSIVE: 25cm/s minimum when obstacles not blocking
-                if v_cmd < min_v_forward:
-                    v_cmd = min_v_forward
-                    if not hasattr(self, '_min_v_enforced_count'):
-                        self._min_v_enforced_count = 0
-                    self._min_v_enforced_count += 1
-                    if self._min_v_enforced_count % 10 == 0:
-                        print(f"🚀 MPC FIX: FORCING forward {min_v_forward:.3f}m/s (goal {dist_to_goal:.2f}m, obs {min_obs_dist:.2f}m)")
-            # If obstacles ARE blocking (<0.3m), still enforce minimum but lower
-            elif min_obs_dist > 0.15:
-                min_v_forward = 0.15  # Still move forward but slower when close to obstacles
-                if v_cmd < min_v_forward:
-                    v_cmd = min_v_forward
+            # CRITICAL: Ensure we're moving TOWARD goal, not away!
+            # Check if velocity direction is toward goal (within ±90 degrees)
+            if abs(angle_err) < np.pi/2:  # Goal is in front (±90 degrees)
+                # If obstacles are NOT blocking (far >0.2m - REDUCED), ALWAYS move forward fast
+                if min_obs_dist > 0.2:
+                    min_v_forward = 0.30  # AGGRESSIVE: 30cm/s minimum when obstacles not blocking
+                    if v_cmd < min_v_forward:
+                        v_cmd = min_v_forward
+                        # Also ensure we're turning toward goal if angle error is large
+                        if abs(angle_err) > 0.3:  # More than ~17 degrees off
+                            omega_cmd = np.clip(angle_err * 2.0, -self.wz_max, self.wz_max)  # Turn toward goal
+                # If obstacles ARE blocking (<0.2m), still enforce minimum but lower
+                elif min_obs_dist > 0.10:
+                    min_v_forward = 0.20  # Still move forward but slower when close to obstacles
+                    if v_cmd < min_v_forward:
+                        v_cmd = min_v_forward
+                # If obstacles VERY close (<0.10m), minimum but allow curves
+                else:
+                    min_v_forward = 0.15  # Minimum forward even when very close
+                    if v_cmd < min_v_forward:
+                        v_cmd = min_v_forward
+            else:
+                # Goal is behind us - turn first, but still move forward slightly
+                if min_obs_dist > 0.2:
+                    # Turn toward goal aggressively
+                    omega_cmd = np.clip(angle_err * 3.0, -self.wz_max, self.wz_max)
+                    # Still move forward slowly while turning
+                    min_v_forward = 0.15
+                    if v_cmd < min_v_forward:
+                        v_cmd = min_v_forward
+                
+            # Log when enforcing
+            if not hasattr(self, '_min_v_enforced_count'):
+                self._min_v_enforced_count = 0
+            self._min_v_enforced_count += 1
+            if self._min_v_enforced_count % 10 == 0:
+                print(f"🚀 MPC: v={v_cmd:.3f}m/s, omega={np.degrees(omega_cmd):.1f}°/s, "
+                      f"goal_dist={dist_to_goal:.2f}m, angle_err={np.degrees(angle_err):.1f}°, "
+                      f"obs_dist={min_obs_dist:.2f}m")
         
         # REMOVED: Don't limit turn rate - this was preventing MPC from working correctly
         # The MPC should handle turn rate limits through its constraints
