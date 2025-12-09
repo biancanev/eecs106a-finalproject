@@ -17,8 +17,8 @@ def generate_launch_description():
         # Launch arguments
         DeclareLaunchArgument(
             'use_rviz',
-            default_value='true',
-            description='Launch RViz'
+            default_value='false',  # Default to false - RViz can crash, launch manually if needed
+            description='Launch RViz (may crash - launch manually if needed)'
         ),
         DeclareLaunchArgument(
             'use_test_viz',
