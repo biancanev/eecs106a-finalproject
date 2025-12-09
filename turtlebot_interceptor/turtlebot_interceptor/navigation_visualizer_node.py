@@ -37,9 +37,16 @@ class NavigationVisualizerNode(Node):
         except rclpy.exceptions.ParameterAlreadyDeclaredException:
             pass  # Parameter already declared by launch file
         
-        # Get parameters
-        self.goal_x = self.get_parameter('goal_x').get_parameter_value().double_value
-        self.goal_y = self.get_parameter('goal_y').get_parameter_value().double_value
+        # Get parameters (handle both int and float from launch file)
+        # When user passes goal_y:=0, ROS2 interprets as INTEGER, but we need DOUBLE
+        try:
+            self.goal_x = float(self.get_parameter('goal_x').get_parameter_value().double_value)
+        except (AttributeError, TypeError):
+            self.goal_x = float(self.get_parameter('goal_x').get_parameter_value().integer_value)
+        try:
+            self.goal_y = float(self.get_parameter('goal_y').get_parameter_value().double_value)
+        except (AttributeError, TypeError):
+            self.goal_y = float(self.get_parameter('goal_y').get_parameter_value().integer_value)
         self.robot_radius = self.get_parameter('robot_radius').get_parameter_value().double_value
         self.path_history_length = self.get_parameter('path_history_length').get_parameter_value().integer_value
         
