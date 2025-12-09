@@ -1390,10 +1390,7 @@ class MPCNode(Node):
         
         # Check for immediate collision danger - DISABLED emergency backup
         # MPC handles obstacle avoidance - don't interfere with its planning
-        # Only log warning if very close
-        if self.seeker_state[3] > 0.1 and self.check_immediate_collision():
-            # Just slow down slightly - let MPC curve around
-            pass  # MPC will handle it through cost function
+        pass  # MPC will handle it through cost function
         
         # For single robot navigation, use goal point if target not available
         use_goal = (self.target_pose is None)
@@ -1597,6 +1594,36 @@ class MPCNode(Node):
                     f"angle_to_goal={np.degrees(angle_to_goal):.1f}°, angle_err={np.degrees(angle_err):.1f}°, "
                     f"v_cmd={v_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°"
                 )
+            
+            # CRITICAL: Ensure we're moving TOWARD goal, not away!
+            # Check direction to goal
+            dx_goal = target_seq[0,0] - x0[0]
+            dy_goal = target_seq[1,0] - x0[1]
+            dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
+            angle_to_goal = np.arctan2(dy_goal, dx_goal)
+            angle_err = angle_to_goal - x0[2]
+            angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
+            
+            # If goal is in front (±90 degrees) and we're far (>0.15m), FORCE forward velocity
+            if dist_to_goal > 0.15 and abs(angle_err) < np.pi/2:
+                # Ensure minimum forward velocity toward goal
+                if v_cmd < 0.25:  # If MPC gave us slow/zero velocity
+                    v_cmd = 0.25  # Force 25cm/s forward
+                    # Also turn toward goal if angle error is significant
+                    if abs(angle_err) > 0.2:  # More than ~11 degrees off
+                        omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
+                    if self._mpc_cmd_count % 10 == 0:
+                        self.get_logger().error(
+                            f"🎯 FORCING forward: v={v_cmd:.3f}m/s, omega={np.degrees(omega_cmd):.1f}°/s, "
+                            f"goal_dist={dist_to_goal:.2f}m, angle_err={np.degrees(angle_err):.1f}°"
+                        )
+            # If goal is behind, turn toward it but still move forward
+            elif dist_to_goal > 0.15:
+                # Turn aggressively toward goal
+                omega_cmd = np.clip(angle_err * 3.0, -self.omega_max, self.omega_max)
+                # Still move forward slowly
+                if v_cmd < 0.15:
+                    v_cmd = 0.15
             
             # Clip commands to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
