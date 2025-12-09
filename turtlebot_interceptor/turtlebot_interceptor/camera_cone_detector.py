@@ -111,23 +111,30 @@ class CameraConeDetector(Node):
         self.get_logger().info(f'   Pose: {pose_topic}')
         
         # Subscriptions
-        # Camera image (use sensor data QoS)
+        # Match camera QoS exactly: BEST_EFFORT (from ros2 topic info)
+        compatible_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,  # Camera uses BEST_EFFORT
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        
+        # Camera image
         self.image_sub = self.create_subscription(
             Image,
             image_topic,
             self.image_callback,
-            qos_profile_sensor_data
+            compatible_qos
         )
         
         # Camera info (for intrinsic parameters)
-        # Use sensor data QoS to match image topic
+        # Use same QoS as image
         self.camera_info_sub = self.create_subscription(
             CameraInfo,
             camera_info_topic,
             self.camera_info_callback,
-            qos_profile_sensor_data  # Match image QoS
+            compatible_qos
         )
-        self.get_logger().info(f'📷 Subscribed to camera_info: {camera_info_topic}')
+        self.get_logger().info(f'📷 Subscribed to camera_info: {camera_info_topic} with BEST_EFFORT QoS')
         
         # Robot pose (for coordinate transforms)
         self.pose_sub = self.create_subscription(
