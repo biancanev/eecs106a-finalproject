@@ -20,6 +20,11 @@ def generate_launch_description():
             default_value='true',
             description='Launch RViz'
         ),
+        DeclareLaunchArgument(
+            'use_test_viz',
+            default_value='false',
+            description='Launch test visualization (requires compatible numpy)'
+        ),
         
         # Camera cone detector (assumes camera is already running on TurtleBot)
         Node(
@@ -29,13 +34,13 @@ def generate_launch_description():
             output='screen'
         ),
         
-        # Test visualization node
+        # Test visualization node (optional - may have numpy compatibility issues)
         Node(
             package='turtlebot_interceptor',
             executable='test_camera_cones',
             name='test_camera_cones',
             output='screen',
-            condition=IfCondition(LaunchConfiguration('use_rviz'))
+            condition=IfCondition(LaunchConfiguration('use_test_viz'))
         ),
         
         # RViz with pre-configured topics

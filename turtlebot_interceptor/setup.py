@@ -15,7 +15,11 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.rviz')),
     ],
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+        'numpy<2.0',  # cv_bridge requires numpy 1.x
+        'opencv-python',  # For cv2
+    ],
     zip_safe=True,
     maintainer='biancano',
     maintainer_email='biancano@todo.todo',
