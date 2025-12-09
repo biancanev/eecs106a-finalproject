@@ -107,6 +107,20 @@ def generate_launch_description():
             output='screen'
         ),
         
+        # Camera Cone Detector (yellow cone detection with 15cm diameter)
+        # Provides close-range obstacle detection for MPC
+        Node(
+            package='turtlebot_interceptor',
+            executable='camera_cone_detector',
+            name='camera_cone_detector',
+            parameters=[{
+                'image_topic': '/image_raw',
+                'camera_info_topic': '/camera_info',
+                'pose_topic': '/amcl_pose',
+            }],
+            output='screen'
+        ),
+        
         # MCL node (localization using map and LIDAR)
         # OPTIONAL: Cartographer already provides pose tracking
         # Can disable this and use Cartographer's pose directly from /tracked_pose
