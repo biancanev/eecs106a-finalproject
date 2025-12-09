@@ -97,8 +97,9 @@ class CameraConeDetector(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
         # Topic names (configurable via parameters)
-        self.declare_parameter('image_topic', '/camera/image_raw')
-        self.declare_parameter('camera_info_topic', '/camera/camera_info')
+        # Try /image_raw first (common), fallback to /camera/image_raw
+        self.declare_parameter('image_topic', '/image_raw')  # Changed default - camera might publish here
+        self.declare_parameter('camera_info_topic', '/camera_info')  # Changed default
         self.declare_parameter('pose_topic', '/amcl_pose')
         
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
