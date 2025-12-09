@@ -79,9 +79,9 @@ class CameraConeDetector(Node):
         ])
         
         # Yellow color range in HSV (for yellow cones)
-        # These values work well for bright yellow traffic cones
-        self.lower_yellow = np.array([20, 100, 100])   # Lower bound for yellow
-        self.upper_yellow = np.array([30, 255, 255])   # Upper bound for yellow
+        # VERY WIDE range to catch any yellow
+        self.lower_yellow = np.array([10, 50, 50])   # Very permissive lower bound
+        self.upper_yellow = np.array([40, 255, 255])   # Very permissive upper bound
         
         # Minimum cone size (in pixels) to filter noise
         self.min_cone_area = 500  # pixels
@@ -460,8 +460,9 @@ class CameraConeDetector(Node):
         
         # Debug: Log yellow pixel count
         yellow_pixels = np.sum(mask > 0)
+        yellow_percent = 100 * yellow_pixels / mask.size if mask.size > 0 else 0
         if not hasattr(self, '_yellow_pixel_logged') or self._detection_count % 30 == 0:
-            self.get_logger().debug(f'Yellow pixels in mask: {yellow_pixels} / {mask.size} ({100*yellow_pixels/mask.size:.1f}%)')
+            self.get_logger().info(f'🔍 Yellow mask: {yellow_pixels} pixels ({yellow_percent:.1f}% of image)')
             if not hasattr(self, '_yellow_pixel_logged'):
                 self._yellow_pixel_logged = True
         
@@ -482,10 +483,11 @@ class CameraConeDetector(Node):
             center_y = y + h / 2
             
             # Heuristic 2: Aspect ratio (cones are roughly vertical/tall)
+            # DISABLED - accept any aspect ratio for now
             aspect_ratio = h / w if w > 0 else 0
-            if aspect_ratio < 1.0 or aspect_ratio > 5.0:  # More permissive
-                debug_info['filtered']['aspect'] = debug_info['filtered'].get('aspect', 0) + 1
-                continue
+            # if aspect_ratio < 0.5 or aspect_ratio > 10.0:  # DISABLED - too permissive
+            #     debug_info['filtered']['aspect'] = debug_info['filtered'].get('aspect', 0) + 1
+            #     continue
             
             # Heuristic 3: TRIANGULAR SHAPE DETECTION (cones are triangular)
             # Approximate contour to polygon
@@ -493,10 +495,11 @@ class CameraConeDetector(Node):
             approx = cv2.approxPolyDP(contour, epsilon, True)
             
             # Check if shape is roughly triangular (3-5 vertices for cone)
+            # DISABLED - accept any shape
             num_vertices = len(approx)
-            if num_vertices < 3 or num_vertices > 8:  # More permissive - allow more complex shapes
-                debug_info['filtered']['vertices'] = debug_info['filtered'].get('vertices', 0) + 1
-                continue
+            # if num_vertices < 3 or num_vertices > 20:  # DISABLED
+            #     debug_info['filtered']['vertices'] = debug_info['filtered'].get('vertices', 0) + 1
+            #     continue
             
             # Check triangularity: top point should be narrow, base should be wide
             # Create ROI mask for this contour
@@ -517,17 +520,19 @@ class CameraConeDetector(Node):
                 bottom_width = np.sum(bottom_slice > 0)
                 
                 # Heuristic: Bottom should be wider than top (cone shape)
-                if bottom_width > 0 and top_width / bottom_width > 0.98:  # Very permissive - only reject if almost same width
-                    debug_info['filtered']['triangle'] = debug_info['filtered'].get('triangle', 0) + 1
-                    continue
+                # DISABLED - accept any shape
+                # if bottom_width > 0 and top_width / bottom_width > 0.99:  # DISABLED
+                #     debug_info['filtered']['triangle'] = debug_info['filtered'].get('triangle', 0) + 1
+                #     continue
             
             # Heuristic 4: Solidity (cones are relatively solid shapes)
-            hull = cv2.convexHull(contour)
-            hull_area = cv2.contourArea(hull)
-            solidity = area / hull_area if hull_area > 0 else 0
-            if solidity < 0.4:  # Very permissive - allow irregular shapes
-                debug_info['filtered']['solidity'] = debug_info['filtered'].get('solidity', 0) + 1
-                continue
+            # DISABLED - accept any solidity
+            # hull = cv2.convexHull(contour)
+            # hull_area = cv2.contourArea(hull)
+            # solidity = area / hull_area if hull_area > 0 else 0
+            # if solidity < 0.1:  # DISABLED
+            #     debug_info['filtered']['solidity'] = debug_info['filtered'].get('solidity', 0) + 1
+            #     continue
             
             # Heuristic 5: Sample pixels within contour to validate yellow color
             # mask_roi already created above for triangular check
@@ -536,17 +541,17 @@ class CameraConeDetector(Node):
             total_pixels = area
             yellow_ratio = yellow_pixels / total_pixels if total_pixels > 0 else 0
             
-            # Heuristic: At least 50% of the region should be yellow (more permissive)
-            if yellow_ratio < 0.5:
+            # Heuristic: At least 30% of the region should be yellow (VERY permissive)
+            if yellow_ratio < 0.3:
                 debug_info['filtered']['yellow_ratio'] = debug_info['filtered'].get('yellow_ratio', 0) + 1
                 continue
             
             # Heuristic 6: Check if region is in lower half of image (cones are on ground)
-            # But allow some flexibility for perspective
-            img_height = cv_image.shape[0]
-            if center_y < img_height * 0.1:  # Very permissive - only reject if very high
-                debug_info['filtered']['position'] = debug_info['filtered'].get('position', 0) + 1
-                continue
+            # DISABLED - accept anywhere in image
+            # img_height = cv_image.shape[0]
+            # if center_y < img_height * 0.05:  # DISABLED
+            #     debug_info['filtered']['position'] = debug_info['filtered'].get('position', 0) + 1
+            #     continue
             
             # Get actual mask pixels for depth estimation (lab8 pattern)
             mask_pixels = yellow_pixels
@@ -554,11 +559,16 @@ class CameraConeDetector(Node):
             cones.append((center_x, center_y, w, h, area, mask_pixels))
         
         # Log debug info periodically
-        if self._detection_count % 30 == 0 and len(contours) > 0:
-            self.get_logger().info(
-                f'🔍 Detection debug: {debug_info["total_contours"]} contours, '
-                f'{len(cones)} passed, filtered: {debug_info["filtered"]}'
-            )
+        if self._detection_count % 30 == 0:
+            if len(contours) == 0:
+                self.get_logger().warn(f'⚠️ NO CONTOURS FOUND! Yellow mask has {yellow_pixels} pixels ({yellow_percent:.1f}%)')
+            else:
+                self.get_logger().info(
+                    f'🔍 Detection: {debug_info["total_contours"]} contours found, '
+                    f'{len(cones)} passed, filtered: {debug_info["filtered"]}'
+                )
+                if len(cones) == 0 and len(contours) > 0:
+                    self.get_logger().warn(f'⚠️ ALL {len(contours)} CONTOURS FILTERED OUT! Check filters above.')
         
         return cones
     
