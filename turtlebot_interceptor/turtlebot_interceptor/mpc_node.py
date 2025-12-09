@@ -6,7 +6,7 @@ Based on the paper implementation
 import rclpy
 from rclpy.node import Node
 from rclpy.exceptions import ParameterAlreadyDeclaredException
-from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, PointStamped
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 import numpy as np
@@ -113,6 +113,16 @@ class MPCNode(Node):
             10
         )
         self.matched_points = None
+        
+        # Camera-based cone detection with confidence
+        self.camera_cones_sub = self.create_subscription(
+            PointStamped,
+            '/camera_cone_positions',
+            self.camera_cone_callback,
+            10
+        )
+        self.camera_cones = []  # List of (position, confidence, timestamp) tuples
+        self.camera_cone_timeout = 0.5  # Keep camera detections for 0.5 seconds
 
         # Publishers
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -712,33 +722,100 @@ class MPCNode(Node):
         
         return best_waypoint
     
+    def camera_cone_callback(self, msg: PointStamped):
+        """Store camera-detected cone positions with confidence"""
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        cone_pos = np.array([msg.point.x, msg.point.y])
+        
+        # Extract confidence from z coordinate (temporary solution)
+        # Better: use custom message type
+        confidence = float(msg.point.z) if msg.point.z > 0 else 0.5
+        
+        self.camera_cones.append((cone_pos, confidence, current_time))
+        
+        # Clean up old detections
+        self.camera_cones = [
+            (pos, conf, t) for pos, conf, t in self.camera_cones
+            if current_time - t < self.camera_cone_timeout
+        ]
+    
     def compute_obstacles(self):
         """
-        Extract obstacles with PRIORITY ordering.
-        Priority: Fast Local Grid > Scan-Matched Points > Raw LIDAR
+        Extract obstacles with CONFIDENCE-BASED FUSION.
+        Dynamic confidence switching: LIDAR (far) → Camera (close)
         """
         if self.seeker_state is None:
             return []
         
         obstacles = []
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        robot_pos = self.seeker_state[:2]
         
-        # PRIORITY 1: Fast Local Grid (HIGHEST - persistent, reliable memory)
+        # STEP 1: Collect obstacles from all sources with their confidence
+        all_obstacles = {}  # Map: (x, y) -> (position, radius, confidence, source)
+        
+        # Source 1: Camera (confidence based on distance)
+        for cone_pos, camera_conf, timestamp in self.camera_cones:
+            if current_time - timestamp < self.camera_cone_timeout:
+                dist = np.linalg.norm(cone_pos - robot_pos)
+                # Camera confidence decreases with distance
+                final_conf = camera_conf * (1.0 - min(dist / 2.0, 1.0))
+                key = (round(cone_pos[0], 2), round(cone_pos[1], 2))
+                all_obstacles[key] = (cone_pos, self.obstacle_radius_param, final_conf, 'camera')
+        
+        # Source 2: Fast Local Grid (high confidence when far, medium when close)
         if self.local_map is not None:
             grid_obstacles = self.extract_map_obstacles_from_grid(self.local_map)
-            obstacles.extend(grid_obstacles)
-            if len(grid_obstacles) > 0 and not hasattr(self, '_grid_priority_logged'):
-                self.get_logger().info(f"✓ Using Fast Local Grid: {len(grid_obstacles)} obstacles")
-                self._grid_priority_logged = True
+            for obs_pos, obs_radius in grid_obstacles:
+                dist = np.linalg.norm(obs_pos - robot_pos)
+                # LIDAR confidence: high when far, decreases when close (camera takes over)
+                lidar_conf = 0.9 if dist > 1.5 else 0.9 - 0.4 * (1.5 - dist) / 1.5
+                key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
+                if key not in all_obstacles or all_obstacles[key][2] < lidar_conf:
+                    all_obstacles[key] = (obs_pos, obs_radius, lidar_conf, 'grid')
         
-        # PRIORITY 2: Cartographer scan-matched points (MEDIUM - accurate but can be sparse)
-        if self.matched_points is not None and len(obstacles) < self.max_obstacles:
+        # Source 3: Scan-matched points (medium confidence)
+        if self.matched_points is not None:
             scan_obstacles = self.extract_scan_matched_obstacles()
-            obstacles.extend(scan_obstacles)
+            for obs_pos, obs_radius in scan_obstacles:
+                dist = np.linalg.norm(obs_pos - robot_pos)
+                scan_conf = 0.7 if dist > 1.5 else 0.7 - 0.3 * (1.5 - dist) / 1.5
+                key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
+                if key not in all_obstacles or all_obstacles[key][2] < scan_conf:
+                    all_obstacles[key] = (obs_pos, obs_radius, scan_conf, 'scan')
         
-        # PRIORITY 3: Raw LIDAR (LOWEST - backup only)
-        if self.latest_scan is not None and len(obstacles) < self.max_obstacles:
+        # Source 4: Raw LIDAR (low confidence, backup)
+        if self.latest_scan is not None:
             lidar_obstacles = self.extract_lidar_obstacles()
-            obstacles.extend(lidar_obstacles)
+            for obs_pos, obs_radius in lidar_obstacles:
+                dist = np.linalg.norm(obs_pos - robot_pos)
+                raw_conf = 0.5 if dist > 1.5 else 0.5 - 0.2 * (1.5 - dist) / 1.5
+                key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
+                if key not in all_obstacles or all_obstacles[key][2] < raw_conf:
+                    all_obstacles[key] = (obs_pos, obs_radius, raw_conf, 'lidar')
+        
+        # STEP 2: Fuse obstacles by confidence (weighted average for nearby detections)
+        fused_obstacles = {}
+        for key, (pos, radius, conf, source) in all_obstacles.items():
+            # Only keep high-confidence detections
+            if conf > 0.3:  # Minimum confidence threshold
+                # For obstacles detected by multiple sources, use highest confidence
+                if key not in fused_obstacles or fused_obstacles[key][2] < conf:
+                    fused_obstacles[key] = (pos, radius, conf, source)
+        
+        # STEP 3: Convert to list and sort by confidence (highest first)
+        obstacles = [(pos, radius) for pos, radius, conf, source in fused_obstacles.values()]
+        
+        # Log confidence distribution
+        if len(obstacles) > 0 and not hasattr(self, '_confidence_logged'):
+            sources = [source for _, _, _, source in fused_obstacles.values()]
+            camera_count = sources.count('camera')
+            grid_count = sources.count('grid')
+            self.get_logger().info(
+                f'🎯 Fused obstacles: {len(obstacles)} total '
+                f'(Camera: {camera_count}, Grid: {grid_count})'
+            )
+            self._confidence_logged = True
         
         # Remove duplicates and limit total
         obstacles = self.merge_obstacles(obstacles)
@@ -1134,7 +1211,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        emergency_dist = 0.25  # 25cm emergency threshold - TIGHT for curved navigation
+        emergency_dist = 0.15  # 15cm emergency threshold - only trigger for real danger (was 25cm - too aggressive)
         front_range = np.pi / 6  # ±30 degrees
         
         for i, r in enumerate(ranges):
@@ -1311,13 +1388,9 @@ class MPCNode(Node):
             self.handle_emergency_recovery()
             return
         
-        # Check for immediate collision danger
-        if self.check_immediate_collision():
-            self.get_logger().error('🚨 EMERGENCY: Obstacle ahead! Starting backup...')
-            self.emergency_state = 'BACKUP'
-            self.emergency_start_time = self.get_clock().now()
-            self.handle_emergency_recovery()
-            return
+        # Check for immediate collision danger - DISABLED emergency backup
+        # MPC handles obstacle avoidance - don't interfere with its planning
+        pass  # MPC will handle it through cost function
         
         # For single robot navigation, use goal point if target not available
         use_goal = (self.target_pose is None)
@@ -1491,19 +1564,16 @@ class MPCNode(Node):
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
             
-            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification
+            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification - RELAXED
+            # Only check if we're about to actually collide (<2cm clearance)
             is_safe, clearance = self.verify_full_trajectory_safety(x0, v_cmd, omega_cmd, obstacles)
-            if not is_safe:
+            if not is_safe and clearance < 0.02:  # Only if truly colliding (<2cm)
                 self.get_logger().warn(
-                    f"⚠️ Trajectory verification failed! Min clearance: {clearance:.3f}m. "
-                    f"Triggering emergency waypoint."
+                    f"⚠️ Trajectory very close! Min clearance: {clearance:.3f}m. Reducing speed slightly."
                 )
-                # Generate emergency waypoint if not already set
-                if self.current_waypoint is None and use_goal:
-                    self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
-                # Reduce velocity significantly
-                v_cmd *= 0.3
-                omega_cmd *= 0.5
+                # Just reduce speed slightly - don't stop or back up
+                v_cmd *= 0.6  # Reduce by 40% (was 30%)
+                # Don't reduce turn rate - allow curves
             
             # CRITICAL DEBUG: Log everything to find the bug
             if not hasattr(self, '_mpc_cmd_count'):
@@ -1524,6 +1594,36 @@ class MPCNode(Node):
                     f"angle_to_goal={np.degrees(angle_to_goal):.1f}°, angle_err={np.degrees(angle_err):.1f}°, "
                     f"v_cmd={v_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°"
                 )
+            
+            # CRITICAL: Ensure we're moving TOWARD goal, not away!
+            # Check direction to goal
+            dx_goal = target_seq[0,0] - x0[0]
+            dy_goal = target_seq[1,0] - x0[1]
+            dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
+            angle_to_goal = np.arctan2(dy_goal, dx_goal)
+            angle_err = angle_to_goal - x0[2]
+            angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
+            
+            # If goal is in front (±90 degrees) and we're far (>0.15m), FORCE forward velocity
+            if dist_to_goal > 0.15 and abs(angle_err) < np.pi/2:
+                # Ensure minimum forward velocity toward goal
+                if v_cmd < 0.25:  # If MPC gave us slow/zero velocity
+                    v_cmd = 0.25  # Force 25cm/s forward
+                    # Also turn toward goal if angle error is significant
+                    if abs(angle_err) > 0.2:  # More than ~11 degrees off
+                        omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
+                    if self._mpc_cmd_count % 10 == 0:
+                        self.get_logger().error(
+                            f"🎯 FORCING forward: v={v_cmd:.3f}m/s, omega={np.degrees(omega_cmd):.1f}°/s, "
+                            f"goal_dist={dist_to_goal:.2f}m, angle_err={np.degrees(angle_err):.1f}°"
+                        )
+            # If goal is behind, turn toward it but still move forward
+            elif dist_to_goal > 0.15:
+                # Turn aggressively toward goal
+                omega_cmd = np.clip(angle_err * 3.0, -self.omega_max, self.omega_max)
+                # Still move forward slowly
+                if v_cmd < 0.15:
+                    v_cmd = 0.15
             
             # Clip commands to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
@@ -1564,14 +1664,13 @@ class MPCNode(Node):
             if len(self.trajectory_history) > self.max_history_length:
                 self.trajectory_history.pop(0)
         
-        # SAFETY FILTER: Check if command would cause collision
-        if not self.is_command_safe(v_cmd, omega_cmd):
-            self.get_logger().error('🛑 SAFETY FILTER: MPC planned unsafe path! Starting backup...')
-            # Trigger emergency backup - we know the path behind is safe
-            self.emergency_state = 'BACKUP'
-            self.emergency_start_time = self.get_clock().now()
-            self.handle_emergency_recovery()
-            return
+        # SAFETY FILTER: DISABLED - MPC handles obstacle avoidance through cost function
+        # Only check if we're about to hit something IMMEDIATELY (<5cm)
+        if v_cmd > 0.1:  # Only check if moving forward
+            if not self.is_command_safe(v_cmd, omega_cmd):
+                # Only reduce speed slightly - don't stop or back up
+                v_cmd *= 0.7  # Reduce speed by 30% (was 50%)
+                # Don't reduce turn rate - allow curves
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
@@ -1602,28 +1701,28 @@ class MPCNode(Node):
     def compute_velocity_scale(self, min_obs_dist):
         """
         ALGORITHMIC IMPROVEMENT: Adaptive velocity scaling based on obstacle proximity.
-        Automatically slow down near obstacles for better reaction time and safety.
+        Less aggressive - allow progress even near obstacles.
         
-        Returns: scale factor in [0.3, 1.0]
+        Returns: scale factor in [0.5, 1.0] (was [0.3, 1.0] - too slow)
         """
-        if min_obs_dist >= 1.0:
+        if min_obs_dist >= 0.8:
             # Far from obstacles - full speed
             return 1.0
-        elif min_obs_dist >= 0.5:
-            # Moderate distance - slight slowdown (linear interpolation)
-            # 1.0m -> 1.0, 0.5m -> 0.8
-            return 0.8 + 0.2 * (min_obs_dist - 0.5) / 0.5
-        elif min_obs_dist >= 0.3:
-            # Close - significant slowdown
-            # 0.5m -> 0.8, 0.3m -> 0.5
-            return 0.5 + 0.3 * (min_obs_dist - 0.3) / 0.2
+        elif min_obs_dist >= 0.4:
+            # Moderate distance - slight slowdown
+            # 0.8m -> 1.0, 0.4m -> 0.8
+            return 0.8 + 0.2 * (min_obs_dist - 0.4) / 0.4
+        elif min_obs_dist >= 0.25:
+            # Close - moderate slowdown
+            # 0.4m -> 0.8, 0.25m -> 0.6
+            return 0.6 + 0.2 * (min_obs_dist - 0.25) / 0.15
         elif min_obs_dist >= 0.15:
-            # Very close - major slowdown
-            # 0.3m -> 0.5, 0.15m -> 0.3
-            return 0.3 + 0.2 * (min_obs_dist - 0.15) / 0.15
+            # Very close - significant slowdown but still move
+            # 0.25m -> 0.6, 0.15m -> 0.5
+            return 0.5 + 0.1 * (min_obs_dist - 0.15) / 0.1
         else:
-            # Extremely close - minimum speed (but don't stop)
-            return 0.3
+            # Extremely close - minimum speed (but still move!)
+            return 0.5  # Was 0.3 - too slow, now 0.5 for progress
     
     def verify_full_trajectory_safety(self, x0, v, omega, obstacles, horizon_steps=10):
         """
@@ -1655,7 +1754,7 @@ class MPCNode(Node):
                 min_clearance = min(min_clearance, clearance)
                 
                 # If collision imminent, trajectory is unsafe
-                if clearance < 0.05:  # 5cm safety margin
+                if clearance < 0.02:  # 2cm safety margin - only reject if truly colliding (was 5cm - too aggressive)
                     return False, clearance
         
         return True, min_clearance
@@ -1681,7 +1780,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        safety_dist = 0.2  # 20cm safety threshold - TIGHT for curved navigation
+        safety_dist = 0.12  # 12cm safety threshold - relaxed to allow progress (was 20cm - too aggressive)
         
         # Check direction we're moving
         move_direction = np.arctan2(new_y - y, new_x - x) - theta

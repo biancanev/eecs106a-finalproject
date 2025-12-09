@@ -19,7 +19,7 @@ class SimpleUnicycleMPC:
         # Velocity constraints (Twist message format)
         # Linear velocities (m/s)
         self.vx_min = 0.0
-        self.vx_max = 0.2  # SLOW MODE: Test obstacle avoidance first! (was 1.2)
+        self.vx_max = 0.35  # Faster for smoother curves (was 0.2)
         self.vy_min = 0.0  # Unicycle: no lateral velocity
         self.vy_max = 0.0
         self.vz_min = 0.0  # Unicycle: no vertical velocity
@@ -30,8 +30,8 @@ class SimpleUnicycleMPC:
         self.wx_max = 0.0
         self.wy_min = 0.0  # Unicycle: no pitch
         self.wy_max = 0.0
-        self.wz_min = -1.0  # REDUCE max turn rate - too high causes spinning
-        self.wz_max = 1.0
+        self.wz_min = -2.0  # Higher turn rate for smooth curves (was -1.0)
+        self.wz_max = 2.0  # Higher turn rate for smooth curves (was 1.0)
         
         # Acceleration constraints (for MPC internal use)
         self.a_min = -0.4
@@ -40,18 +40,18 @@ class SimpleUnicycleMPC:
         self.alpha_max = 4.0
         
         # Turn angle constraint (maximum change in heading per step)
-        self.max_turn_angle = 0.5  # MUCH higher for tight optimal paths (was 0.3, ~17 deg, now ~29 deg)
+        self.max_turn_angle = 0.6  # Higher for smooth curves (was 0.5, ~29 deg, now ~34 deg)
         
         # Legacy constraints for backward compatibility
         self.v_min = self.vx_min
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - OPTIMIZED for smooth curves around cones
-        self.Qp_base = 50.0  # STRONG goal tracking - robot should actively pursue target
+        # Base weights - AGGRESSIVE goal pursuit
+        self.Qp_base = 500.0  # EXTREMELY STRONG goal tracking - MUST make progress! (was 200.0)
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.02  # VERY LOW acceleration penalty - allow quick movements
-        self.Rw_base = 0.005  # ULTRA LOW turn penalty - smooth curves are critical!
+        self.Ra_base = 0.01  # LOW acceleration penalty for smoother curves
+        self.Rw_base = 0.002  # LOW turn penalty for smoother curves
         
         # Current adaptive weights
         self.Qp = self.Qp_base
@@ -144,6 +144,10 @@ class SimpleUnicycleMPC:
                 self.X[3,k] <= self.vx_max,
             ]
             
+            # CRITICAL: Add minimum forward velocity constraint when far from obstacles
+            # This prevents MPC from solving to back up when obstacles are distant
+            # We'll add this dynamically in solve() based on obstacle distances
+            
             # Acceleration constraints
             constraints += [
                 self.a_min <= a,
@@ -169,8 +173,8 @@ class SimpleUnicycleMPC:
         # terminal cost - CRITICAL: Make terminal cost MUCH heavier to ensure convergence
         pxN = self.X[0,N] - self.T[0,N]
         pyN = self.X[1,N] - self.T[1,N]
-        # Terminal position penalty - make it 50x heavier than stage cost to ensure robot reaches goal
-        cost += 50.0 * self.Qp_param * (pxN**2 + pyN**2)
+        # Terminal position penalty - make it 200x heavier than stage cost to ensure robot reaches goal (was 100x)
+        cost += 200.0 * self.Qp_param * (pxN**2 + pyN**2)
         
         # Add obstacle cost parameter (will be updated in solve() method)
         # This allows obstacle avoidance without rebuilding the problem (DPP-compliant)
@@ -345,7 +349,7 @@ class SimpleUnicycleMPC:
             # Compute repulsion cost for current predicted trajectory
             # We'll use the linearized trajectory from the last solution if available
             # Otherwise, use a simple prediction
-            repulsion_weight = 8000000.0  # Very high - obstacles still critical but position matters
+            repulsion_weight = 50000.0  # MUCH further reduced - goal MUST dominate! (was 100K)
             
             # Use last solution if available for obstacle cost calculation
             if self.last_solution is not None and 'X' in self.last_solution:
@@ -373,23 +377,23 @@ class SimpleUnicycleMPC:
                     dy = py - center[1]
                     dist_sq = dx*dx + dy*dy
                     
-                    # Safety radius - robust margin for reliable avoidance
-                    safety_radius = radius + 0.10  # 10cm buffer for safety
+                    # Safety radius - TIGHT for navigation through spaces
+                    safety_radius = radius + 0.10  # 10cm buffer (allows navigation through tight spaces)
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # Tiered proximity-based penalties - balanced and robust
+                    # Balanced penalties - avoid but allow progress (much lower multipliers)
                     if dist_sq < safety_radius_sq * 0.2:  # VERY CLOSE - DANGER!
-                        obstacle_cost_value += repulsion_weight * 10000.0 / (dist_sq + 0.0001)
+                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.0001)
                     elif dist_sq < safety_radius_sq * 0.5:  # CLOSE - WARNING!
-                        obstacle_cost_value += repulsion_weight * 1000.0 / (dist_sq + 0.001)
+                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.001)
                     elif dist_sq < safety_radius_sq:  # Within safety radius
-                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.01)
+                        obstacle_cost_value += repulsion_weight * 1.0 / (dist_sq + 0.01)
                     elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
-                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.1)
+                        obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + 0.1)
                     elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
-                        obstacle_cost_value += repulsion_weight / (dist_sq + 0.5)
-                    else:  # Far away
-                        obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + safety_radius_sq)
+                        obstacle_cost_value += repulsion_weight * 0.01 / (dist_sq + 0.5)
+                    else:  # Far away - minimal cost
+                        obstacle_cost_value += repulsion_weight * 0.001 / (dist_sq + safety_radius_sq)
         
         # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
         # CRITICAL: Scale obstacle cost based on proximity to make it act like hard constraint
@@ -403,17 +407,22 @@ class SimpleUnicycleMPC:
                 dx = px0 - center[0]
                 dy = py0 - center[1]
                 dist = np.sqrt(dx*dx + dy*dy)
-                safety_radius = radius + 0.05  # TIGHT margin (SAME AS ABOVE)
+                safety_radius = radius + 0.05  # TIGHT margin (matches above)
                 actual_clearance = dist - radius  # Actual distance to obstacle surface
                 if dist < safety_radius * 3.0:  # Within 3x safety radius
                     if dist < min_dist_to_obstacle:
                         min_dist_to_obstacle = dist
                         closest_obstacle = (center, radius, dist)
             
-            # If getting close, increase obstacle cost even more
+            # If getting close, increase obstacle cost moderately (not too much - allow progress)
+            # BUT: If obstacles are far (>1m), don't scale up at all - let goal dominate
             if min_dist_to_obstacle < float('inf'):
-                # Scale obstacle cost based on proximity - up to 10x when very close
-                proximity_factor = max(1.0, (1.0 / (min_dist_to_obstacle + 0.1)))  # Up to 10x when very close
+                if min_dist_to_obstacle > 1.0:
+                    # Obstacles are far - don't scale up obstacle cost, let goal cost dominate
+                    proximity_factor = 1.0  # No scaling when far
+                else:
+                    # Scale obstacle cost based on proximity - up to 2x when very close (was 3x)
+                    proximity_factor = max(1.0, min(2.0, 1.0 / (min_dist_to_obstacle + 0.3)))  # Max 2x, smoother
                 obstacle_cost_value *= proximity_factor
                 
                 # DEBUG: Log obstacle cost
@@ -520,6 +529,71 @@ class SimpleUnicycleMPC:
         # Convert acceleration to velocity command
         current_v = x0[3] if len(x0) > 3 else 0.0
         v_cmd = np.clip(current_v + a_cmd * self.dt, self.vx_min, self.vx_max)
+        
+        # CRITICAL FIX: Force movement TOWARD goal - check direction!
+        if isinstance(target, np.ndarray) and target.ndim == 2:
+            tgt = target[:, 0]
+        else:
+            tgt = np.array(target)[:2]
+        robot_pos = x0[:2]
+        robot_theta = x0[2]
+        dist_to_goal = np.linalg.norm(tgt - robot_pos)
+        
+        # Calculate direction to goal
+        dx_goal = tgt[0] - robot_pos[0]
+        dy_goal = tgt[1] - robot_pos[1]
+        angle_to_goal = np.arctan2(dy_goal, dx_goal)
+        angle_err = angle_to_goal - robot_theta
+        angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
+        
+        # ALWAYS enforce minimum forward velocity when >0.15m from goal
+        if dist_to_goal > 0.15:
+            # Check if obstacles are blocking (very close <0.2m - REDUCED from 0.3m)
+            min_obs_dist = float('inf')
+            if obstacles is not None and len(obstacles) > 0:
+                for center, radius in obstacles:
+                    dist = np.linalg.norm(center - robot_pos) - radius
+                    min_obs_dist = min(min_obs_dist, dist)
+            
+            # CRITICAL: Ensure we're moving TOWARD goal, not away!
+            # Check if velocity direction is toward goal (within ±90 degrees)
+            if abs(angle_err) < np.pi/2:  # Goal is in front (±90 degrees)
+                # If obstacles are NOT blocking (far >0.2m - REDUCED), ALWAYS move forward fast
+                if min_obs_dist > 0.2:
+                    min_v_forward = 0.30  # AGGRESSIVE: 30cm/s minimum when obstacles not blocking
+                    if v_cmd < min_v_forward:
+                        v_cmd = min_v_forward
+                        # Also ensure we're turning toward goal if angle error is large
+                        if abs(angle_err) > 0.3:  # More than ~17 degrees off
+                            omega_cmd = np.clip(angle_err * 2.0, -self.wz_max, self.wz_max)  # Turn toward goal
+                # If obstacles ARE blocking (<0.2m), still enforce minimum but lower
+                elif min_obs_dist > 0.10:
+                    min_v_forward = 0.20  # Still move forward but slower when close to obstacles
+                    if v_cmd < min_v_forward:
+                        v_cmd = min_v_forward
+                # If obstacles VERY close (<0.10m), minimum but allow curves
+                else:
+                    min_v_forward = 0.15  # Minimum forward even when very close
+                    if v_cmd < min_v_forward:
+                        v_cmd = min_v_forward
+            else:
+                # Goal is behind us - turn first, but still move forward slightly
+                if min_obs_dist > 0.2:
+                    # Turn toward goal aggressively
+                    omega_cmd = np.clip(angle_err * 3.0, -self.wz_max, self.wz_max)
+                    # Still move forward slowly while turning
+                    min_v_forward = 0.15
+                    if v_cmd < min_v_forward:
+                        v_cmd = min_v_forward
+                
+            # Log when enforcing
+            if not hasattr(self, '_min_v_enforced_count'):
+                self._min_v_enforced_count = 0
+            self._min_v_enforced_count += 1
+            if self._min_v_enforced_count % 10 == 0:
+                print(f"🚀 MPC: v={v_cmd:.3f}m/s, omega={np.degrees(omega_cmd):.1f}°/s, "
+                      f"goal_dist={dist_to_goal:.2f}m, angle_err={np.degrees(angle_err):.1f}°, "
+                      f"obs_dist={min_obs_dist:.2f}m")
         
         # REMOVED: Don't limit turn rate - this was preventing MPC from working correctly
         # The MPC should handle turn rate limits through its constraints
