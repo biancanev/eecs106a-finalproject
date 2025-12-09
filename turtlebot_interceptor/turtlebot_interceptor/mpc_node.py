@@ -113,6 +113,17 @@ class MPCNode(Node):
             10
         )
         self.matched_points = None
+        
+        # Camera-based cone detection with confidence
+        from geometry_msgs.msg import PointStamped
+        self.camera_cones_sub = self.create_subscription(
+            PointStamped,
+            '/camera_cone_positions',
+            self.camera_cone_callback,
+            10
+        )
+        self.camera_cones = []  # List of (position, confidence, timestamp) tuples
+        self.camera_cone_timeout = 0.5  # Keep camera detections for 0.5 seconds
 
         # Publishers
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -712,33 +723,100 @@ class MPCNode(Node):
         
         return best_waypoint
     
+    def camera_cone_callback(self, msg: PointStamped):
+        """Store camera-detected cone positions with confidence"""
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        cone_pos = np.array([msg.point.x, msg.point.y])
+        
+        # Extract confidence from z coordinate (temporary solution)
+        # Better: use custom message type
+        confidence = float(msg.point.z) if msg.point.z > 0 else 0.5
+        
+        self.camera_cones.append((cone_pos, confidence, current_time))
+        
+        # Clean up old detections
+        self.camera_cones = [
+            (pos, conf, t) for pos, conf, t in self.camera_cones
+            if current_time - t < self.camera_cone_timeout
+        ]
+    
     def compute_obstacles(self):
         """
-        Extract obstacles with PRIORITY ordering.
-        Priority: Fast Local Grid > Scan-Matched Points > Raw LIDAR
+        Extract obstacles with CONFIDENCE-BASED FUSION.
+        Dynamic confidence switching: LIDAR (far) → Camera (close)
         """
         if self.seeker_state is None:
             return []
         
         obstacles = []
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        robot_pos = self.seeker_state[:2]
         
-        # PRIORITY 1: Fast Local Grid (HIGHEST - persistent, reliable memory)
+        # STEP 1: Collect obstacles from all sources with their confidence
+        all_obstacles = {}  # Map: (x, y) -> (position, radius, confidence, source)
+        
+        # Source 1: Camera (confidence based on distance)
+        for cone_pos, camera_conf, timestamp in self.camera_cones:
+            if current_time - timestamp < self.camera_cone_timeout:
+                dist = np.linalg.norm(cone_pos - robot_pos)
+                # Camera confidence decreases with distance
+                final_conf = camera_conf * (1.0 - min(dist / 2.0, 1.0))
+                key = (round(cone_pos[0], 2), round(cone_pos[1], 2))
+                all_obstacles[key] = (cone_pos, self.obstacle_radius_param, final_conf, 'camera')
+        
+        # Source 2: Fast Local Grid (high confidence when far, medium when close)
         if self.local_map is not None:
             grid_obstacles = self.extract_map_obstacles_from_grid(self.local_map)
-            obstacles.extend(grid_obstacles)
-            if len(grid_obstacles) > 0 and not hasattr(self, '_grid_priority_logged'):
-                self.get_logger().info(f"✓ Using Fast Local Grid: {len(grid_obstacles)} obstacles")
-                self._grid_priority_logged = True
+            for obs_pos, obs_radius in grid_obstacles:
+                dist = np.linalg.norm(obs_pos - robot_pos)
+                # LIDAR confidence: high when far, decreases when close (camera takes over)
+                lidar_conf = 0.9 if dist > 1.5 else 0.9 - 0.4 * (1.5 - dist) / 1.5
+                key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
+                if key not in all_obstacles or all_obstacles[key][2] < lidar_conf:
+                    all_obstacles[key] = (obs_pos, obs_radius, lidar_conf, 'grid')
         
-        # PRIORITY 2: Cartographer scan-matched points (MEDIUM - accurate but can be sparse)
-        if self.matched_points is not None and len(obstacles) < self.max_obstacles:
+        # Source 3: Scan-matched points (medium confidence)
+        if self.matched_points is not None:
             scan_obstacles = self.extract_scan_matched_obstacles()
-            obstacles.extend(scan_obstacles)
+            for obs_pos, obs_radius in scan_obstacles:
+                dist = np.linalg.norm(obs_pos - robot_pos)
+                scan_conf = 0.7 if dist > 1.5 else 0.7 - 0.3 * (1.5 - dist) / 1.5
+                key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
+                if key not in all_obstacles or all_obstacles[key][2] < scan_conf:
+                    all_obstacles[key] = (obs_pos, obs_radius, scan_conf, 'scan')
         
-        # PRIORITY 3: Raw LIDAR (LOWEST - backup only)
-        if self.latest_scan is not None and len(obstacles) < self.max_obstacles:
+        # Source 4: Raw LIDAR (low confidence, backup)
+        if self.latest_scan is not None:
             lidar_obstacles = self.extract_lidar_obstacles()
-            obstacles.extend(lidar_obstacles)
+            for obs_pos, obs_radius in lidar_obstacles:
+                dist = np.linalg.norm(obs_pos - robot_pos)
+                raw_conf = 0.5 if dist > 1.5 else 0.5 - 0.2 * (1.5 - dist) / 1.5
+                key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
+                if key not in all_obstacles or all_obstacles[key][2] < raw_conf:
+                    all_obstacles[key] = (obs_pos, obs_radius, raw_conf, 'lidar')
+        
+        # STEP 2: Fuse obstacles by confidence (weighted average for nearby detections)
+        fused_obstacles = {}
+        for key, (pos, radius, conf, source) in all_obstacles.items():
+            # Only keep high-confidence detections
+            if conf > 0.3:  # Minimum confidence threshold
+                # For obstacles detected by multiple sources, use highest confidence
+                if key not in fused_obstacles or fused_obstacles[key][2] < conf:
+                    fused_obstacles[key] = (pos, radius, conf, source)
+        
+        # STEP 3: Convert to list and sort by confidence (highest first)
+        obstacles = [(pos, radius) for pos, radius, conf, source in fused_obstacles.values()]
+        
+        # Log confidence distribution
+        if len(obstacles) > 0 and not hasattr(self, '_confidence_logged'):
+            sources = [source for _, _, _, source in fused_obstacles.values()]
+            camera_count = sources.count('camera')
+            grid_count = sources.count('grid')
+            self.get_logger().info(
+                f'🎯 Fused obstacles: {len(obstacles)} total '
+                f'(Camera: {camera_count}, Grid: {grid_count})'
+            )
+            self._confidence_logged = True
         
         # Remove duplicates and limit total
         obstacles = self.merge_obstacles(obstacles)
