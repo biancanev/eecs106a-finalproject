@@ -78,13 +78,13 @@ class CameraConeDetector(Node):
             [0, 0, 0, 1]
         ])
         
-        # Yellow color range in HSV (for yellow cones)
-        # VERY WIDE range to catch any yellow
-        self.lower_yellow = np.array([10, 50, 50])   # Very permissive lower bound
-        self.upper_yellow = np.array([40, 255, 255])   # Very permissive upper bound
+        # Yellow color range in HSV (for yellow cones ONLY - NOT blue, NOT green)
+        # Pure yellow range - Hue 20-30 is standard yellow in OpenCV HSV
+        self.lower_yellow = np.array([20, 100, 100])   # Pure yellow, high saturation (avoids blue)
+        self.upper_yellow = np.array([30, 255, 255])   # Pure yellow, high saturation
         
         # Minimum cone size (in pixels) to filter noise
-        self.min_cone_area = 500  # pixels
+        self.min_cone_area = 100  # pixels (small to catch cones)
         
         # Maximum detection range (meters) - only detect close cones
         self.max_range = 2.0  # 2 meters
@@ -146,10 +146,17 @@ class CameraConeDetector(Node):
         )
         
         # Publishers
-        # Detected cone positions (in map frame)
+        # Detected cone positions (in map frame) - YELLOW CIRCLES
         self.cones_pub = self.create_publisher(
             MarkerArray,
             '/camera_cones',
+            10
+        )
+        
+        # Also publish to local_map frame for local obstacle awareness
+        self.cones_local_pub = self.create_publisher(
+            MarkerArray,
+            '/camera_cones_local',
             10
         )
         
@@ -276,7 +283,10 @@ class CameraConeDetector(Node):
         if len(cones) > 0:
             processed_cones = self.process_cone_detections(cones, cv_image)
             if len(processed_cones) > 0:
+                # Publish cones to map frame (yellow circles)
                 self.publish_cones(processed_cones, msg.header)
+                # Also publish to local_map frame (relative to robot)
+                self.publish_cones_local(processed_cones, msg.header)
             elif self.robot_pose is None:
                 if not hasattr(self, '_no_pose_logged'):
                     self.get_logger().warn('⚠️ Cones detected but robot_pose is None (waiting for /amcl_pose)')
@@ -448,17 +458,9 @@ class CameraConeDetector(Node):
                 self.get_logger().info(f'🔍 Using range: H=[{self.lower_yellow[0]}-{self.upper_yellow[0]}], S=[{self.lower_yellow[1]}-{self.upper_yellow[1]}], V=[{self.lower_yellow[2]}-{self.upper_yellow[2]}]')
                 self._hsv_sampled = True
         
-        # LAYER 1: Detect both yellow AND green (cones might appear as either)
-        # Yellow range (hue 0-60 in OpenCV HSV)
-        mask_yellow = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
-        
-        # Green range (hue 40-80 in OpenCV HSV) - in case yellow appears as green
-        lower_green = np.array([40, 30, 30])
-        upper_green = np.array([80, 255, 255])
-        mask_green = cv2.inRange(hsv, lower_green, upper_green)
-        
-        # Combine yellow and green masks
-        mask1 = cv2.bitwise_or(mask_yellow, mask_green)
+        # LAYER 1: Detect ONLY yellow (NOT blue, NOT green)
+        # Yellow range (hue 20-30 in OpenCV HSV) - pure yellow only
+        mask1 = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
         
         # LAYER 2: Convolution-based refinement
         # Use small convolution kernel to smooth and enhance regions
@@ -754,13 +756,13 @@ class CameraConeDetector(Node):
             
             # Use provided confidence (already computed)
             
-            # Create marker with confidence-based alpha
+            # Create BRIGHT YELLOW marker for clear visibility
             marker = Marker()
             marker.header.frame_id = "map"
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = "camera_cones"
             marker.id = i
-            marker.type = Marker.CYLINDER
+            marker.type = Marker.CYLINDER  # Cylinder = circle from top view
             marker.action = Marker.ADD
             
             marker.pose.position.x = float(point_map[0])
@@ -771,15 +773,16 @@ class CameraConeDetector(Node):
             
             # Estimate cone size from pixel size
             estimated_radius = 0.1  # Default 10cm
-            marker.scale.x = estimated_radius * 2
-            marker.scale.y = estimated_radius * 2
+            marker.scale.x = estimated_radius * 2  # Diameter
+            marker.scale.y = estimated_radius * 2  # Diameter
             marker.scale.z = 0.3  # Cone height
             
-            # Color based on confidence (green = high, yellow = medium, red = low)
-            marker.color.r = 1.0 - confidence
-            marker.color.g = confidence
-            marker.color.b = 0.0
-            marker.color.a = 0.5 + 0.5 * confidence  # More opaque = higher confidence
+            # BRIGHT YELLOW color (255, 255, 0 in RGB = yellow)
+            # Make it very visible and clear
+            marker.color.r = 1.0  # Red component
+            marker.color.g = 1.0  # Green component (yellow = red + green)
+            marker.color.b = 0.0  # No blue
+            marker.color.a = 0.9  # Very opaque (90%) for clear visibility
             
             marker_array.markers.append(marker)
             
@@ -803,8 +806,73 @@ class CameraConeDetector(Node):
                 np.linalg.norm(np.array([m.pose.position.x, m.pose.position.y]) - robot_pos)
             ) for m in marker_array.markers])
             self.get_logger().info(
-                f'📷 Detected {len(marker_array.markers)} cones, avg confidence: {avg_confidence:.2f}'
+                f'📷 Detected {len(marker_array.markers)} cones on MAP, avg confidence: {avg_confidence:.2f}'
             )
+            # Log positions for verification
+            for m in marker_array.markers:
+                self.get_logger().info(
+                    f'   🟡 Cone at map: ({m.pose.position.x:.3f}, {m.pose.position.y:.3f}), '
+                    f'dist from robot: {np.linalg.norm(np.array([m.pose.position.x, m.pose.position.y]) - robot_pos):.3f}m'
+                )
+    
+    def publish_cones_local(self, cones, header):
+        """Publish detected cones in local_map frame (relative to robot)"""
+        marker_array = MarkerArray()
+        
+        if self.robot_pose is None:
+            return
+        
+        robot_pos = np.array([self.robot_pose.position.x, self.robot_pose.position.y])
+        
+        # Process cones (format: world_x, world_y, depth, confidence, pixel_pos)
+        for i, cone_data in enumerate(cones):
+            if len(cone_data) == 5:
+                world_x, world_y, depth, confidence, pixel_pos = cone_data
+                point_map = np.array([world_x, world_y])
+            else:
+                continue
+            
+            # Compute distance from robot
+            distance = np.linalg.norm(point_map[:2] - robot_pos)
+            
+            # Check range
+            if distance > self.max_range:
+                continue
+            
+            # Convert to local_map frame (relative to robot)
+            point_local = point_map[:2] - robot_pos
+            
+            # Create BRIGHT YELLOW marker for local map
+            marker = Marker()
+            marker.header.frame_id = "base_link"  # Local frame relative to robot
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = "camera_cones_local"
+            marker.id = i
+            marker.type = Marker.CYLINDER
+            marker.action = Marker.ADD
+            
+            marker.pose.position.x = float(point_local[0])
+            marker.pose.position.y = float(point_local[1])
+            marker.pose.position.z = 0.0
+            
+            marker.pose.orientation.w = 1.0
+            
+            # Estimate cone size
+            estimated_radius = 0.1
+            marker.scale.x = estimated_radius * 2
+            marker.scale.y = estimated_radius * 2
+            marker.scale.z = 0.3
+            
+            # BRIGHT YELLOW
+            marker.color.r = 1.0
+            marker.color.g = 1.0
+            marker.color.b = 0.0
+            marker.color.a = 0.9
+            
+            marker_array.markers.append(marker)
+        
+        if len(marker_array.markers) > 0:
+            self.cones_local_pub.publish(marker_array)
     
     def publish_debug_image(self, cv_image, cones):
         """Publish debug image with detections overlaid and mask visualization"""
@@ -813,12 +881,8 @@ class CameraConeDetector(Node):
         # Show actual mask overlay (for debugging) - show the REAL mask, not a tint
         try:
             hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
-            # Use same detection logic as detect_yellow_cones
-            mask_yellow = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
-            lower_green = np.array([40, 30, 30])
-            upper_green = np.array([80, 255, 255])
-            mask_green = cv2.inRange(hsv, lower_green, upper_green)
-            actual_mask = cv2.bitwise_or(mask_yellow, mask_green)
+            # Use same detection logic as detect_yellow_cones - ONLY yellow
+            actual_mask = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
             
             # Show mask as red overlay (so you can see what's being detected)
             # Convert mask to 3-channel and overlay in red
@@ -830,6 +894,16 @@ class CameraConeDetector(Node):
             debug_image = debug_image.astype(np.uint8)
         except Exception as e:
             self.get_logger().warn(f'Failed to create mask overlay: {e}')
+        
+        # Store processed cone positions for overlay
+        processed_positions = {}
+        if len(cones) > 0 and self.robot_pose is not None and self.camera_intrinsics is not None:
+            # Process cones to get world positions for display
+            processed = self.process_cone_detections(cones, cv_image)
+            for cone_data in processed:
+                if len(cone_data) == 5:
+                    world_x, world_y, depth, confidence, pixel_pos = cone_data
+                    processed_positions[pixel_pos] = (world_x, world_y, depth, confidence)
         
         # Handle format: (cx, cy, w, h, area, mask_pixels)
         for cone_data in cones:
@@ -849,8 +923,13 @@ class CameraConeDetector(Node):
             # Draw center
             cv2.circle(debug_image, (int(cx), int(cy)), 5, (0, 255, 255), -1)
             
-            # Draw info
-            info_text = f'{area:.0f}px, {mask_pixels:.0f}mask'
+            # Draw info with world position if available
+            pixel_pos = (int(cx), int(cy))
+            if pixel_pos in processed_positions:
+                world_x, world_y, depth, confidence = processed_positions[pixel_pos]
+                info_text = f'Map: ({world_x:.2f}, {world_y:.2f}) | {depth:.2f}m | {confidence:.2f}'
+            else:
+                info_text = f'{area:.0f}px, {mask_pixels:.0f}mask'
             cv2.putText(debug_image, info_text, (x, y - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
         
