@@ -6,7 +6,7 @@ Based on the paper implementation
 import rclpy
 from rclpy.node import Node
 from rclpy.exceptions import ParameterAlreadyDeclaredException
-from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, PointStamped
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 import numpy as np
@@ -115,7 +115,6 @@ class MPCNode(Node):
         self.matched_points = None
         
         # Camera-based cone detection with confidence
-        from geometry_msgs.msg import PointStamped
         self.camera_cones_sub = self.create_subscription(
             PointStamped,
             '/camera_cone_positions',
