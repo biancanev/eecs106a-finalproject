@@ -187,6 +187,9 @@ class CameraConeDetector(Node):
     def image_callback(self, msg: Image):
         """Process camera image to detect yellow cones (lab8 pattern)"""
         if self.camera_intrinsics is None:
+            if not hasattr(self, '_no_intrinsics_logged'):
+                self.get_logger().warn('⚠️ Waiting for camera_info... (camera_intrinsics is None)')
+                self._no_intrinsics_logged = True
             return
         
         try:
@@ -196,8 +199,20 @@ class CameraConeDetector(Node):
             self.get_logger().warn(f'Failed to convert image: {e}')
             return
         
+        # Log first image received
+        if not hasattr(self, '_first_image_logged'):
+            self.get_logger().info(f'✅ Received first image: {cv_image.shape[1]}x{cv_image.shape[0]}')
+            self._first_image_logged = True
+        
         # Detect cones using heuristic-based color detection
         cones = self.detect_yellow_cones(cv_image)
+        
+        # Log detection results periodically
+        if not hasattr(self, '_detection_count'):
+            self._detection_count = 0
+        self._detection_count += 1
+        if self._detection_count % 30 == 0:  # Log every 30 frames (~1 second at 30fps)
+            self.get_logger().info(f'📷 Processed {self._detection_count} frames, found {len(cones)} cone candidates')
         
         # Process detections and convert to world coordinates
         if len(cones) > 0:
@@ -205,6 +220,10 @@ class CameraConeDetector(Node):
             if len(processed_cones) > 0:
                 self.publish_cones(processed_cones, msg.header)
                 self.publish_debug_image(cv_image, cones)
+            elif self.robot_pose is None:
+                if not hasattr(self, '_no_pose_logged'):
+                    self.get_logger().warn('⚠️ Cones detected but robot_pose is None (waiting for /amcl_pose)')
+                    self._no_pose_logged = True
     
     def process_cone_detections(self, cones, cv_image):
         """
@@ -354,7 +373,11 @@ class CameraConeDetector(Node):
         Returns list of (center_x, center_y, width, height, area, mask_pixels) in image coordinates.
         """
         # Convert BGR to HSV (better for color detection)
-        hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+        try:
+            hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+        except Exception as e:
+            self.get_logger().warn(f'Failed to convert to HSV: {e}, image shape: {cv_image.shape}')
+            return []
         
         # LAYER 1: Initial yellow color mask
         mask1 = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
@@ -376,6 +399,13 @@ class CameraConeDetector(Node):
         
         # Find contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Debug: Log yellow pixel count
+        yellow_pixels = np.sum(mask > 0)
+        if not hasattr(self, '_yellow_pixel_logged') or self._detection_count % 30 == 0:
+            self.get_logger().debug(f'Yellow pixels in mask: {yellow_pixels} / {mask.size} ({100*yellow_pixels/mask.size:.1f}%)')
+            if not hasattr(self, '_yellow_pixel_logged'):
+                self._yellow_pixel_logged = True
         
         cones = []
         for contour in contours:
