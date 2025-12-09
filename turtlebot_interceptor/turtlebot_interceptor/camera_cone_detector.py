@@ -875,25 +875,9 @@ class CameraConeDetector(Node):
             self.cones_local_pub.publish(marker_array)
     
     def publish_debug_image(self, cv_image, cones):
-        """Publish debug image with detections overlaid and mask visualization"""
+        """Publish debug image with detections overlaid (original image, no hue overlay)"""
+        # Just use the original image - no hue/mask overlay
         debug_image = cv_image.copy()
-        
-        # Show actual mask overlay (for debugging) - show the REAL mask, not a tint
-        try:
-            hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
-            # Use same detection logic as detect_yellow_cones - ONLY yellow
-            actual_mask = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
-            
-            # Show mask as red overlay (so you can see what's being detected)
-            # Convert mask to 3-channel and overlay in red
-            mask_3channel = cv2.cvtColor(actual_mask, cv2.COLOR_GRAY2BGR)
-            mask_overlay = mask_3channel.astype(np.float32) / 255.0 * 0.5  # 50% opacity
-            debug_image = debug_image.astype(np.float32)
-            # Overlay mask in red channel (so detected areas show as red)
-            debug_image = debug_image * (1 - mask_overlay) + np.array([0, 0, 255], dtype=np.float32) * mask_overlay
-            debug_image = debug_image.astype(np.uint8)
-        except Exception as e:
-            self.get_logger().warn(f'Failed to create mask overlay: {e}')
         
         # Store processed cone positions for overlay
         processed_positions = {}
