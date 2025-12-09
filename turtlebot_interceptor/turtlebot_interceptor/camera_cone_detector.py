@@ -446,8 +446,9 @@ class CameraConeDetector(Node):
         mask2 = cv2.filter2D(mask1_float, -1, kernel_smooth)
         mask2 = (mask2 > 100).astype(np.uint8) * 255  # Threshold after convolution
         
-        # Combine both layers (AND operation - both must agree)
-        mask = cv2.bitwise_and(mask1, mask2)
+        # Combine both layers (OR operation - more permissive, either layer can detect)
+        # Changed from AND to OR to catch more yellow regions
+        mask = cv2.bitwise_or(mask1, mask2)
         
         # Morphological operations to clean up mask
         kernel = np.ones((5, 5), np.uint8)
@@ -465,11 +466,14 @@ class CameraConeDetector(Node):
                 self._yellow_pixel_logged = True
         
         cones = []
+        debug_info = {'total_contours': len(contours), 'filtered': {}}
+        
         for contour in contours:
             area = cv2.contourArea(contour)
             
             # Heuristic 1: Minimum area filter
             if area < self.min_cone_area:
+                debug_info['filtered']['area'] = debug_info['filtered'].get('area', 0) + 1
                 continue
             
             # Get bounding box
@@ -479,7 +483,8 @@ class CameraConeDetector(Node):
             
             # Heuristic 2: Aspect ratio (cones are roughly vertical/tall)
             aspect_ratio = h / w if w > 0 else 0
-            if aspect_ratio < 1.2 or aspect_ratio > 4.0:  # Cones are tall, not wide
+            if aspect_ratio < 1.0 or aspect_ratio > 5.0:  # More permissive
+                debug_info['filtered']['aspect'] = debug_info['filtered'].get('aspect', 0) + 1
                 continue
             
             # Heuristic 3: TRIANGULAR SHAPE DETECTION (cones are triangular)
@@ -489,7 +494,8 @@ class CameraConeDetector(Node):
             
             # Check if shape is roughly triangular (3-5 vertices for cone)
             num_vertices = len(approx)
-            if num_vertices < 3 or num_vertices > 6:  # Too simple or too complex
+            if num_vertices < 3 or num_vertices > 8:  # More permissive - allow more complex shapes
+                debug_info['filtered']['vertices'] = debug_info['filtered'].get('vertices', 0) + 1
                 continue
             
             # Check triangularity: top point should be narrow, base should be wide
@@ -511,14 +517,16 @@ class CameraConeDetector(Node):
                 bottom_width = np.sum(bottom_slice > 0)
                 
                 # Heuristic: Bottom should be wider than top (cone shape)
-                if bottom_width > 0 and top_width / bottom_width > 0.85:  # Not triangular enough
+                if bottom_width > 0 and top_width / bottom_width > 0.98:  # Very permissive - only reject if almost same width
+                    debug_info['filtered']['triangle'] = debug_info['filtered'].get('triangle', 0) + 1
                     continue
             
             # Heuristic 4: Solidity (cones are relatively solid shapes)
             hull = cv2.convexHull(contour)
             hull_area = cv2.contourArea(hull)
             solidity = area / hull_area if hull_area > 0 else 0
-            if solidity < 0.6:  # Too irregular
+            if solidity < 0.4:  # Very permissive - allow irregular shapes
+                debug_info['filtered']['solidity'] = debug_info['filtered'].get('solidity', 0) + 1
                 continue
             
             # Heuristic 5: Sample pixels within contour to validate yellow color
@@ -528,20 +536,29 @@ class CameraConeDetector(Node):
             total_pixels = area
             yellow_ratio = yellow_pixels / total_pixels if total_pixels > 0 else 0
             
-            # Heuristic: At least 70% of the region should be yellow
-            if yellow_ratio < 0.7:
+            # Heuristic: At least 50% of the region should be yellow (more permissive)
+            if yellow_ratio < 0.5:
+                debug_info['filtered']['yellow_ratio'] = debug_info['filtered'].get('yellow_ratio', 0) + 1
                 continue
             
             # Heuristic 6: Check if region is in lower half of image (cones are on ground)
             # But allow some flexibility for perspective
             img_height = cv_image.shape[0]
-            if center_y < img_height * 0.2:  # Too high in image (probably not a cone)
+            if center_y < img_height * 0.1:  # Very permissive - only reject if very high
+                debug_info['filtered']['position'] = debug_info['filtered'].get('position', 0) + 1
                 continue
             
             # Get actual mask pixels for depth estimation (lab8 pattern)
             mask_pixels = yellow_pixels
             
             cones.append((center_x, center_y, w, h, area, mask_pixels))
+        
+        # Log debug info periodically
+        if self._detection_count % 30 == 0 and len(contours) > 0:
+            self.get_logger().info(
+                f'🔍 Detection debug: {debug_info["total_contours"]} contours, '
+                f'{len(cones)} passed, filtered: {debug_info["filtered"]}'
+            )
         
         return cones
     
@@ -761,12 +778,15 @@ class CameraConeDetector(Node):
         """Publish debug image with detections overlaid and yellow mask visualization"""
         debug_image = cv_image.copy()
         
-        # Show yellow mask overlay (for debugging)
+        # Show yellow mask overlay (for debugging) - use green channel for better visibility
         try:
             hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
             yellow_mask = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
-            # Overlay mask in red channel (so yellow areas show as red overlay)
-            debug_image[:, :, 2] = np.maximum(debug_image[:, :, 2], yellow_mask // 3)
+            # Overlay mask in green channel with transparency (yellow areas get green tint)
+            mask_overlay = yellow_mask.astype(np.float32) / 255.0 * 0.3  # 30% opacity
+            debug_image = debug_image.astype(np.float32)
+            debug_image[:, :, 1] = np.minimum(255, debug_image[:, :, 1] + mask_overlay * 100)  # Add green tint
+            debug_image = debug_image.astype(np.uint8)
         except:
             pass  # If mask fails, just show original image
         
