@@ -48,7 +48,7 @@ class SimpleUnicycleMPC:
         self.omega_max = self.wz_max
 
         # Base weights - AGGRESSIVE goal pursuit
-        self.Qp_base = 500.0  # EXTREMELY STRONG goal tracking - MUST make progress! (was 200.0)
+        self.Qp_base = 1000.0  # EXTREMELY STRONG goal tracking - 20x obstacle weight!
         self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
         self.Ra_base = 0.01  # LOW acceleration penalty for smoother curves
         self.Rw_base = 0.002  # LOW turn penalty for smoother curves
@@ -182,8 +182,8 @@ class SimpleUnicycleMPC:
         # terminal cost - CRITICAL: Make terminal cost MUCH heavier to ensure convergence
         pxN = self.X[0,N] - self.T[0,N]
         pyN = self.X[1,N] - self.T[1,N]
-        # Terminal position penalty - make it 200x heavier than stage cost to ensure robot reaches goal (was 100x)
-        cost += 200.0 * self.Qp_param * (pxN**2 + pyN**2)
+        # Terminal position penalty - make it 500x heavier than stage cost to ensure robot reaches goal
+        cost += 500.0 * self.Qp_param * (pxN**2 + pyN**2)
         
         # Terminal obstacle cost (for final position)
         pxN_abs = self.X[0,N]
@@ -362,9 +362,9 @@ class SimpleUnicycleMPC:
             # Add obstacle costs directly to the cost function using self.X (optimization variables)
             # This is the ONLY way to make MPC actually optimize around obstacles
             obstacle_cost = 0.0
-            repulsion_weight = 1000000.0  # MUCH STRONGER repulsion (10x increase)
+            repulsion_weight = 50000.0  # REDUCED: Was 1M - too aggressive, blocked all motion
             robot_radius = 0.105  # Robot radius
-            safety_radius_buffer = 0.20  # 20cm buffer (doubled from 10cm) - AGGRESSIVE!
+            safety_radius_buffer = 0.10  # 10cm buffer (reduced from 20cm)
             
             # Also add HARD CONSTRAINTS to prevent getting too close
             # Note: We'll use very strong cost penalties instead of hard constraints
@@ -406,7 +406,8 @@ class SimpleUnicycleMPC:
                     penalty = repulsion_weight * cp.square(violation)
                     
                     # Add extra linear penalty for very close obstacles (acts like hard constraint)
-                    extra_penalty = repulsion_weight * 10000.0 * violation
+                    # REDUCED: Was 10000x, now 100x to allow motion
+                    extra_penalty = repulsion_weight * 100.0 * violation
                     
                     obstacle_cost += penalty + extra_penalty
             

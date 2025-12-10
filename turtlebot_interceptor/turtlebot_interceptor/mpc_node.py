@@ -1536,34 +1536,60 @@ class MPCNode(Node):
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
             
-            # MINIMAL INTERVENTION - only if MPC is completely stuck
+            # CRITICAL: Ensure we ALWAYS make progress toward goal
             dx_goal = self.goal_x - x0[0]
             dy_goal = self.goal_y - x0[1]
             dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
+            angle_to_goal = np.arctan2(dy_goal, dx_goal)
+            angle_err = angle_to_goal - x0[2]
+            angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
             
-            # Only boost if MPC outputs near-zero AND we're far from goal
-            if dist_to_goal > 0.2 and abs(v_cmd) < 0.02:
-                v_cmd = min(0.15, dist_to_goal * 0.3)  # Small boost only
-                if not hasattr(self, '_mpc_cmd_count'):
-                    self._mpc_cmd_count = 0
-                self._mpc_cmd_count += 1
-                if self._mpc_cmd_count % 50 == 0:
-                    self.get_logger().warn(f"🚀 MPC stuck - small boost: v={v_cmd:.2f}m/s")
+            # If MPC is stuck (near-zero velocity), FORCE progress
+            if dist_to_goal > 0.15:  # Not at goal
+                if abs(v_cmd) < 0.05:  # MPC stuck
+                    # Force forward motion toward goal
+                    v_cmd = min(0.2, dist_to_goal * 0.5)
+                    # Turn toward goal
+                    omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
+                    if not hasattr(self, '_mpc_cmd_count'):
+                        self._mpc_cmd_count = 0
+                    self._mpc_cmd_count += 1
+                    if self._mpc_cmd_count % 10 == 0:
+                        self.get_logger().warn(
+                            f"🚀 MPC STUCK - forcing: v={v_cmd:.2f}m/s ω={np.degrees(omega_cmd):.0f}°/s "
+                            f"(angle_err={np.degrees(angle_err):.0f}°)"
+                        )
+                # If angle error is large and MPC not turning, force turn
+                elif abs(angle_err) > 0.5 and abs(omega_cmd) < 0.3:
+                    omega_cmd = np.clip(angle_err * 1.5, -self.omega_max, self.omega_max)
+                    if self._mpc_cmd_count % 10 == 0:
+                        self.get_logger().warn(f"🔄 Forcing turn: ω={np.degrees(omega_cmd):.0f}°/s")
             
             # Clip to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
             omega_cmd = np.clip(omega_cmd, -self.omega_max, self.omega_max)
             
-            # Log MPC output periodically
+            # CRITICAL DEBUG: Log EVERYTHING to diagnose circles
             if not hasattr(self, '_mpc_cmd_count'):
                 self._mpc_cmd_count = 0
             self._mpc_cmd_count += 1
-            if self._mpc_cmd_count % 50 == 0:
-                self.get_logger().info(
-                    f"MPC: robot=({x0[0]:.2f},{x0[1]:.2f}) → goal=({self.goal_x:.2f},{self.goal_y:.2f}) "
-                    f"dist={dist_to_goal:.2f}m, v={v_cmd:.2f}m/s, ω={np.degrees(omega_cmd):.0f}°/s, "
+            if self._mpc_cmd_count % 10 == 0:  # Every 1 second
+                angle_to_goal = np.arctan2(dy_goal, dx_goal)
+                angle_err = angle_to_goal - x0[2]
+                angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
+                self.get_logger().error(  # ERROR level so it's visible
+                    f"MPC: robot=({x0[0]:.3f},{x0[1]:.3f}) θ={np.degrees(x0[2]):.0f}° → "
+                    f"goal=({self.goal_x:.3f},{self.goal_y:.3f}) "
+                    f"dist={dist_to_goal:.3f}m angle_err={np.degrees(angle_err):.0f}° "
+                    f"v={v_cmd:.3f}m/s ω={np.degrees(omega_cmd):.0f}°/s "
                     f"obstacles={len(obstacles)}"
                 )
+                # Check if we're making progress
+                if hasattr(self, '_last_pos'):
+                    progress = np.sqrt((x0[0] - self._last_pos[0])**2 + (x0[1] - self._last_pos[1])**2)
+                    if progress < 0.01 and dist_to_goal > 0.2:
+                        self.get_logger().error(f"⚠️ STUCK! Progress={progress:.3f}m in last second!")
+                self._last_pos = (x0[0], x0[1])
             
         except Exception as e:
             # Fallback to proportional control only if MPC completely fails
