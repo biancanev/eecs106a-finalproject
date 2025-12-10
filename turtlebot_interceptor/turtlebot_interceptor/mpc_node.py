@@ -146,8 +146,9 @@ class MPCNode(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         
         # Trajectory visualization
-        from visualization_msgs.msg import Marker
+        from visualization_msgs.msg import Marker, MarkerArray
         self.traj_pub = self.create_publisher(Marker, '/mpc_trajectory', 10)
+        self.traj_array_pub = self.create_publisher(MarkerArray, '/mpc_trajectory_full', 10)
         self.waypoint_pub = self.create_publisher(Marker, '/mpc_waypoint', 10)
         self.obs_pub = self.create_publisher(Marker, '/obstacles', 10)
         # State
@@ -1357,39 +1358,213 @@ class MPCNode(Node):
         return False
     
     def visualize_trajectory(self):
-        """Publish MPC predicted trajectory for visualization"""
-        # Get trajectory from MPC's last solution
-        trajectory = self.mpc.get_predicted_trajectory()
-        if trajectory is None:
+        """Publish comprehensive MPC trajectory visualization with 15 steps, obstacles, and goal"""
+        if self.seeker_state is None:
             return
         
-        from visualization_msgs.msg import Marker
+        from visualization_msgs.msg import Marker, MarkerArray
         from geometry_msgs.msg import Point
+        from std_msgs.msg import ColorRGBA
         
-        marker = Marker()
-        marker.header.frame_id = 'map'
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'mpc_trajectory'
-        marker.id = 0
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
+        marker_array = MarkerArray()
+        now = self.get_clock().now().to_msg()
         
-        # Line properties
-        marker.scale.x = 0.05  # Line width
-        marker.color.r = 0.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
-        marker.color.a = 1.0
+        # Get trajectory from MPC's last solution
+        trajectory = self.mpc.get_predicted_trajectory()
+        x0 = self.seeker_state
         
-        # Add points from MPC predicted trajectory
-        for point in trajectory:
+        # 1. TRAJECTORY LINE (green, thick)
+        traj_marker = Marker()
+        traj_marker.header.frame_id = 'map'
+        traj_marker.header.stamp = now
+        traj_marker.ns = 'mpc_trajectory'
+        traj_marker.id = 0
+        traj_marker.type = Marker.LINE_STRIP
+        traj_marker.action = Marker.ADD
+        traj_marker.scale.x = 0.08  # Thick line
+        traj_marker.color.r = 0.0
+        traj_marker.color.g = 1.0
+        traj_marker.color.b = 0.0
+        traj_marker.color.a = 1.0
+        
+        if trajectory is not None and len(trajectory) > 0:
+            for i, point in enumerate(trajectory):
+                p = Point()
+                p.x = float(point[0])
+                p.y = float(point[1])
+                p.z = 0.05
+                traj_marker.points.append(p)
+        else:
+            # Fallback: just show current position
             p = Point()
-            p.x = float(point[0])
-            p.y = float(point[1])
-            p.z = 0.1
-            marker.points.append(p)
+            p.x = float(x0[0])
+            p.y = float(x0[1])
+            p.z = 0.05
+            traj_marker.points.append(p)
         
-        self.traj_pub.publish(marker)
+        marker_array.markers.append(traj_marker)
+        
+        # 2. TRAJECTORY STEP MARKERS (15 steps, numbered)
+        if trajectory is not None and len(trajectory) > 0:
+            for i, point in enumerate(trajectory):
+                step_marker = Marker()
+                step_marker.header.frame_id = 'map'
+                step_marker.header.stamp = now
+                step_marker.ns = 'mpc_steps'
+                step_marker.id = i
+                step_marker.type = Marker.SPHERE
+                step_marker.action = Marker.ADD
+                step_marker.pose.position.x = float(point[0])
+                step_marker.pose.position.y = float(point[1])
+                step_marker.pose.position.z = 0.1
+                step_marker.scale.x = 0.12
+                step_marker.scale.y = 0.12
+                step_marker.scale.z = 0.12
+                # Color gradient: green (start) to yellow (end)
+                step_marker.color.r = min(1.0, i / 15.0)
+                step_marker.color.g = 1.0
+                step_marker.color.b = 0.0
+                step_marker.color.a = 0.8
+                marker_array.markers.append(step_marker)
+        
+        # 3. ROBOT CURRENT POSITION (blue sphere)
+        robot_marker = Marker()
+        robot_marker.header.frame_id = 'map'
+        robot_marker.header.stamp = now
+        robot_marker.ns = 'robot_current'
+        robot_marker.id = 0
+        robot_marker.type = Marker.SPHERE
+        robot_marker.action = Marker.ADD
+        robot_marker.pose.position.x = float(x0[0])
+        robot_marker.pose.position.y = float(x0[1])
+        robot_marker.pose.position.z = 0.15
+        robot_marker.scale.x = 0.20
+        robot_marker.scale.y = 0.20
+        robot_marker.scale.z = 0.20
+        robot_marker.color.r = 0.0
+        robot_marker.color.g = 0.5
+        robot_marker.color.b = 1.0
+        robot_marker.color.a = 1.0
+        marker_array.markers.append(robot_marker)
+        
+        # 4. ROBOT ORIENTATION ARROW
+        arrow_marker = Marker()
+        arrow_marker.header.frame_id = 'map'
+        arrow_marker.header.stamp = now
+        arrow_marker.ns = 'robot_arrow'
+        arrow_marker.id = 0
+        arrow_marker.type = Marker.ARROW
+        arrow_marker.action = Marker.ADD
+        arrow_marker.pose.position.x = float(x0[0])
+        arrow_marker.pose.position.y = float(x0[1])
+        arrow_marker.pose.position.z = 0.15
+        # Orientation
+        import math
+        qx = 0.0
+        qy = 0.0
+        qz = math.sin(x0[2] / 2.0)
+        qw = math.cos(x0[2] / 2.0)
+        arrow_marker.pose.orientation.x = qx
+        arrow_marker.pose.orientation.y = qy
+        arrow_marker.pose.orientation.z = qz
+        arrow_marker.pose.orientation.w = qw
+        arrow_marker.scale.x = 0.3  # Length
+        arrow_marker.scale.y = 0.08  # Shaft diameter
+        arrow_marker.scale.z = 0.08  # Head diameter
+        arrow_marker.color.r = 0.0
+        arrow_marker.color.g = 0.5
+        arrow_marker.color.b = 1.0
+        arrow_marker.color.a = 1.0
+        marker_array.markers.append(arrow_marker)
+        
+        # 5. GOAL MARKER (red sphere)
+        goal_marker = Marker()
+        goal_marker.header.frame_id = 'map'
+        goal_marker.header.stamp = now
+        goal_marker.ns = 'goal'
+        goal_marker.id = 0
+        goal_marker.type = Marker.SPHERE
+        goal_marker.action = Marker.ADD
+        goal_marker.pose.position.x = float(self.goal_x)
+        goal_marker.pose.position.y = float(self.goal_y)
+        goal_marker.pose.position.z = 0.15
+        goal_marker.scale.x = 0.25
+        goal_marker.scale.y = 0.25
+        goal_marker.scale.z = 0.25
+        goal_marker.color.r = 1.0
+        goal_marker.color.g = 0.0
+        goal_marker.color.b = 0.0
+        goal_marker.color.a = 1.0
+        marker_array.markers.append(goal_marker)
+        
+        # 6. OBSTACLES (yellow/red cylinders with radii)
+        obstacles = self.compute_obstacles()
+        for i, (center, radius) in enumerate(obstacles):
+            obs_marker = Marker()
+            obs_marker.header.frame_id = 'map'
+            obs_marker.header.stamp = now
+            obs_marker.ns = 'mpc_obstacles'
+            obs_marker.id = i
+            obs_marker.type = Marker.CYLINDER
+            obs_marker.action = Marker.ADD
+            obs_marker.pose.position.x = float(center[0])
+            obs_marker.pose.position.y = float(center[1])
+            obs_marker.pose.position.z = 0.1
+            obs_marker.scale.x = radius * 2.0  # Diameter
+            obs_marker.scale.y = radius * 2.0
+            obs_marker.scale.z = 0.2  # Height
+            # Color by distance to robot
+            dist = np.linalg.norm(center - x0[:2])
+            if dist < 0.5:
+                obs_marker.color.r = 1.0  # Red (close)
+                obs_marker.color.g = 0.0
+                obs_marker.color.b = 0.0
+            else:
+                obs_marker.color.r = 1.0  # Yellow (far)
+                obs_marker.color.g = 1.0
+                obs_marker.color.b = 0.0
+            obs_marker.color.a = 0.6
+            marker_array.markers.append(obs_marker)
+        
+        # 7. TEXT INFO (showing MPC status)
+        text_marker = Marker()
+        text_marker.header.frame_id = 'map'
+        text_marker.header.stamp = now
+        text_marker.ns = 'mpc_info'
+        text_marker.id = 0
+        text_marker.type = Marker.TEXT_VIEW_FACING
+        text_marker.action = Marker.ADD
+        text_marker.pose.position.x = float(x0[0])
+        text_marker.pose.position.y = float(x0[1])
+        text_marker.pose.position.z = 0.5
+        text_marker.scale.z = 0.15
+        text_marker.color.r = 1.0
+        text_marker.color.g = 1.0
+        text_marker.color.b = 1.0
+        text_marker.color.a = 1.0
+        
+        # Get current MPC command if available
+        try:
+            twist_cmd = self.mpc.get_twist_command(x0, np.array([[self.goal_x], [self.goal_y]]), obstacles)
+            v = twist_cmd['linear']['x']
+            omega = twist_cmd['angular']['z']
+            dist_to_goal = np.sqrt((self.goal_x - x0[0])**2 + (self.goal_y - x0[1])**2)
+            text_marker.text = (
+                f"MPC Status\n"
+                f"v: {v:.2f} m/s\n"
+                f"ω: {np.degrees(omega):.1f} deg/s\n"
+                f"Goal dist: {dist_to_goal:.2f} m\n"
+                f"Obstacles: {len(obstacles)}\n"
+                f"Steps: {len(trajectory) if trajectory is not None else 0}"
+            )
+        except:
+            text_marker.text = "MPC Status\nComputing..."
+        
+        marker_array.markers.append(text_marker)
+        
+        # Publish all markers
+        self.traj_pub.publish(marker_array.markers[0])  # Keep backward compat
+        self.traj_array_pub.publish(marker_array)  # Full visualization
     
     def publish_waypoint(self, waypoint):
         """Publish waypoint marker for visualization in RViz"""
@@ -1519,11 +1694,44 @@ class MPCNode(Node):
         target_seq[0, :] = self.goal_x
         target_seq[1, :] = self.goal_y
         
-        # COMPUTE OBSTACLES
-        obstacles = self.compute_obstacles()
+        # COMPUTE OBSTACLES - ONLY NEARBY ONES (within 1.5m) AND NOT BEHIND ROBOT
+        all_obstacles = self.compute_obstacles()
+        obstacles = []
+        robot_pos = x0[:2]
+        robot_theta = x0[2]
+        forward_dir = np.array([np.cos(robot_theta), np.sin(robot_theta)])
+        
+        for center, radius in all_obstacles:
+            dist = np.linalg.norm(center - robot_pos)
+            if dist > 1.5:  # Only obstacles within 1.5m
+                continue
+            
+            # CRITICAL: Ignore obstacles BEHIND the robot (they're not blocking forward progress)
+            to_obstacle = center - robot_pos
+            if np.linalg.norm(to_obstacle) > 0.1:
+                to_obstacle_norm = to_obstacle / np.linalg.norm(to_obstacle)
+                forward_alignment = np.dot(to_obstacle_norm, forward_dir)
+                if forward_alignment < -0.3:  # Behind robot (more than ~110°)
+                    continue  # Skip obstacles behind us
+            
+            obstacles.append((center, radius))
         
         # SET MPC VELOCITY LIMITS
         self.mpc.v_max = self.v_max_base
+        
+        # COMPUTE GOAL DIRECTION FIRST
+        dx_goal = self.goal_x - x0[0]
+        dy_goal = self.goal_y - x0[1]
+        dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
+        angle_to_goal = np.arctan2(dy_goal, dx_goal)
+        angle_err = angle_to_goal - x0[2]
+        angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
+        
+        # REACHED GOAL?
+        if dist_to_goal < 0.1:
+            twist = Twist()
+            self.cmd_pub.publish(twist)
+            return
         
         # SOLVE MPC - THIS IS THE PRIMARY CONTROLLER
         try:
@@ -1536,60 +1744,9 @@ class MPCNode(Node):
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
             
-            # CRITICAL: Ensure we ALWAYS make progress toward goal
-            dx_goal = self.goal_x - x0[0]
-            dy_goal = self.goal_y - x0[1]
-            dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
-            angle_to_goal = np.arctan2(dy_goal, dx_goal)
-            angle_err = angle_to_goal - x0[2]
-            angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
-            
-            # If MPC is stuck (near-zero velocity), FORCE progress
-            if dist_to_goal > 0.15:  # Not at goal
-                if abs(v_cmd) < 0.05:  # MPC stuck
-                    # Force forward motion toward goal
-                    v_cmd = min(0.2, dist_to_goal * 0.5)
-                    # Turn toward goal
-                    omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
-                    if not hasattr(self, '_mpc_cmd_count'):
-                        self._mpc_cmd_count = 0
-                    self._mpc_cmd_count += 1
-                    if self._mpc_cmd_count % 10 == 0:
-                        self.get_logger().warn(
-                            f"🚀 MPC STUCK - forcing: v={v_cmd:.2f}m/s ω={np.degrees(omega_cmd):.0f}°/s "
-                            f"(angle_err={np.degrees(angle_err):.0f}°)"
-                        )
-                # If angle error is large and MPC not turning, force turn
-                elif abs(angle_err) > 0.5 and abs(omega_cmd) < 0.3:
-                    omega_cmd = np.clip(angle_err * 1.5, -self.omega_max, self.omega_max)
-                    if self._mpc_cmd_count % 10 == 0:
-                        self.get_logger().warn(f"🔄 Forcing turn: ω={np.degrees(omega_cmd):.0f}°/s")
-            
             # Clip to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
             omega_cmd = np.clip(omega_cmd, -self.omega_max, self.omega_max)
-            
-            # CRITICAL DEBUG: Log EVERYTHING to diagnose circles
-            if not hasattr(self, '_mpc_cmd_count'):
-                self._mpc_cmd_count = 0
-            self._mpc_cmd_count += 1
-            if self._mpc_cmd_count % 10 == 0:  # Every 1 second
-                angle_to_goal = np.arctan2(dy_goal, dx_goal)
-                angle_err = angle_to_goal - x0[2]
-                angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
-                self.get_logger().error(  # ERROR level so it's visible
-                    f"MPC: robot=({x0[0]:.3f},{x0[1]:.3f}) θ={np.degrees(x0[2]):.0f}° → "
-                    f"goal=({self.goal_x:.3f},{self.goal_y:.3f}) "
-                    f"dist={dist_to_goal:.3f}m angle_err={np.degrees(angle_err):.0f}° "
-                    f"v={v_cmd:.3f}m/s ω={np.degrees(omega_cmd):.0f}°/s "
-                    f"obstacles={len(obstacles)}"
-                )
-                # Check if we're making progress
-                if hasattr(self, '_last_pos'):
-                    progress = np.sqrt((x0[0] - self._last_pos[0])**2 + (x0[1] - self._last_pos[1])**2)
-                    if progress < 0.01 and dist_to_goal > 0.2:
-                        self.get_logger().error(f"⚠️ STUCK! Progress={progress:.3f}m in last second!")
-                self._last_pos = (x0[0], x0[1])
             
         except Exception as e:
             # Fallback to proportional control only if MPC completely fails
