@@ -31,7 +31,7 @@ setup(
         ],
     },
     entry_points={
-            'console_scripts': [
+        'console_scripts': [
                 'mpc_node = turtlebot_interceptor.mpc_node:main',
                 'mcl_node = turtlebot_interceptor.mcl_node:main',
                 'ukf_node = turtlebot_interceptor.ukf_node:main',
@@ -48,6 +48,6 @@ setup(
                 'target_est_node = turtlebot_interceptor.target_est_node:main',
                 'camera_cone_detector = turtlebot_interceptor.camera_cone_detector:main',  # Camera-based yellow cone detection
                 'test_camera_cones = turtlebot_interceptor.test_camera_cones:main',  # Test camera cone detection
-            ],
-        },
+        ],
+    },
 )

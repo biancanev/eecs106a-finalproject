@@ -1358,7 +1358,9 @@ class MPCNode(Node):
     
     def visualize_trajectory(self):
         """Publish MPC predicted trajectory for visualization"""
-        if not hasattr(self.mpc, 'X_sol') or self.mpc.X_sol is None:
+        # Get trajectory from MPC's last solution
+        trajectory = self.mpc.get_predicted_trajectory()
+        if trajectory is None:
             return
         
         from visualization_msgs.msg import Marker
@@ -1379,17 +1381,13 @@ class MPCNode(Node):
         marker.color.b = 0.0
         marker.color.a = 1.0
         
-        # Add points from MPC solution
-        try:
-            X_sol = self.mpc.X_sol.value
-            for i in range(X_sol.shape[1]):
-                p = Point()
-                p.x = float(X_sol[0, i])
-                p.y = float(X_sol[1, i])
-                p.z = 0.1
-                marker.points.append(p)
-        except:
-            pass
+        # Add points from MPC predicted trajectory
+        for point in trajectory:
+            p = Point()
+            p.x = float(point[0])
+            p.y = float(point[1])
+            p.z = 0.1
+            marker.points.append(p)
         
         self.traj_pub.publish(marker)
     
@@ -1511,160 +1509,73 @@ class MPCNode(Node):
         if self.seeker_state is None:
             twist = Twist()
             self.cmd_pub.publish(twist)
-            self.get_logger().warn('No pose data!')
             return
         
-        # GET ROBOT STATE
-        robot_x = self.seeker_state[0]
-        robot_y = self.seeker_state[1]
-        robot_theta = self.seeker_state[2]
-        
-        # GET GOAL
-        goal_x = self.goal_x
-        goal_y = self.goal_y
-        
-        # COMPUTE DISTANCE AND ANGLE TO GOAL
-        dx = goal_x - robot_x
-        dy = goal_y - robot_y
-        dist_to_goal = np.sqrt(dx**2 + dy**2)
-        angle_to_goal = np.arctan2(dy, dx)
-        
-        # ANGLE ERROR (how much we need to turn)
-        angle_err = angle_to_goal - robot_theta
-        # Wrap to [-pi, pi]
-        while angle_err > np.pi:
-            angle_err -= 2*np.pi
-        while angle_err < -np.pi:
-            angle_err += 2*np.pi
-        
-        # LOG EVERY SECOND
-        if not hasattr(self, '_log_count'):
-            self._log_count = 0
-        self._log_count += 1
-        if self._log_count % 10 == 0:
-            self.get_logger().info(
-                f'🎯 Robot({robot_x:.2f},{robot_y:.2f}) θ={np.degrees(robot_theta):.0f}° → '
-                f'Goal({goal_x:.2f},{goal_y:.2f}) dist={dist_to_goal:.2f}m angle_err={np.degrees(angle_err):.0f}°'
-            )
-        
-        # REACHED GOAL?
-        if dist_to_goal < 0.1:
-            twist = Twist()
-            twist.linear.x = 0.0
-            twist.angular.z = 0.0
-            self.cmd_pub.publish(twist)
-            if self._log_count % 10 == 0:
-                self.get_logger().info('🏁 GOAL REACHED!')
-            return
-        
-        # SIMPLE PROPORTIONAL CONTROL
-        # If angle error is large, turn in place
-        # Otherwise, drive forward while correcting angle
-        
-        if abs(angle_err) > 0.5:  # More than ~30 degrees off
-            # TURN IN PLACE
-            v_cmd = 0.0
-            omega_cmd = 1.5 * angle_err  # Proportional turn
-            omega_cmd = np.clip(omega_cmd, -1.0, 1.0)  # Limit turn rate
-        else:
-            # DRIVE FORWARD + small angle corrections
-            v_cmd = min(0.2, dist_to_goal * 0.5)  # Speed proportional to distance
-            omega_cmd = 1.0 * angle_err  # Small angle corrections
-            omega_cmd = np.clip(omega_cmd, -0.5, 0.5)
-        
-        # CHECK FOR OBSTACLES (simple LIDAR check)
-        if self.latest_scan is not None:
-            ranges = self.latest_scan.ranges
-            # Check front 60 degrees
-            n = len(ranges)
-            front_start = n // 2 - n // 12
-            front_end = n // 2 + n // 12
-            front_ranges = ranges[front_start:front_end]
-            min_front = min([r for r in front_ranges if r > 0.01 and r < 10.0], default=10.0)
-            
-            if min_front < 0.25:  # Obstacle within 25cm in front
-                # AVOID: slow down and turn
-                v_cmd = 0.05
-                # Turn away from obstacle (turn right if obstacle on left, etc.)
-                left_avg = np.mean([r for r in ranges[:n//3] if 0.01 < r < 10.0] or [10.0])
-                right_avg = np.mean([r for r in ranges[2*n//3:] if 0.01 < r < 10.0] or [10.0])
-                if left_avg > right_avg:
-                    omega_cmd = 0.5  # Turn left
-                else:
-                    omega_cmd = -0.5  # Turn right
-                if self._log_count % 10 == 0:
-                    self.get_logger().warn(f'⚠️ Obstacle at {min_front:.2f}m! Avoiding...')
-        
-        # PUBLISH COMMAND
-        twist = Twist()
-        twist.linear.x = float(v_cmd)
-        twist.angular.z = float(omega_cmd)
-        self.cmd_pub.publish(twist)
-        
-        # Done - skip all the complex MPC stuff
-        return
-        
-        # ============ OLD MPC CODE BELOW (DISABLED) ============
-        # EMERGENCY RECOVERY SYSTEM
-        if self.emergency_state != 'NORMAL':
-            self.handle_emergency_recovery()
-            return
-        
-        # Build initial state
+        # BUILD STATE FOR MPC
         x0 = self.seeker_state.copy()
+        
+        # BUILD TARGET SEQUENCE (constant goal)
         target_seq = np.zeros((2, self.N + 1))
         target_seq[0, :] = self.goal_x
         target_seq[1, :] = self.goal_y
         
+        # COMPUTE OBSTACLES
         obstacles = self.compute_obstacles()
         
+        # SET MPC VELOCITY LIMITS
+        self.mpc.v_max = self.v_max_base
+        
+        # SOLVE MPC - THIS IS THE PRIMARY CONTROLLER
         try:
             twist_cmd = self.mpc.get_twist_command(x0, target_seq, obstacles)
             v_cmd = twist_cmd['linear']['x']
             omega_cmd = twist_cmd['angular']['z']
             
-            if not hasattr(self, '_mpc_cmd_count'):
-                self._mpc_cmd_count = 0
-            self._mpc_cmd_count += 1
+            # Validate MPC solution
+            if math.isnan(v_cmd) or math.isnan(omega_cmd) or \
+               math.isinf(v_cmd) or math.isinf(omega_cmd):
+                raise ValueError("MPC solution contains NaN or Inf")
             
-            dx_goal = target_seq[0,0] - x0[0]
-            dy_goal = target_seq[1,0] - x0[1]
+            # MINIMAL INTERVENTION - only if MPC is completely stuck
+            dx_goal = self.goal_x - x0[0]
+            dy_goal = self.goal_y - x0[1]
             dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
-            angle_to_goal = np.arctan2(dy_goal, dx_goal)
-            angle_err = angle_to_goal - x0[2]
-            angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
             
-            if dist_to_goal > 0.1 and abs(v_cmd) < 0.05:
-                v_cmd = min(self.v_max_base * 0.5, dist_to_goal * 0.5)
+            # Only boost if MPC outputs near-zero AND we're far from goal
+            if dist_to_goal > 0.2 and abs(v_cmd) < 0.02:
+                v_cmd = min(0.15, dist_to_goal * 0.3)  # Small boost only
+                if not hasattr(self, '_mpc_cmd_count'):
+                    self._mpc_cmd_count = 0
+                self._mpc_cmd_count += 1
+                if self._mpc_cmd_count % 50 == 0:
+                    self.get_logger().warn(f"🚀 MPC stuck - small boost: v={v_cmd:.2f}m/s")
             
-            if abs(angle_err) > 0.4 and abs(omega_cmd) < 0.2:
-                omega_cmd = np.clip(angle_err * 1.5, -self.omega_max, self.omega_max)
-                if self._mpc_cmd_count % 20 == 0:
-                    self.get_logger().warn(f"🔄 MPC omega boosted: omega={np.degrees(omega_cmd):.1f}°/s")
-            
-            # Clip commands to safe limits
+            # Clip to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
             omega_cmd = np.clip(omega_cmd, -self.omega_max, self.omega_max)
             
+            # Log MPC output periodically
+            if not hasattr(self, '_mpc_cmd_count'):
+                self._mpc_cmd_count = 0
+            self._mpc_cmd_count += 1
+            if self._mpc_cmd_count % 50 == 0:
+                self.get_logger().info(
+                    f"MPC: robot=({x0[0]:.2f},{x0[1]:.2f}) → goal=({self.goal_x:.2f},{self.goal_y:.2f}) "
+                    f"dist={dist_to_goal:.2f}m, v={v_cmd:.2f}m/s, ω={np.degrees(omega_cmd):.0f}°/s, "
+                    f"obstacles={len(obstacles)}"
+                )
+            
         except Exception as e:
-            # Log error details for debugging (but not every time to avoid spam)
+            # Fallback to proportional control only if MPC completely fails
             if not hasattr(self, '_mpc_error_count'):
                 self._mpc_error_count = 0
             self._mpc_error_count += 1
-            if self._mpc_error_count % 20 == 0:  # Every 2 seconds at 10Hz
-                self.get_logger().warn(
-                    f"MPC solve failed: {e}, using fallback control. "
-                    f"Robot: ({x0[0]:.2f}, {x0[1]:.2f}, {np.degrees(x0[2]):.1f}°), "
-                    f"Goal: ({target_seq[0,0]:.2f}, {target_seq[1,0]:.2f})"
-                )
-            # Fallback to proportional control (lab8 pattern)
+            if self._mpc_error_count % 20 == 0:
+                self.get_logger().warn(f"MPC solve failed: {e}, using fallback")
+            # Fallback to proportional control
             v_cmd, omega_cmd = self.fallback_control(x0, target_seq)
 
-        # SAFETY FILTER DISABLED - was blocking all forward motion!
-        # The obstacle avoidance logic above handles safety
-        # is_command_safe was too aggressive and kept stopping the robot
-        
-        # Publish command in Twist format (ALWAYS publish, even if zero)
+        # PUBLISH MPC COMMAND
         twist = Twist()
         twist.linear.x = float(v_cmd)
         twist.linear.y = 0.0
@@ -1674,23 +1585,18 @@ class MPCNode(Node):
         twist.angular.z = float(omega_cmd)
         self.cmd_pub.publish(twist)
         
-        # Record successful position in trajectory history (for safe backup)
+        # Record trajectory history
         if self.seeker_state is not None:
             self.trajectory_history.append({
                 'x': self.seeker_state[0],
                 'y': self.seeker_state[1],
                 'theta': self.seeker_state[2]
             })
-            # Keep only recent history
             if len(self.trajectory_history) > self.max_history_length:
                 self.trajectory_history.pop(0)
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
-        
-        # Visualize waypoint if active
-        if self.current_waypoint is not None:
-            self.publish_waypoint(self.current_waypoint)
     
     def compute_min_obstacle_distance(self, x0, obstacles):
         """
