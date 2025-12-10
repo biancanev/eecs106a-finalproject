@@ -124,7 +124,7 @@ class SimpleUnicycleMPC:
             theta   = self.X[2,k]
             a       = self.U[0,k]
             omega   = self.U[1,k]
-            
+
             # CRITICAL FIX: Don't penalize theta itself - that tries to keep theta=0
             # Instead, heavily penalize position error - this naturally encourages alignment
             # The robot will naturally turn to face the target to minimize position error
@@ -140,7 +140,7 @@ class SimpleUnicycleMPC:
             cost += self.Qp_param * (px_err**2 + py_err**2)
             # Control penalties - keep VERY small so position error dominates
             cost += self.Ra_param * (a**2) + self.Rw_param * (omega**2)
-            
+
             # CRITICAL FIX: Add obstacle repulsion cost directly using optimization variables!
             # This ensures MPC actually optimizes around obstacles, not just adds a penalty
             # Obstacles will be added dynamically in solve() method
@@ -392,20 +392,23 @@ class SimpleUnicycleMPC:
                     # But this is non-convex, so we'll use a linear approximation
                     # Instead, we'll use a VERY STRONG cost that acts like a hard constraint
                     
-                    # Use CVXPY's inverse distance cost - EXTREMELY AGGRESSIVE!
-                    # For very close obstacles, use EXTREME penalty
-                    # For far obstacles, use high penalty
-                    # This creates a strong repulsion field that MPC MUST avoid
-                    if dist_sq < safety_radius_sq * 0.5:  # INSIDE safety radius - EXTREME!
-                        obstacle_cost += repulsion_weight * 10000.0 / (dist_sq + 0.0001)
-                    elif dist_sq < safety_radius_sq:  # VERY CLOSE to safety radius
-                        obstacle_cost += repulsion_weight * 1000.0 / (dist_sq + 0.001)
-                    elif dist_sq < safety_radius_sq * 2.0:  # CLOSE
-                        obstacle_cost += repulsion_weight * 100.0 / (dist_sq + 0.01)
-                    elif dist_sq < safety_radius_sq * 4.0:  # MODERATE
-                        obstacle_cost += repulsion_weight * 10.0 / (dist_sq + 0.1)
-                    else:  # FAR
-                        obstacle_cost += repulsion_weight * 1.0 / (dist_sq + safety_radius_sq)
+                    # CONVEX OBSTACLE COST: Quadratic penalty for proper optimization
+                    # Penalty = repulsion_weight * max(0, safety_radius_sq - dist_sq)^2
+                    # This is convex and allows MPC to properly optimize around obstacles
+                    
+                    # How much we violate the safety radius (squared distance)
+                    # violation = max(0, safety_radius_sq - dist_sq)
+                    # This is convex (max of affine functions)
+                    violation = cp.maximum(0, safety_radius_sq - dist_sq)
+                    
+                    # Quadratic penalty - this is convex!
+                    # Closer to obstacle = higher penalty (quadratic growth)
+                    penalty = repulsion_weight * cp.square(violation)
+                    
+                    # Add extra linear penalty for very close obstacles (acts like hard constraint)
+                    extra_penalty = repulsion_weight * 10000.0 * violation
+                    
+                    obstacle_cost += penalty + extra_penalty
             
             # Rebuild problem with obstacle costs and constraints
             # We need to add obstacle_cost to the existing cost
@@ -453,12 +456,16 @@ class SimpleUnicycleMPC:
             if self._solve_count % 50 == 0:  # Every 5 seconds at 10Hz
                 print(f"MPC solve status: {self.prob.status}, value: {self.prob.value}")
             
-            # Store solution for warm start
+            # Store solution for trajectory visualization and warm start
             if self.prob.status in ["optimal", "optimal_inaccurate"]:
                 self.last_solution = {
                     'X': self.X.value.copy(),
                     'U': self.U.value.copy()
                 }
+                # Also store X reference for backward compatibility
+                if not hasattr(self, 'X_sol'):
+                    self.X_sol = type('obj', (object,), {'value': None})()
+                self.X_sol.value = self.X.value
         except Exception as e:
             print(f"MPC solve exception: {e}")
             return 0.0, 0.0
@@ -484,7 +491,7 @@ class SimpleUnicycleMPC:
         u0 = self.U[:, 0].value
         if u0 is None:
             return 0.0, 0.0
-        
+
         # Return acceleration and angular velocity
         return float(u0[0]), float(u0[1])
     
