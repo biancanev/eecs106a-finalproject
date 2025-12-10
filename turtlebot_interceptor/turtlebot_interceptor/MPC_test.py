@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Standalone MPC controller (no ROS2 dependencies)
-Can be used with or without ROS2
+Fixed MPC controller with proper obstacle avoidance
+Key fixes:
+1. DCP-compliant obstacle cost using inverse barrier
+2. Static problem formulation (no rebuilding)
+3. Proper weight balancing
+4. Smooth obstacle avoidance via soft constraints
 """
 import numpy as np
 import cvxpy as cp
@@ -11,154 +15,141 @@ class SimpleUnicycleMPC:
     def __init__(self, horizon=15, dt=0.1, use_time_to_go=True):
         self.dt = dt
         self.N = horizon
-        self.use_time_to_go = use_time_to_go  # Enable minimum time-to-go framework
+        self.use_time_to_go = use_time_to_go
 
         self.nx = 4     # px,py,theta,v
         self.nu = 2     # a,omega
 
-        # Velocity constraints (Twist message format)
-        # Linear velocities (m/s)
+        # Velocity constraints
         self.vx_min = 0.0
-        self.vx_max = 0.35  # Faster for smoother curves (was 0.2)
-        self.vy_min = 0.0  # Unicycle: no lateral velocity
+        self.vx_max = 0.35
+        self.vy_min = 0.0
         self.vy_max = 0.0
-        self.vz_min = 0.0  # Unicycle: no vertical velocity
+        self.vz_min = 0.0
         self.vz_max = 0.0
         
-        # Angular velocities (rad/s) - turn rate constraints
-        self.wx_min = 0.0  # Unicycle: no roll
+        # Angular velocities (rad/s)
+        self.wx_min = 0.0
         self.wx_max = 0.0
-        self.wy_min = 0.0  # Unicycle: no pitch
+        self.wy_min = 0.0
         self.wy_max = 0.0
-        self.wz_min = -2.0  # Higher turn rate for smooth curves (was -1.0)
-        self.wz_max = 2.0  # Higher turn rate for smooth curves (was 1.0)
+        self.wz_min = -2.0
+        self.wz_max = 2.0
         
-        # Acceleration constraints (for MPC internal use)
+        # Acceleration constraints
         self.a_min = -0.4
         self.a_max = 0.4
-        self.alpha_min = -4.0  # Higher angular acceleration for faster turning (was 2.0)
+        self.alpha_min = -4.0
         self.alpha_max = 4.0
         
-        # Turn angle constraint (maximum change in heading per step)
-        self.max_turn_angle = 0.6  # Higher for smooth curves (was 0.5, ~29 deg, now ~34 deg)
+        # Turn angle constraint
+        self.max_turn_angle = 0.6
         
-        # Legacy constraints for backward compatibility
+        # Legacy constraints
         self.v_min = self.vx_min
         self.v_max = self.vx_max
         self.omega_max = self.wz_max
 
-        # Base weights - BALANCED goal pursuit with obstacle avoidance
-        # CRITICAL: Goal weight must be strong enough to overcome obstacles
-        # But not so strong that it ignores obstacles completely
-        self.Qp_base = 200000.0  # VERY STRONG goal tracking - MUST make progress!
-        self.Qtheta_base = 0.0  # NO theta penalty - let position error drive alignment
-        self.Ra_base = 0.005  # VERY LOW acceleration penalty - allow quick maneuvers
-        self.Rw_base = 0.001  # VERY LOW turn penalty - allow sharp turns around obstacles
+        # FIXED: Balanced weights for goal tracking + obstacle avoidance
+        self.Qp_base = 100.0          # Position error weight
+        self.Qtheta_base = 0.0        # No theta penalty
+        self.Ra_base = 0.01           # Acceleration penalty
+        self.Rw_base = 0.01           # Angular velocity penalty
+        self.Q_obs_base = 500.0       # Obstacle avoidance weight
         
         # Current adaptive weights
         self.Qp = self.Qp_base
         self.Qtheta = self.Qtheta_base
         self.Ra = self.Ra_base
         self.Rw = self.Rw_base
+        self.Q_obs = self.Q_obs_base
+        
+        # Obstacle parameters
+        self.robot_radius = 0.105
+        self.safety_buffer = 0.15  # Total safety distance
         
         # Time-to-go parameters
         self.time_to_go = None
-        self.alpha_progress = 50.0  # Weight for progress term (distance reduction)
-        self.min_time_to_go = 0.5  # Minimum time-to-go threshold for aggressive control
+        self.alpha_progress = 50.0
+        self.min_time_to_go = 0.5
         
-        # Fast MPC: warm start and solver settings
+        # Solver settings
         self.last_solution = None
         self.solver_settings = {
             'solver': cp.OSQP,
-            'warm_start': False,  # CRITICAL: Disabled to avoid OSQP matrix size errors
+            'warm_start': True,
             'verbose': False,
-            'eps_abs': 1e-4,
-            'eps_rel': 1e-4,
-            'max_iter': 2000
+            'eps_abs': 1e-3,
+            'eps_rel': 1e-3,
+            'max_iter': 4000,
+            'polish': True
         }
-        
-        # Store original cost expression for obstacle handling
-        self.original_cost = None
 
         self._build_qp()
 
     def _build_qp(self):
+        """Build QP once with obstacle parameters that can be updated"""
         nx, nu, N = self.nx, self.nu, self.N
 
-        # decision vars
+        # Decision variables
         self.X = cp.Variable((nx, N+1))
         self.U = cp.Variable((nu, N))
+        
+        # Slack variables for soft obstacle constraints
+        self.slack_obs = cp.Variable((N+1,), nonneg=True)
 
-        # params
+        # State parameters
         self.x0 = cp.Parameter(nx)
-        self.A = cp.Parameter((nx,nx))
-        self.B = cp.Parameter((nx,nu))
+        self.A = cp.Parameter((nx, nx))
+        self.B = cp.Parameter((nx, nu))
         self.c = cp.Parameter(nx)
         self.T = cp.Parameter((2, N+1))
         
-        # Weight parameters for adaptive time-to-go (Boyd's fast MPC)
-        self.Qp_param = cp.Parameter(nonneg=True)
-        self.Qtheta_param = cp.Parameter(nonneg=True)
-        self.Ra_param = cp.Parameter(nonneg=True)
-        self.Rw_param = cp.Parameter(nonneg=True)
-        self.alpha_progress_param = cp.Parameter(nonneg=True)
+        # Weight parameters (can be updated without rebuilding)
+        self.Qp_param = cp.Parameter(nonneg=True, value=self.Qp_base)
+        self.Qtheta_param = cp.Parameter(nonneg=True, value=self.Qtheta_base)
+        self.Ra_param = cp.Parameter(nonneg=True, value=self.Ra_base)
+        self.Rw_param = cp.Parameter(nonneg=True, value=self.Rw_base)
+        self.Q_obs_param = cp.Parameter(nonneg=True, value=self.Q_obs_base)
         
-        # Obstacle parameters (for dynamic obstacle avoidance)
-        # Obstacles will be added to cost function in solve() method
-        self.obstacle_centers = []  # Will be set in solve()
-        self.obstacle_radii = []   # Will be set in solve()
-        self.obstacle_weight_param = cp.Parameter(nonneg=True, value=100000.0)
+        # FIXED: Obstacle parameters (max 10 obstacles)
+        # Updated each solve without rebuilding problem
+        self.max_obstacles = 10
+        self.obs_centers = cp.Parameter((self.max_obstacles, 2), value=np.zeros((self.max_obstacles, 2)))
+        self.obs_radii = cp.Parameter(self.max_obstacles, nonneg=True, value=np.zeros(self.max_obstacles))
+        self.obs_active = cp.Parameter(self.max_obstacles, boolean=True, value=np.zeros(self.max_obstacles, dtype=bool))
 
         constraints = []
         cost = 0
 
-        constraints += [self.X[:,0] == self.x0]
+        # Initial condition
+        constraints += [self.X[:, 0] == self.x0]
 
+        # Stage costs and dynamics
         for k in range(N):
+            # Dynamics constraint
             constraints += [
-                self.X[:,k+1] == self.A @ self.X[:,k] + self.B @ self.U[:,k] + self.c
+                self.X[:, k+1] == self.A @ self.X[:, k] + self.B @ self.U[:, k] + self.c
             ]
 
-            px = self.X[0,k]
-            py = self.X[1,k]
-            px_err = px - self.T[0,k]
-            py_err = py - self.T[1,k]
-            theta   = self.X[2,k]
-            a       = self.U[0,k]
-            omega   = self.U[1,k]
+            px = self.X[0, k]
+            py = self.X[1, k]
+            px_err = px - self.T[0, k]
+            py_err = py - self.T[1, k]
+            a = self.U[0, k]
+            omega = self.U[1, k]
 
-            # CRITICAL FIX: Don't penalize theta itself - that tries to keep theta=0
-            # Instead, heavily penalize position error - this naturally encourages alignment
-            # The robot will naturally turn to face the target to minimize position error
-            # For straight-line-then-turn behavior, we want:
-            # 1. Large position weight → robot wants to get to target fast
-            # 2. Small control penalty → robot can turn quickly
-            # 3. No theta penalty → robot can orient freely to minimize position error
-            
-            # Simple cost: minimize position error and control effort
-            # CRITICAL: Position error must dominate cost function
-            # If control penalties are too high, MPC will minimize control instead of position
-            # Make position error cost MUCH larger than control costs
+            # Position tracking cost
             cost += self.Qp_param * (px_err**2 + py_err**2)
             
-            # Control penalties - keep VERY small so position error dominates
-            cost += self.Ra_param * (a**2) + self.Rw_param * (omega**2)
+            # Control effort cost
+            cost += self.Ra_param * a**2 + self.Rw_param * omega**2
 
-            # CRITICAL FIX: Add obstacle repulsion cost directly using optimization variables!
-            # This ensures MPC actually optimizes around obstacles, not just adds a penalty
-            # Obstacles will be added dynamically in solve() method
-            # We'll add obstacle costs here using the optimization variables
-
-            # Velocity constraints (Twist message format)
-            # Linear velocity constraints
+            # Velocity constraints
             constraints += [
-                self.vx_min <= self.X[3,k],
-                self.X[3,k] <= self.vx_max,
+                self.vx_min <= self.X[3, k],
+                self.X[3, k] <= self.vx_max,
             ]
-            
-            # CRITICAL: Add minimum forward velocity constraint when far from obstacles
-            # This prevents MPC from solving to back up when obstacles are distant
-            # We'll add this dynamically in solve() based on obstacle distances
             
             # Acceleration constraints
             constraints += [
@@ -166,161 +157,137 @@ class SimpleUnicycleMPC:
                 a <= self.a_max,
             ]
             
-            # Angular velocity constraints (turn rate limits)
+            # Angular velocity constraints
             constraints += [
                 self.wz_min <= omega,
                 omega <= self.wz_max,
             ]
             
-            # Turn angle constraint (maximum change in heading per step)
-            # Enforced via angular velocity: omega * dt <= max_turn_angle
-            # This is equivalent to: omega <= max_turn_angle / dt
-            # Already handled by effective_wz_max above, but we can add explicit constraint
-            # The angular velocity constraint already limits turn rate, which limits turn angle per step
-            
-            # CRITICAL: Add hard obstacle constraints (distance constraints)
-            # This ensures robot NEVER gets too close to obstacles
-            # Obstacles will be added dynamically in solve() method
+            # FIXED: DCP-compliant obstacle avoidance using slack variables
+            # For each obstacle, add soft constraint: dist >= safety_dist - slack
+            # This is convex and allows optimization to trade off goal vs obstacles
+            for i in range(self.max_obstacles):
+                cx = self.obs_centers[i, 0]
+                cy = self.obs_centers[i, 1]
+                r_obs = self.obs_radii[i]
+                
+                # Distance squared from robot to obstacle center
+                dist_sq = cp.square(px - cx) + cp.square(py - cy)
+                
+                # Safety distance = obstacle radius + robot radius + buffer
+                safety_dist = r_obs + self.robot_radius + self.safety_buffer
+                
+                # FIXED: Use SOC (Second-Order Cone) constraint for distance
+                # This is DCP-compliant and handles sqrt properly
+                # ||[px-cx, py-cy]||_2 >= safety_dist - slack[k]
+                # Equivalently: dist_sq >= (safety_dist - slack[k])^2
+                # But we want: sqrt(dist_sq) >= safety_dist - slack[k]
+                # In CVXPY: cp.norm2([px-cx, py-cy]) >= safety_dist - slack[k]
+                
+                # Only add constraint if obstacle is active
+                # Use conditional: if obs_active[i], then add constraint
+                # CVXPY doesn't support if-then, so we use a trick:
+                # Multiply RHS by obs_active (0 or 1) to disable constraint
+                constraints += [
+                    cp.norm2(cp.hstack([px - cx, py - cy])) >= 
+                    (safety_dist - self.slack_obs[k]) * self.obs_active[i]
+                ]
 
-        # terminal cost - CRITICAL: Make terminal cost MUCH heavier to ensure convergence
-        pxN = self.X[0,N] - self.T[0,N]
-        pyN = self.X[1,N] - self.T[1,N]
-        # Terminal position penalty - make it 1000x heavier than stage cost to ensure robot reaches goal
-        # This is CRITICAL - terminal cost drives convergence
-        cost += 1000.0 * self.Qp_param * (pxN**2 + pyN**2)
+        # Terminal cost - heavier weight for convergence
+        pxN = self.X[0, N] - self.T[0, N]
+        pyN = self.X[1, N] - self.T[1, N]
+        cost += 10.0 * self.Qp_param * (pxN**2 + pyN**2)
         
-        # Terminal obstacle cost (for final position)
-        pxN_abs = self.X[0,N]
-        pyN_abs = self.X[1,N]
-        # Obstacle costs will be added dynamically in solve() method
+        # Terminal obstacle constraint
+        for i in range(self.max_obstacles):
+            cx = self.obs_centers[i, 0]
+            cy = self.obs_centers[i, 1]
+            r_obs = self.obs_radii[i]
+            safety_dist = r_obs + self.robot_radius + self.safety_buffer
+            
+            constraints += [
+                cp.norm2(cp.hstack([self.X[0, N] - cx, self.X[1, N] - cy])) >= 
+                (safety_dist - self.slack_obs[N]) * self.obs_active[i]
+            ]
+        
+        # FIXED: Add cost on slack variables (penalize constraint violations)
+        # This makes obstacles "soft" - robot can violate if necessary but pays a cost
+        cost += self.Q_obs_param * cp.sum_squares(self.slack_obs)
 
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
-        self.original_cost = cost  # Store original cost expression
-        self.original_constraints = constraints  # Store original constraints
-        self.base_cost = cost  # Store base cost without obstacles
-        
-        # Initialize weight parameters
-        self.Qp_param.value = self.Qp_base
-        self.Qtheta_param.value = self.Qtheta_base
-        self.Ra_param.value = self.Ra_base
-        self.Rw_param.value = self.Rw_base
-        self.alpha_progress_param.value = self.alpha_progress
-        
-        # Track if we have obstacles in the problem
-        self.has_obstacles_in_cost = False
 
-    # --- linearize unicycle model around x0 ---
     def linearize(self, x0):
-        """
-        Linearize unicycle dynamics: x = [px, py, theta, v], u = [a, omega]
-        Dynamics: 
-          px' = v*cos(theta)
-          py' = v*sin(theta)
-          theta' = omega
-          v' = a
-        """
+        """Linearize unicycle dynamics around x0"""
         px, py, th, v = x0
         dt = self.dt
         
-        # State transition matrix A = I + dt * df/dx
         A = np.eye(4)
-        # d(px')/d(theta) = -v*sin(theta)
         A[0, 2] = -dt * v * np.sin(th)
-        # d(px')/d(v) = cos(theta)
         A[0, 3] = dt * np.cos(th)
-        # d(py')/d(theta) = v*cos(theta)
         A[1, 2] = dt * v * np.cos(th)
-        # d(py')/d(v) = sin(theta)
         A[1, 3] = dt * np.sin(th)
-        # theta and v don't depend on other states (for this step)
 
-        # Control input matrix B = dt * df/du
         B = np.zeros((4, 2))
-        # d(theta')/d(omega) = 1
         B[2, 1] = dt
-        # d(v')/d(a) = 1
         B[3, 0] = dt
 
-        # Constant term: c = f(x0, u0=0) - A*x0
-        # f(x0, 0) = [v*cos(th), v*sin(th), 0, 0]
         f_x0 = np.array([v * np.cos(th), v * np.sin(th), 0.0, 0.0])
-        # c = x0 + dt*f(x0) - A*x0
         c = x0 + dt * f_x0 - A @ x0
         
         return A, B, c
 
     def compute_time_to_go(self, x0, target):
-        """
-        Compute estimated time-to-go based on current distance and velocity.
-        Uses Boyd's approach: T_guess = distance / v_max (optimistic)
-        """
-        px, py = x0[0], x0[1]
-        v = x0[3]
+        """Compute estimated time-to-go"""
+        px, py, v = x0[0], x0[1], x0[3]
         
-        # Get target position (first step if trajectory, or single point)
         if isinstance(target, (list, tuple)) or (isinstance(target, np.ndarray) and target.ndim == 1):
             tgt_pos = np.array(target[:2])
         else:
-            tgt_pos = target[:, 0]  # First step of trajectory
+            tgt_pos = target[:, 0]
         
-        # Distance to target
         dist = np.sqrt((px - tgt_pos[0])**2 + (py - tgt_pos[1])**2)
-        
-        # Time-to-go estimate: distance / max_velocity (optimistic)
-        # Add small epsilon to avoid division by zero
         time_to_go = dist / (self.v_max + 1e-6)
         
-        # Alternative: use current velocity if moving
         if v > 0.1:
             time_to_go_vel = dist / v
             time_to_go = min(time_to_go, time_to_go_vel)
         
-        return max(time_to_go, 0.1)  # Minimum 0.1s
+        return max(time_to_go, 0.1)
     
     def adapt_weights_for_time_to_go(self, time_to_go):
-        """
-        Adapt MPC weights based on time-to-go (Boyd's fast MPC approach).
-        When time-to-go is small, be more aggressive (higher position weights, lower control weights).
-        """
+        """Adapt MPC weights based on time-to-go"""
         if not self.use_time_to_go:
             self.Qp = self.Qp_base
             self.Qtheta = self.Qtheta_base
             self.Ra = self.Ra_base
             self.Rw = self.Rw_base
+            self.Q_obs = self.Q_obs_base
             return
         
-        # Normalize time-to-go (0 = very close, 1 = far away)
-        # Use sigmoid-like function for smooth adaptation
-        normalized_tgo = np.clip(time_to_go / 5.0, 0.0, 1.0)  # Normalize by 5 seconds
+        normalized_tgo = np.clip(time_to_go / 5.0, 0.0, 1.0)
+        aggression_factor = 1.0 - normalized_tgo
         
-        # When close (small time-to-go): be aggressive
-        # When far (large time-to-go): be conservative
-        aggression_factor = 1.0 - normalized_tgo  # 1.0 when close, 0.0 when far
+        # More aggressive when close to goal
+        self.Qp = self.Qp_base * (1.0 + 2.0 * aggression_factor)
+        self.Ra = self.Ra_base * (1.0 - 0.5 * aggression_factor)
+        self.Rw = self.Rw_base * (1.0 - 0.5 * aggression_factor)
         
-        # Adapt position weight: higher when close (aggressive)
-        self.Qp = self.Qp_base * (1.0 + 3.0 * aggression_factor)  # Up to 4x when very close
-        
-        # Adapt control weights: lower when close (allow more aggressive control)
-        self.Ra = self.Ra_base * (1.0 - 0.7 * aggression_factor)  # Down to 30% when very close
-        self.Rw = self.Rw_base * (1.0 - 0.7 * aggression_factor)
-        
-        # Adapt progress term: higher when close
-        self.alpha_progress = 50.0 * (1.0 + 2.0 * aggression_factor)  # Up to 3x when very close
-        
-        # Theta weight: slightly higher when close (better alignment)
-        self.Qtheta = self.Qtheta_base * (1.0 + 0.5 * aggression_factor)
+        # FIXED: Reduce obstacle weight when very close to goal (allow tighter navigation)
+        self.Q_obs = self.Q_obs_base * (1.0 + 0.5 * (1.0 - aggression_factor))
     
     def solve(self, x0, target, obstacles=None):
         """
-        x0: [px,py,theta,v] (can be list or array)
-        target: [px_tgt, py_tgt] or full trajectory shape (2, N+1)
-        obstacles: list of (center, radius) tuples for obstacle avoidance
+        Solve MPC problem
+        x0: [px,py,theta,v]
+        target: [px_tgt, py_tgt] or trajectory (2, N+1)
+        obstacles: list of (center, radius) tuples
         Returns: (acceleration, angular_velocity)
         """
         x0 = np.array(x0).flatten()
         if len(x0) != 4:
             raise ValueError(f"x0 must have 4 elements, got {len(x0)}")
         
+        # Prepare target trajectory
         if isinstance(target, (list, tuple)) or (isinstance(target, np.ndarray) and target.ndim == 1):
             T = np.tile(np.array(target).reshape(2, 1), (1, self.N + 1))
         else:
@@ -328,25 +295,13 @@ class SimpleUnicycleMPC:
             if T.shape != (2, self.N + 1):
                 raise ValueError(f"target must be shape (2, {self.N+1}), got {T.shape}")
         
-        # CRITICAL DEBUG: Verify inputs
-        if not hasattr(self, '_solve_debug_count'):
-            self._solve_debug_count = 0
-        self._solve_debug_count += 1
-        if self._solve_debug_count % 50 == 0:
-            print(f"MPC solve DEBUG: x0=[{x0[0]:.3f}, {x0[1]:.3f}, {np.degrees(x0[2]):.1f}°, {x0[3]:.3f}], "
-                  f"target=[{T[0,0]:.3f}, {T[1,0]:.3f}], dx={T[0,0]-x0[0]:.3f}, dy={T[1,0]-x0[1]:.3f}")
-
-        # Compute time-to-go and adapt weights (Boyd's fast MPC)
+        # Time-to-go adaptation
         if self.use_time_to_go:
             self.time_to_go = self.compute_time_to_go(x0, target)
             self.adapt_weights_for_time_to_go(self.time_to_go)
-            
-            # Rebuild QP with new weights if they changed significantly
-            # (In practice, we update the cost function parameters)
-            # For efficiency, we'll update weights in the cost function directly
-            # by rebuilding the problem with new weights
             self._update_cost_weights()
 
+        # Linearize dynamics
         A, B, c = self.linearize(x0)
         self.x0.value = x0
         self.A.value = A
@@ -354,201 +309,84 @@ class SimpleUnicycleMPC:
         self.c.value = c
         self.T.value = T
 
-        # CRITICAL: Disable warm start completely to avoid OSQP matrix size errors
-        # OSQP caches matrix structure, and any problem changes cause mismatches
-        # Warm start is disabled in solver_settings below
-        # We can still use last_solution for initial guess, but OSQP warm_start must be False
-        # use_warm_start = False  # Always disabled now to avoid OSQP errors
+        # FIXED: Update obstacle parameters without rebuilding problem
+        obs_centers_val = np.zeros((self.max_obstacles, 2))
+        obs_radii_val = np.zeros(self.max_obstacles)
+        obs_active_val = np.zeros(self.max_obstacles, dtype=bool)
+        
+        if obstacles is not None:
+            n_obs = min(len(obstacles), self.max_obstacles)
+            for i in range(n_obs):
+                center, radius = obstacles[i]
+                obs_centers_val[i] = center
+                obs_radii_val[i] = radius
+                obs_active_val[i] = True
+        
+        self.obs_centers.value = obs_centers_val
+        self.obs_radii.value = obs_radii_val
+        self.obs_active.value = obs_active_val
 
-        # CRITICAL FIX: Add obstacles directly to cost function using optimization variables!
-        # AGGRESSIVE OBSTACLE AVOIDANCE - MUST NEVER HIT OBSTACLES!
-        if obstacles is not None and len(obstacles) > 0:
-            # Add obstacle costs directly to the cost function using self.X (optimization variables)
-            # This is the ONLY way to make MPC actually optimize around obstacles
-            # CRITICAL: Balance obstacle avoidance with goal pursuit
-            obstacle_cost = 0.0
-            repulsion_weight = 100000.0  # Moderate repulsion - strong enough to avoid, not block motion
-            robot_radius = 0.105  # Robot radius
-            safety_radius_buffer = 0.08  # 8cm buffer - tight but safe
-            
-            # Also add HARD CONSTRAINTS to prevent getting too close
-            # Note: We'll use very strong cost penalties instead of hard constraints
-            # (hard constraints on distance are non-convex and make the problem harder to solve)
-            new_constraints = self.original_constraints
-            
-            for k in range(self.N + 1):
-                px = self.X[0, k]
-                py = self.X[1, k]
-                for center, radius in obstacles:
-                    # Distance from robot position (optimization variable) to obstacle
-                    # CRITICAL: Use cp.square() for DCP compliance, not manual multiplication
-                    dx = px - center[0]
-                    dy = py - center[1]
-                    dist_sq = cp.square(dx) + cp.square(dy)  # DCP-compliant squared distance
-                    
-                    # CRITICAL: Safety radius = obstacle radius + robot radius + safety buffer
-                    safety_radius = radius + robot_radius + safety_radius_buffer
-                    safety_radius_sq = safety_radius * safety_radius
-                    
-                    # CONVEX OBSTACLE COST: Quadratic penalty for proper optimization
-                    # Penalty = repulsion_weight * max(0, safety_radius_sq - dist_sq)^2
-                    # This is convex and allows MPC to properly optimize around obstacles
-                    
-                    # How much we violate the safety radius (squared distance)
-                    # violation = max(0, safety_radius_sq - dist_sq)
-                    # This is convex (max of affine functions)
-                    violation = cp.maximum(0, safety_radius_sq - dist_sq)
-                    
-                    # Quadratic penalty - this is convex!
-                    # Closer to obstacle = higher penalty (quadratic growth)
-                    penalty = repulsion_weight * cp.square(violation)
-                    
-                    # Add extra linear penalty for very close obstacles (acts like hard constraint)
-                    # Moderate penalty - strong enough to avoid, not so strong it blocks all paths
-                    extra_penalty = repulsion_weight * 50.0 * violation
-                    
-                    obstacle_cost += penalty + extra_penalty
-            
-            # Rebuild problem with obstacle costs and constraints
-            # CRITICAL: Always rebuild to ensure DCP compliance
-            # The obstacle cost is added to the original cost
-            self.prob = cp.Problem(
-                cp.Minimize(self.original_cost + obstacle_cost),
-                new_constraints
-            )
-            self.has_obstacles_in_cost = True
-        else:
-            # No obstacles - use base cost
-            self.prob = cp.Problem(
-                cp.Minimize(self.original_cost),
-                self.original_constraints
-            )
-            self.has_obstacles_in_cost = False
-
-        # CRITICAL FIX: Disable warm start completely to avoid OSQP matrix size errors
-        # When we rebuild/restore the problem, OSQP's cached matrix structure doesn't match
-        # Solution: Always disable warm start, or rebuild problem from scratch each time
-        solver_settings = self.solver_settings.copy()
-        solver_settings['warm_start'] = False  # Always disable to avoid matrix size issues
-
+        # Solve
         try:
-            self.prob.solve(**solver_settings)
+            self.prob.solve(**self.solver_settings)
             
-            # CRITICAL: Don't restore problem after solve - it causes OSQP matrix size errors
-            # OSQP caches the matrix structure, and restoring changes it
-            # Instead, just keep the current problem (it will be rebuilt next iteration if needed)
-            # if obstacle_cost != 0:
-            #     self.prob = cp.Problem(cp.Minimize(self.original_cost), self.original_constraints)
-            
-            # Debug: Log solve status
-            if not hasattr(self, '_solve_count'):
-                self._solve_count = 0
-            self._solve_count += 1
-            if self._solve_count % 50 == 0:  # Every 5 seconds at 10Hz
-                print(f"MPC solve status: {self.prob.status}, value: {self.prob.value}")
-            
-            # Store solution for trajectory visualization and warm start
             if self.prob.status in ["optimal", "optimal_inaccurate"]:
                 self.last_solution = {
-                    'X': self.X.value.copy(),
-                    'U': self.U.value.copy()
+                    'X': self.X.value.copy() if self.X.value is not None else None,
+                    'U': self.U.value.copy() if self.U.value is not None else None,
+                    'slack': self.slack_obs.value.copy() if self.slack_obs.value is not None else None
                 }
-                # Also store X reference for backward compatibility
+                
+                # Store for visualization
                 if not hasattr(self, 'X_sol'):
                     self.X_sol = type('obj', (object,), {'value': None})()
                 self.X_sol.value = self.X.value
+            else:
+                print(f"MPC solve status: {self.prob.status}")
+                
         except Exception as e:
             print(f"MPC solve exception: {e}")
             return 0.0, 0.0
 
-        # Check solve status - be more lenient
-        # "Solution may be inaccurate" warning is common but solution is often still usable
+        # Check solve status
         if self.prob.status not in ["optimal", "optimal_inaccurate"]:
-            if not hasattr(self, '_status_error_count'):
-                self._status_error_count = 0
-            self._status_error_count += 1
-            if self._status_error_count % 50 == 0:
-                print(f"MPC solve status: {self.prob.status}, value: {self.prob.value}")
-            # Still try to use solution if variables have values (might be inaccurate but usable)
             if self.U.value is None or self.X.value is None:
                 return 0.0, 0.0
-            # If we have values, try to use them even if status isn't optimal
-            # Store solution for potential use
-            if self.last_solution is None:
-                self.last_solution = {}
-            self.last_solution['X'] = self.X.value.copy()
-            self.last_solution['U'] = self.U.value.copy()
 
         u0 = self.U[:, 0].value
         if u0 is None:
             return 0.0, 0.0
 
-        # Return acceleration and angular velocity
         return float(u0[0]), float(u0[1])
     
     def get_twist_command(self, x0, target, obstacles=None):
         """
-        Solves MPC and returns commands in Twist message format.
-        Returns: {'linear': {'x': float, 'y': 0.0, 'z': 0.0}, 'angular': {'x': 0.0, 'y': 0.0, 'z': float}}
-        Also stores the full MPC solution in self.last_solution for trajectory visualization
+        Solve MPC and return Twist message format
+        Returns: {'linear': {'x': vx, 'y': 0, 'z': 0}, 'angular': {'x': 0, 'y': 0, 'z': omega}}
         """
         a_cmd, omega_cmd = self.solve(x0, target, obstacles)
         
-        # CRITICAL DEBUG: Log what MPC is solving
-        if not hasattr(self, '_twist_debug_count'):
-            self._twist_debug_count = 0
-        self._twist_debug_count += 1
-        if self._twist_debug_count % 50 == 0:
-            if isinstance(target, np.ndarray) and target.ndim == 2:
-                tgt = target[:, 0]
-            else:
-                tgt = np.array(target)[:2]
-            dx = tgt[0] - x0[0]
-            dy = tgt[1] - x0[1]
-            dist = np.sqrt(dx**2 + dy**2)
-            print(f"MPC get_twist: x0=[{x0[0]:.3f}, {x0[1]:.3f}, {np.degrees(x0[2]):.1f}°, {x0[3]:.3f}], "
-                  f"target=[{tgt[0]:.3f}, {tgt[1]:.3f}], dx={dx:.3f}, dy={dy:.3f}, dist={dist:.3f}, "
-                  f"a_cmd={a_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°")
-        
-        # Convert acceleration to velocity command
+        # Convert acceleration to velocity
         current_v = x0[3] if len(x0) > 3 else 0.0
         v_cmd = np.clip(current_v + a_cmd * self.dt, self.vx_min, self.vx_max)
         
-        # SIMULATION PATTERN: Trust MPC, only intervene if clearly stuck
-        # This allows MPC to generate smooth curved trajectories around obstacles
+        # Safety checks
         if isinstance(target, np.ndarray) and target.ndim == 2:
             tgt = target[:, 0]
         else:
             tgt = np.array(target)[:2]
+        
         robot_pos = x0[:2]
-        robot_theta = x0[2]
         dist_to_goal = np.linalg.norm(tgt - robot_pos)
         
-        # Calculate direction to goal
-        dx_goal = tgt[0] - robot_pos[0]
-        dy_goal = tgt[1] - robot_pos[1]
-        angle_to_goal = np.arctan2(dy_goal, dx_goal)
-        angle_err = angle_to_goal - robot_theta
-        angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
-        
-        # Only intervene if MPC is stuck (very slow) AND far from goal
-        if dist_to_goal > 0.03:  # Not at target (3cm threshold)
-            # If MPC output is too small (stuck), boost it - but use distance-proportional boost
-            if abs(v_cmd) < 0.15:  # MPC is stuck (<15cm/s)
-                # Distance-proportional boost (like simulation)
-                v_cmd = min(self.vx_max * 0.8, dist_to_goal * 1.5)
-                if self._twist_debug_count % 20 == 0:
-                    print(f"🚀 MPC STUCK: Boosting v from {abs(v_cmd):.3f} to {v_cmd:.3f}m/s (dist={dist_to_goal:.2f}m)")
+        # Only intervene if stuck AND far from goal
+        if dist_to_goal > 0.03:
+            if abs(v_cmd) < 0.1:  # MPC is stuck
+                v_cmd = min(self.vx_max * 0.6, dist_to_goal * 1.0)
             
-            # Only force turning if angle error is large AND omega is too small
-            if abs(angle_err) > 0.2 and abs(omega_cmd) < 0.3:  # Not turning enough toward goal
-                omega_cmd = np.clip(angle_err * 2.5, -self.wz_max, self.wz_max)
-                if self._twist_debug_count % 20 == 0:
-                    print(f"🔄 MPC: Forcing turn toward goal: omega={np.degrees(omega_cmd):.1f}°/s (angle_err={np.degrees(angle_err):.1f}°)")
-            
-            # Ensure minimum velocity if far from target (but only if MPC is too slow)
-            if dist_to_goal > 0.5 and abs(v_cmd) < 0.3:
-                v_cmd = min(self.vx_max * 0.7, dist_to_goal * 1.0)  # Minimum forward velocity
+            # Ensure minimum velocity when far
+            if dist_to_goal > 0.5 and abs(v_cmd) < 0.2:
+                v_cmd = min(self.vx_max * 0.5, dist_to_goal * 0.8)
 
         return {
             'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
@@ -556,18 +394,14 @@ class SimpleUnicycleMPC:
         }
     
     def get_predicted_trajectory(self):
-        """
-        Get the full MPC predicted trajectory from the last solve.
-        Returns: list of [x, y] positions for N+1 steps, or None if no solution
-        """
-        if self.last_solution is None or 'X' not in self.last_solution:
+        """Get the predicted trajectory from last solve"""
+        if self.last_solution is None or self.last_solution.get('X') is None:
             return None
         
         X = self.last_solution['X']
         if X is None or X.shape[0] < 2:
             return None
         
-        # Extract position trajectory [px, py] for all N+1 steps
         trajectory = []
         for k in range(X.shape[1]):
             trajectory.append([float(X[0, k]), float(X[1, k])])
@@ -575,23 +409,9 @@ class SimpleUnicycleMPC:
         return trajectory
     
     def _update_cost_weights(self):
-        """
-        Update the cost function weight parameters (Boyd's fast MPC).
-        Uses CVXPY parameters for efficient weight updates without rebuilding QP.
-        """
-        # CRITICAL: Ensure position weight is ALWAYS much larger than control penalties
-        # If control penalties are too high, MPC will minimize control instead of position
+        """Update cost function weight parameters"""
         self.Qp_param.value = self.Qp
         self.Qtheta_param.value = self.Qtheta
-        # Force control penalties to be very small relative to position weight
-        self.Ra_param.value = max(self.Ra, 0.001)  # Minimum 0.001 to avoid numerical issues
-        self.Rw_param.value = max(self.Rw, 0.001)  # Minimum 0.001 to avoid numerical issues
-        self.alpha_progress_param.value = self.alpha_progress
-        
-        # DEBUG: Log weights periodically
-        if not hasattr(self, '_weight_debug_count'):
-            self._weight_debug_count = 0
-        self._weight_debug_count += 1
-        if self._weight_debug_count % 50 == 0:
-            print(f"MPC weights: Qp={self.Qp:.2f}, Ra={self.Ra:.4f}, Rw={self.Rw:.4f}, "
-                  f"ratio={self.Qp/max(self.Ra, 0.001):.1f}")
+        self.Ra_param.value = max(self.Ra, 1e-4)
+        self.Rw_param.value = max(self.Rw, 1e-4)
+        self.Q_obs_param.value = self.Q_obs

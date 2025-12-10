@@ -21,3 +21,4 @@ echo "=== Checking MPC Node Map Subscription ==="
 ros2 node info /mpc_node | grep -A 5 "Subscribers:"
 
 
+
