@@ -31,7 +31,7 @@ class SimpleUnicycleMPC:
 
         # Weights
         self.Qp  = 100.0
-        self.Qtheta = 0.0
+        self.Qtheta = 5.0  # encourage heading alignment to goal
         self.Ra = 0.01
         self.Rw = 0.01
         self.Q_obs = 500.0  # obstacle hinge penalty
@@ -80,6 +80,8 @@ class SimpleUnicycleMPC:
 
         # Target trajectory (2xN+1)
         self.T = cp.Parameter((2, N+1))
+        # Desired heading along the horizon
+        self.theta_ref = cp.Parameter(N+1)
 
         cost = 0
         constraints = []
@@ -102,6 +104,7 @@ class SimpleUnicycleMPC:
 
             # Tracking cost
             cost += self.Qp * cp.sum_squares(self.X[0:2,k] - self.T[:,k])
+            cost += self.Qtheta * cp.square(self.X[2, k] - self.theta_ref[k])
 
             # Control effort cost
             cost += self.Ra * cp.square(a) + self.Rw * cp.square(w)
@@ -132,6 +135,7 @@ class SimpleUnicycleMPC:
 
         # Terminal cost
         cost += 10 * self.Qp * cp.sum_squares(self.X[0:2,N] - self.T[:,N])
+        cost += self.Qtheta * cp.square(self.X[2, N] - self.theta_ref[N])
 
         # Build problem
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
@@ -182,7 +186,7 @@ class SimpleUnicycleMPC:
     def adapt_weights_for_time_to_go(self, time_to_go):
         """Adapt MPC weights based on time-to-go"""
         if not self.use_time_to_go:
-            self.Qp = self.Qp_base
+            self.Qp = self.Qp_base  # encoura
             self.Qtheta = self.Qtheta_base
             self.Ra = self.Ra_base
             self.Rw = self.Rw_base
@@ -220,6 +224,15 @@ class SimpleUnicycleMPC:
         self.B.value = B
         self.c.value = c
         self.T.value = T
+        # Heading reference: point toward final target position
+        goal_dx = T[0, -1] - x0[0]
+        goal_dy = T[1, -1] - x0[1]
+        desired_theta = np.arctan2(goal_dy, goal_dx)
+        # Wrap desired heading to be close to current heading to avoid 2π flips
+        angle_err = np.arctan2(np.sin(desired_theta - x0[2]), np.cos(desired_theta - x0[2]))
+        desired_theta_wrapped = x0[2] + angle_err
+        theta_vec = np.full(self.N + 1, desired_theta_wrapped)
+        self.theta_ref.value = theta_vec
 
         # Obstacle parameters
         centers = np.zeros((self.max_obstacles,2))
@@ -292,6 +305,10 @@ class SimpleUnicycleMPC:
             # Ensure minimum velocity when far
             if dist_to_goal > 0.5 and abs(v_cmd) < 0.2:
                 v_cmd = min(self.vx_max * 0.5, dist_to_goal * 0.8)
+
+        # Slow down as we approach the goal to avoid overshoot/looping
+        if dist_to_goal < 0.4:
+            v_cmd = min(v_cmd, max(0.05, dist_to_goal * 0.8))
 
         return {
             'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},
