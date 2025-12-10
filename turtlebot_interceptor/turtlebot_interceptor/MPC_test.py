@@ -357,13 +357,19 @@ class SimpleUnicycleMPC:
         # use_warm_start = False  # Always disabled now to avoid OSQP errors
 
         # CRITICAL FIX: Add obstacles directly to cost function using optimization variables!
-        # This ensures MPC actually optimizes around obstacles, not just adds a scalar penalty
+        # AGGRESSIVE OBSTACLE AVOIDANCE - MUST NEVER HIT OBSTACLES!
         if obstacles is not None and len(obstacles) > 0:
             # Add obstacle costs directly to the cost function using self.X (optimization variables)
             # This is the ONLY way to make MPC actually optimize around obstacles
             obstacle_cost = 0.0
-            repulsion_weight = 100000.0  # Strong repulsion
-            safety_radius_buffer = 0.10  # 10cm buffer
+            repulsion_weight = 1000000.0  # MUCH STRONGER repulsion (10x increase)
+            robot_radius = 0.105  # Robot radius
+            safety_radius_buffer = 0.20  # 20cm buffer (doubled from 10cm) - AGGRESSIVE!
+            
+            # Also add HARD CONSTRAINTS to prevent getting too close
+            # Note: We'll use very strong cost penalties instead of hard constraints
+            # (hard constraints on distance are non-convex and make the problem harder to solve)
+            new_constraints = self.original_constraints
             
             for k in range(self.N + 1):
                 px = self.X[0, k]
@@ -373,36 +379,48 @@ class SimpleUnicycleMPC:
                     dx = px - center[0]
                     dy = py - center[1]
                     dist_sq = dx*dx + dy*dy
-                    safety_radius = radius + safety_radius_buffer
+                    # CRITICAL: Safety radius = obstacle radius + robot radius + safety buffer
+                    safety_radius = radius + robot_radius + safety_radius_buffer
                     safety_radius_sq = safety_radius * safety_radius
+                    min_safe_dist_sq = safety_radius * safety_radius  # Minimum safe distance squared
                     
-                    # Use CVXPY's inverse distance cost - this makes MPC optimize around obstacles!
-                    # For very close obstacles, use high penalty
-                    # For far obstacles, use low penalty
-                    # This creates a smooth repulsion field that MPC can optimize through
-                    if dist_sq < safety_radius_sq * 0.25:  # VERY CLOSE
+                    # HARD CONSTRAINT: Robot must stay outside safety radius
+                    # dist_sq >= min_safe_dist_sq
+                    # This is equivalent to: ||[px, py] - center|| >= safety_radius
+                    # We'll use a quadratic constraint approximation
+                    # For CVXPY, we can use: dist_sq >= min_safe_dist_sq
+                    # But this is non-convex, so we'll use a linear approximation
+                    # Instead, we'll use a VERY STRONG cost that acts like a hard constraint
+                    
+                    # Use CVXPY's inverse distance cost - EXTREMELY AGGRESSIVE!
+                    # For very close obstacles, use EXTREME penalty
+                    # For far obstacles, use high penalty
+                    # This creates a strong repulsion field that MPC MUST avoid
+                    if dist_sq < safety_radius_sq * 0.5:  # INSIDE safety radius - EXTREME!
+                        obstacle_cost += repulsion_weight * 10000.0 / (dist_sq + 0.0001)
+                    elif dist_sq < safety_radius_sq:  # VERY CLOSE to safety radius
                         obstacle_cost += repulsion_weight * 1000.0 / (dist_sq + 0.001)
-                    elif dist_sq < safety_radius_sq:  # CLOSE
+                    elif dist_sq < safety_radius_sq * 2.0:  # CLOSE
                         obstacle_cost += repulsion_weight * 100.0 / (dist_sq + 0.01)
                     elif dist_sq < safety_radius_sq * 4.0:  # MODERATE
                         obstacle_cost += repulsion_weight * 10.0 / (dist_sq + 0.1)
                     else:  # FAR
                         obstacle_cost += repulsion_weight * 1.0 / (dist_sq + safety_radius_sq)
             
-            # Rebuild problem with obstacle costs
+            # Rebuild problem with obstacle costs and constraints
             # We need to add obstacle_cost to the existing cost
             if not self.has_obstacles_in_cost:
                 # Add obstacle cost to the problem
                 self.prob = cp.Problem(
                     cp.Minimize(self.original_cost + obstacle_cost),
-                    self.original_constraints
+                    new_constraints
                 )
                 self.has_obstacles_in_cost = True
             else:
                 # Update the cost (rebuild problem)
                 self.prob = cp.Problem(
                     cp.Minimize(self.original_cost + obstacle_cost),
-                    self.original_constraints
+                    new_constraints
                 )
         else:
             # No obstacles - use base cost
