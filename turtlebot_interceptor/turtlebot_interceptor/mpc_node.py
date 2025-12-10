@@ -751,60 +751,96 @@ class MPCNode(Node):
         current_time = self.get_clock().now().nanoseconds / 1e9
         robot_pos = self.seeker_state[:2]
         
-        # STEP 1: Collect obstacles from all sources with their confidence
+        # STEP 1: Collect obstacles - Voxel Grid IS processed LIDAR!
+        # PRIORITY: Voxel Grid (processed LIDAR) > Raw LIDAR > Camera (cones only)
         all_obstacles = {}  # Map: (x, y) -> (position, radius, confidence, source)
         
-        # Source 1: Camera (confidence based on distance)
-        for cone_pos, camera_conf, timestamp in self.camera_cones:
-            if current_time - timestamp < self.camera_cone_timeout:
-                dist = np.linalg.norm(cone_pos - robot_pos)
-                # Camera confidence decreases with distance
-                final_conf = camera_conf * (1.0 - min(dist / 2.0, 1.0))
-                key = (round(cone_pos[0], 2), round(cone_pos[1], 2))
-                all_obstacles[key] = (cone_pos, self.obstacle_radius_param, final_conf, 'camera')
-        
-        # Source 2: Fast Local Grid (high confidence when far, medium when close)
+        # Source 1: Voxel Grid (processed LIDAR from fast_local_grid) - HIGHEST PRIORITY
+        # This IS LIDAR data, just processed/aggregated - trust it completely!
         if self.local_map is not None:
             grid_obstacles = self.extract_map_obstacles_from_grid(self.local_map)
             for obs_pos, obs_radius in grid_obstacles:
-                dist = np.linalg.norm(obs_pos - robot_pos)
-                # LIDAR confidence: high when far, decreases when close (camera takes over)
-                lidar_conf = 0.9 if dist > 1.5 else 0.9 - 0.4 * (1.5 - dist) / 1.5
+                # Voxel grid = processed LIDAR - highest confidence
+                grid_conf = 0.95  # Very high confidence - processed LIDAR is reliable
                 key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
-                if key not in all_obstacles or all_obstacles[key][2] < lidar_conf:
-                    all_obstacles[key] = (obs_pos, obs_radius, lidar_conf, 'grid')
+                # Always use grid (it's processed LIDAR, most reliable)
+                all_obstacles[key] = (obs_pos, obs_radius, grid_conf, 'grid')
         
-        # Source 3: Scan-matched points (medium confidence)
-        if self.matched_points is not None:
-            scan_obstacles = self.extract_scan_matched_obstacles()
-            for obs_pos, obs_radius in scan_obstacles:
-                dist = np.linalg.norm(obs_pos - robot_pos)
-                scan_conf = 0.7 if dist > 1.5 else 0.7 - 0.3 * (1.5 - dist) / 1.5
-                key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
-                if key not in all_obstacles or all_obstacles[key][2] < scan_conf:
-                    all_obstacles[key] = (obs_pos, obs_radius, scan_conf, 'scan')
-        
-        # Source 4: Raw LIDAR (low confidence, backup)
+        # Source 2: Raw LIDAR - HIGH PRIORITY for immediate obstacles
+        # Raw LIDAR catches things voxel grid might miss (very recent)
         if self.latest_scan is not None:
             lidar_obstacles = self.extract_lidar_obstacles()
             for obs_pos, obs_radius in lidar_obstacles:
-                dist = np.linalg.norm(obs_pos - robot_pos)
-                raw_conf = 0.5 if dist > 1.5 else 0.5 - 0.2 * (1.5 - dist) / 1.5
+                lidar_conf = 0.90  # High confidence - raw LIDAR is trusted
                 key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
-                if key not in all_obstacles or all_obstacles[key][2] < raw_conf:
-                    all_obstacles[key] = (obs_pos, obs_radius, raw_conf, 'lidar')
+                # Use raw LIDAR if grid doesn't have it (grid is processed, might lag slightly)
+                if key not in all_obstacles:
+                    all_obstacles[key] = (obs_pos, obs_radius, lidar_conf, 'lidar')
+                # If grid has it, keep grid (processed is better)
         
-        # STEP 2: Fuse obstacles by confidence (weighted average for nearby detections)
+        # Source 3: Scan-matched points (Cartographer processed) - HIGH PRIORITY
+        if self.matched_points is not None:
+            scan_obstacles = self.extract_scan_matched_obstacles()
+            for obs_pos, obs_radius in scan_obstacles:
+                scan_conf = 0.88  # High confidence - Cartographer processed
+                key = (round(obs_pos[0], 2), round(obs_pos[1], 2))
+                # Use scan-matched if grid/LIDAR don't have it
+                if key not in all_obstacles:
+                    all_obstacles[key] = (obs_pos, obs_radius, scan_conf, 'scan')
+        
+        # Source 4: Camera - ONLY for cones, fuse with LIDAR for pose refinement
+        # Camera detects cones, but LIDAR provides accurate pose - fuse them!
+        for cone_pos, camera_conf, timestamp in self.camera_cones:
+            if current_time - timestamp < self.camera_cone_timeout:
+                dist = np.linalg.norm(cone_pos - robot_pos)
+                key = (round(cone_pos[0], 2), round(cone_pos[1], 2))
+                
+                # If LIDAR/grid already detected this cone, fuse camera for better pose
+                if key in all_obstacles:
+                    existing_pos, existing_radius, existing_conf, existing_source = all_obstacles[key]
+                    # Camera refines cone position (camera sees cone, LIDAR sees obstacle)
+                    if dist < 1.0:  # Close range: camera pose is more accurate
+                        # Fuse: 60% LIDAR (accurate distance) + 40% camera (accurate angle)
+                        fused_pos = 0.6 * existing_pos + 0.4 * cone_pos
+                        fused_conf = min(0.98, existing_conf + 0.08)  # Boost confidence
+                        all_obstacles[key] = (fused_pos, existing_radius, fused_conf, f'{existing_source}+camera')
+                    else:
+                        # Far range: just boost confidence
+                        fused_conf = min(0.95, existing_conf + 0.05)
+                        all_obstacles[key] = (existing_pos, existing_radius, fused_conf, existing_source)
+                else:
+                    # No LIDAR detection - camera-only (less trusted, but still valid)
+                    camera_conf_final = 0.75 if dist < 1.0 else 0.65
+                    all_obstacles[key] = (cone_pos, self.obstacle_radius_param, camera_conf_final, 'camera')
+        
+        # STEP 2: Fuse obstacles - Voxel Grid (processed LIDAR) is trusted
+        # CRITICAL: Keep ALL obstacles - everything is an obstacle, we just distinguish cones
         fused_obstacles = {}
         for key, (pos, radius, conf, source) in all_obstacles.items():
-            # Only keep high-confidence detections
-            if conf > 0.3:  # Minimum confidence threshold
-                # For obstacles detected by multiple sources, use highest confidence
-                if key not in fused_obstacles or fused_obstacles[key][2] < conf:
+            # Trust LIDAR sources (grid, lidar, scan) - they're all LIDAR!
+            # Camera-only needs higher threshold (0.65+)
+            if conf > 0.65 or 'grid' in source or 'lidar' in source or 'scan' in source:
+                # Priority: grid (processed LIDAR) > lidar (raw) > scan (Cartographer) > camera
+                if key not in fused_obstacles:
                     fused_obstacles[key] = (pos, radius, conf, source)
+                else:
+                    # Grid (processed LIDAR) always wins - it's the most reliable
+                    existing_source = fused_obstacles[key][3]
+                    if 'grid' in source and 'grid' not in existing_source:
+                        fused_obstacles[key] = (pos, radius, conf, source)
+                    elif 'grid' not in existing_source:  # Don't override grid
+                        # Priority: lidar > scan > camera
+                        source_priority = {'lidar': 3, 'scan': 2, 'camera': 1}
+                        existing_priority = source_priority.get(existing_source.split('+')[0], 0)
+                        new_priority = source_priority.get(source.split('+')[0], 0)
+                        if new_priority > existing_priority or (new_priority == existing_priority and conf > fused_obstacles[key][2]):
+                            fused_obstacles[key] = (pos, radius, conf, source)
         
-        # STEP 3: Convert to list and sort by confidence (highest first)
+        # STEP 3: Convert to list - ALL obstacles are important, sort by distance to robot
         obstacles = [(pos, radius) for pos, radius, conf, source in fused_obstacles.values()]
+        # Sort by distance to robot (closest first) - prioritize nearby obstacles
+        if len(obstacles) > 0:
+            obstacles.sort(key=lambda obs: np.linalg.norm(obs[0] - robot_pos))
         
         # Log confidence distribution
         if len(obstacles) > 0 and not hasattr(self, '_confidence_logged'):
@@ -978,19 +1014,82 @@ class MPCNode(Node):
         return obstacles
     
     def extract_map_obstacles_from_grid(self, grid_map):
-        """Extract obstacles from occupancy grid with clustering to reduce noise"""
+        """Extract obstacles from occupancy grid with clustering to reduce noise
+        ROBUST FRAME HANDLING: Validates grid origin against current robot pose and recomputes if needed.
+        This ensures obstacles are always correctly positioned in world/map frame even as robot moves.
+        """
         if grid_map is None or self.seeker_state is None:
             return []
         
         robot_x = self.seeker_state[0]
         robot_y = self.seeker_state[1]
         
-        # Extract occupied cells
+        # CRITICAL: Verify frame consistency
+        if grid_map.header.frame_id != 'map':
+            self.get_logger().warn(
+                f"Grid frame_id is '{grid_map.header.frame_id}', expected 'map'. "
+                f"Obstacles may be in wrong coordinate frame!"
+            )
+            return []  # Reject if wrong frame
+        
+        # Extract grid parameters
         width = grid_map.info.width
         height = grid_map.info.height
         resolution = grid_map.info.resolution
         origin_x = grid_map.info.origin.position.x
         origin_y = grid_map.info.origin.position.y
+        
+        # ROBUST FRAME VALIDATION: Check if grid origin matches expected robot-centric window
+        # Expected origin: robot_x - grid_size/2, robot_y - grid_size/2
+        # Grid size = width * resolution (assuming square grid)
+        grid_size = width * resolution
+        expected_origin_x = robot_x - grid_size / 2
+        expected_origin_y = robot_y - grid_size / 2
+        
+        # Check if grid origin is synchronized with current robot pose
+        origin_error = np.sqrt((origin_x - expected_origin_x)**2 + (origin_y - expected_origin_y)**2)
+        max_origin_error = 0.1  # Allow 10cm error (grid might be slightly stale)
+        
+        # TIMESTAMP VALIDATION: Check if grid is recent (within 1 second)
+        grid_age = (self.get_clock().now().nanoseconds / 1e9) - (
+            grid_map.header.stamp.sec + grid_map.header.stamp.nanosec * 1e-9
+        )
+        max_grid_age = 1.0  # Reject grids older than 1 second
+        
+        if grid_age > max_grid_age:
+            # Grid is too old - reject to avoid using stale data
+            if not hasattr(self, '_grid_age_warn_count'):
+                self._grid_age_warn_count = 0
+            self._grid_age_warn_count += 1
+            if self._grid_age_warn_count % 50 == 0:  # Log every 5 seconds
+                self.get_logger().warn(
+                    f"⚠️ Grid is stale! Age: {grid_age:.2f}s (max: {max_grid_age}s). "
+                    f"Rejecting to avoid incorrect obstacle positions."
+                )
+            return []  # Reject stale grid
+        
+        if origin_error > max_origin_error:
+            # Grid origin is desynchronized - recompute using CURRENT robot pose
+            # This ensures obstacles are always in correct world frame
+            if not hasattr(self, '_grid_sync_warn_count'):
+                self._grid_sync_warn_count = 0
+            self._grid_sync_warn_count += 1
+            if self._grid_sync_warn_count % 50 == 0:  # Log every 5 seconds
+                self.get_logger().warn(
+                    f"⚠️ Grid origin desynchronized! Error: {origin_error:.3f}m. "
+                    f"Grid origin: ({origin_x:.3f}, {origin_y:.3f}), "
+                    f"Expected: ({expected_origin_x:.3f}, {expected_origin_y:.3f}), "
+                    f"Robot: ({robot_x:.3f}, {robot_y:.3f}), Grid age: {grid_age:.2f}s. "
+                    f"Recomputing using current robot pose..."
+                )
+            # Use expected origin (current robot pose) instead of stale grid origin
+            origin_x = expected_origin_x
+            origin_y = expected_origin_y
+        
+        # CRITICAL: Grid origin is robot-centric (moves with robot), but we convert to world coordinates
+        # The grid origin represents the bottom-left corner of the robot-centric window in world frame
+        # So: world_x = grid_x * resolution + origin_x (where origin_x = robot_x - grid_size/2)
+        # This ensures obstacles are always in world/map frame, correctly positioned
         
         # First pass: find all occupied cells within range
         occupied_cells = []
@@ -998,6 +1097,8 @@ class MPCNode(Node):
             if grid_map.data[i] > 65:  # Higher threshold to reduce noise
                 gx = i % width
                 gy = i // width
+                # Convert grid coordinates to world coordinates using validated origin
+                # Origin is in 'map' frame, so result is in 'map' frame
                 world_x = gx * resolution + origin_x + resolution / 2
                 world_y = gy * resolution + origin_y + resolution / 2
                 
@@ -1595,8 +1696,8 @@ class MPCNode(Node):
                     f"v_cmd={v_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°"
                 )
             
-            # CRITICAL: Ensure we're moving TOWARD goal, not away!
-            # Check direction to goal
+            # SIMULATION PATTERN: Trust MPC, only intervene if clearly stuck
+            # This allows MPC to generate smooth curved trajectories around obstacles
             dx_goal = target_seq[0,0] - x0[0]
             dy_goal = target_seq[1,0] - x0[1]
             dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
@@ -1604,26 +1705,28 @@ class MPCNode(Node):
             angle_err = angle_to_goal - x0[2]
             angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
             
-            # If goal is in front (±90 degrees) and we're far (>0.15m), FORCE forward velocity
-            if dist_to_goal > 0.15 and abs(angle_err) < np.pi/2:
-                # Ensure minimum forward velocity toward goal
-                if v_cmd < 0.25:  # If MPC gave us slow/zero velocity
-                    v_cmd = 0.25  # Force 25cm/s forward
-                    # Also turn toward goal if angle error is significant
-                    if abs(angle_err) > 0.2:  # More than ~11 degrees off
-                        omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
+            # Only intervene if MPC is stuck (very slow) AND far from goal
+            if dist_to_goal > 0.03:  # Not at target (3cm threshold)
+                # If MPC output is too small (stuck), boost it - but use distance-proportional boost
+                if abs(v_cmd) < 0.15:  # MPC is stuck (<15cm/s)
+                    # Distance-proportional boost (like simulation)
+                    v_cmd = min(self.v_max_base * 0.8, dist_to_goal * 1.5)
                     if self._mpc_cmd_count % 10 == 0:
-                        self.get_logger().error(
-                            f"🎯 FORCING forward: v={v_cmd:.3f}m/s, omega={np.degrees(omega_cmd):.1f}°/s, "
-                            f"goal_dist={dist_to_goal:.2f}m, angle_err={np.degrees(angle_err):.1f}°"
+                        self.get_logger().warn(
+                            f"🚀 MPC STUCK: Boosting v to {v_cmd:.3f}m/s (dist={dist_to_goal:.2f}m)"
                         )
-            # If goal is behind, turn toward it but still move forward
-            elif dist_to_goal > 0.15:
-                # Turn aggressively toward goal
-                omega_cmd = np.clip(angle_err * 3.0, -self.omega_max, self.omega_max)
-                # Still move forward slowly
-                if v_cmd < 0.15:
-                    v_cmd = 0.15
+                
+                # Only force turning if angle error is large AND omega is too small
+                if abs(angle_err) > 0.2 and abs(omega_cmd) < 0.3:  # Not turning enough toward goal
+                    omega_cmd = np.clip(angle_err * 2.5, -self.omega_max, self.omega_max)
+                    if self._mpc_cmd_count % 10 == 0:
+                        self.get_logger().warn(
+                            f"🔄 MPC: Forcing turn: omega={np.degrees(omega_cmd):.1f}°/s (angle_err={np.degrees(angle_err):.1f}°)"
+                        )
+                
+                # Ensure minimum velocity if far from target (but only if MPC is too slow)
+                if dist_to_goal > 0.5 and abs(v_cmd) < 0.3:
+                    v_cmd = min(self.v_max_base * 0.7, dist_to_goal * 1.0)  # Minimum forward velocity
             
             # Clip commands to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)

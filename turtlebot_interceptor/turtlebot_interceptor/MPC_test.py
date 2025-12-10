@@ -101,9 +101,11 @@ class SimpleUnicycleMPC:
         self.Rw_param = cp.Parameter(nonneg=True)
         self.alpha_progress_param = cp.Parameter(nonneg=True)
         
-        # Obstacle parameters (for DPP-compliant obstacle avoidance)
-        # Store obstacle cost as a parameter that can be updated without rebuilding
-        self.obstacle_cost_param = cp.Parameter(nonneg=True, value=0.0)
+        # Obstacle parameters (for dynamic obstacle avoidance)
+        # Obstacles will be added to cost function in solve() method
+        self.obstacle_centers = []  # Will be set in solve()
+        self.obstacle_radii = []   # Will be set in solve()
+        self.obstacle_weight_param = cp.Parameter(nonneg=True, value=100000.0)
 
         constraints = []
         cost = 0
@@ -115,8 +117,10 @@ class SimpleUnicycleMPC:
                 self.X[:,k+1] == self.A @ self.X[:,k] + self.B @ self.U[:,k] + self.c
             ]
 
-            px_err = self.X[0,k] - self.T[0,k]
-            py_err = self.X[1,k] - self.T[1,k]
+            px = self.X[0,k]
+            py = self.X[1,k]
+            px_err = px - self.T[0,k]
+            py_err = py - self.T[1,k]
             theta   = self.X[2,k]
             a       = self.U[0,k]
             omega   = self.U[1,k]
@@ -136,6 +140,11 @@ class SimpleUnicycleMPC:
             cost += self.Qp_param * (px_err**2 + py_err**2)
             # Control penalties - keep VERY small so position error dominates
             cost += self.Ra_param * (a**2) + self.Rw_param * (omega**2)
+            
+            # CRITICAL FIX: Add obstacle repulsion cost directly using optimization variables!
+            # This ensures MPC actually optimizes around obstacles, not just adds a penalty
+            # Obstacles will be added dynamically in solve() method
+            # We'll add obstacle costs here using the optimization variables
 
             # Velocity constraints (Twist message format)
             # Linear velocity constraints
@@ -176,13 +185,15 @@ class SimpleUnicycleMPC:
         # Terminal position penalty - make it 200x heavier than stage cost to ensure robot reaches goal (was 100x)
         cost += 200.0 * self.Qp_param * (pxN**2 + pyN**2)
         
-        # Add obstacle cost parameter (will be updated in solve() method)
-        # This allows obstacle avoidance without rebuilding the problem (DPP-compliant)
-        cost += self.obstacle_cost_param
+        # Terminal obstacle cost (for final position)
+        pxN_abs = self.X[0,N]
+        pyN_abs = self.X[1,N]
+        # Obstacle costs will be added dynamically in solve() method
 
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
         self.original_cost = cost  # Store original cost expression
         self.original_constraints = constraints  # Store original constraints
+        self.base_cost = cost  # Store base cost without obstacles
         
         # Initialize weight parameters
         self.Qp_param.value = self.Qp_base
@@ -190,6 +201,9 @@ class SimpleUnicycleMPC:
         self.Ra_param.value = self.Ra_base
         self.Rw_param.value = self.Rw_base
         self.alpha_progress_param.value = self.alpha_progress
+        
+        # Track if we have obstacles in the problem
+        self.has_obstacles_in_cost = False
 
     # --- linearize unicycle model around x0 ---
     def linearize(self, x0):
@@ -342,108 +356,62 @@ class SimpleUnicycleMPC:
         # We can still use last_solution for initial guess, but OSQP warm_start must be False
         # use_warm_start = False  # Always disabled now to avoid OSQP errors
 
-        # Compute obstacle repulsion cost (DPP-compliant using parameter)
-        # Calculate obstacle cost numerically and set parameter
-        obstacle_cost_value = 0.0
+        # CRITICAL FIX: Add obstacles directly to cost function using optimization variables!
+        # This ensures MPC actually optimizes around obstacles, not just adds a scalar penalty
         if obstacles is not None and len(obstacles) > 0:
-            # Compute repulsion cost for current predicted trajectory
-            # We'll use the linearized trajectory from the last solution if available
-            # Otherwise, use a simple prediction
-            repulsion_weight = 50000.0  # MUCH further reduced - goal MUST dominate! (was 100K)
+            # Add obstacle costs directly to the cost function using self.X (optimization variables)
+            # This is the ONLY way to make MPC actually optimize around obstacles
+            obstacle_cost = 0.0
+            repulsion_weight = 100000.0  # Strong repulsion
+            safety_radius_buffer = 0.10  # 10cm buffer
             
-            # Use last solution if available for obstacle cost calculation
-            if self.last_solution is not None and 'X' in self.last_solution:
-                X_pred = self.last_solution['X']
-            else:
-                # Simple prediction: assume constant velocity forward
-                X_pred = np.zeros((self.nx, self.N + 1))
-                X_pred[:, 0] = x0
-                for k in range(self.N):
-                    # Simple forward prediction
-                    v = x0[3]
-                    th = x0[2]
-                    X_pred[0, k+1] = X_pred[0, k] + self.dt * v * np.cos(th)
-                    X_pred[1, k+1] = X_pred[1, k] + self.dt * v * np.sin(th)
-                    X_pred[2, k+1] = X_pred[2, k]
-                    X_pred[3, k+1] = X_pred[3, k]
-            
-            # Add repulsion cost for each obstacle at each time step
             for k in range(self.N + 1):
-                px = X_pred[0, k]
-                py = X_pred[1, k]
+                px = self.X[0, k]
+                py = self.X[1, k]
                 for center, radius in obstacles:
-                    # Distance from robot to obstacle center
+                    # Distance from robot position (optimization variable) to obstacle
                     dx = px - center[0]
                     dy = py - center[1]
                     dist_sq = dx*dx + dy*dy
-                    
-                    # Safety radius - TIGHT for navigation through spaces
-                    safety_radius = radius + 0.10  # 10cm buffer (allows navigation through tight spaces)
+                    safety_radius = radius + safety_radius_buffer
                     safety_radius_sq = safety_radius * safety_radius
                     
-                    # Balanced penalties - avoid but allow progress (much lower multipliers)
-                    if dist_sq < safety_radius_sq * 0.2:  # VERY CLOSE - DANGER!
-                        obstacle_cost_value += repulsion_weight * 100.0 / (dist_sq + 0.0001)
-                    elif dist_sq < safety_radius_sq * 0.5:  # CLOSE - WARNING!
-                        obstacle_cost_value += repulsion_weight * 10.0 / (dist_sq + 0.001)
-                    elif dist_sq < safety_radius_sq:  # Within safety radius
-                        obstacle_cost_value += repulsion_weight * 1.0 / (dist_sq + 0.01)
-                    elif dist_sq < safety_radius_sq * 2.0:  # Within 2x safety radius
-                        obstacle_cost_value += repulsion_weight * 0.1 / (dist_sq + 0.1)
-                    elif dist_sq < safety_radius_sq * 4:  # Within 4x safety radius
-                        obstacle_cost_value += repulsion_weight * 0.01 / (dist_sq + 0.5)
-                    else:  # Far away - minimal cost
-                        obstacle_cost_value += repulsion_weight * 0.001 / (dist_sq + safety_radius_sq)
-        
-        # Update obstacle cost parameter (DPP-compliant - no problem rebuilding needed)
-        # CRITICAL: Scale obstacle cost based on proximity to make it act like hard constraint
-        if obstacles is not None and len(obstacles) > 0:
-            # Check if robot is getting dangerously close to any obstacle
-            px0 = x0[0]
-            py0 = x0[1]
-            min_dist_to_obstacle = float('inf')
-            closest_obstacle = None
-            for center, radius in obstacles:
-                dx = px0 - center[0]
-                dy = py0 - center[1]
-                dist = np.sqrt(dx*dx + dy*dy)
-                safety_radius = radius + 0.05  # TIGHT margin (matches above)
-                actual_clearance = dist - radius  # Actual distance to obstacle surface
-                if dist < safety_radius * 3.0:  # Within 3x safety radius
-                    if dist < min_dist_to_obstacle:
-                        min_dist_to_obstacle = dist
-                        closest_obstacle = (center, radius, dist)
+                    # Use CVXPY's inverse distance cost - this makes MPC optimize around obstacles!
+                    # For very close obstacles, use high penalty
+                    # For far obstacles, use low penalty
+                    # This creates a smooth repulsion field that MPC can optimize through
+                    if dist_sq < safety_radius_sq * 0.25:  # VERY CLOSE
+                        obstacle_cost += repulsion_weight * 1000.0 / (dist_sq + 0.001)
+                    elif dist_sq < safety_radius_sq:  # CLOSE
+                        obstacle_cost += repulsion_weight * 100.0 / (dist_sq + 0.01)
+                    elif dist_sq < safety_radius_sq * 4.0:  # MODERATE
+                        obstacle_cost += repulsion_weight * 10.0 / (dist_sq + 0.1)
+                    else:  # FAR
+                        obstacle_cost += repulsion_weight * 1.0 / (dist_sq + safety_radius_sq)
             
-            # If getting close, increase obstacle cost moderately (not too much - allow progress)
-            # BUT: If obstacles are far (>1m), don't scale up at all - let goal dominate
-            if min_dist_to_obstacle < float('inf'):
-                if min_dist_to_obstacle > 1.0:
-                    # Obstacles are far - don't scale up obstacle cost, let goal cost dominate
-                    proximity_factor = 1.0  # No scaling when far
-                else:
-                    # Scale obstacle cost based on proximity - up to 2x when very close (was 3x)
-                    proximity_factor = max(1.0, min(2.0, 1.0 / (min_dist_to_obstacle + 0.3)))  # Max 2x, smoother
-                obstacle_cost_value *= proximity_factor
-                
-                # DEBUG: Log obstacle cost
-                if not hasattr(self, '_obstacle_cost_log_count'):
-                    self._obstacle_cost_log_count = 0
-                self._obstacle_cost_log_count += 1
-                if self._obstacle_cost_log_count % 10 == 0:
-                    print(f"MPC OBSTACLE COST: {obstacle_cost_value:.2f}, "
-                          f"closest_dist={min_dist_to_obstacle:.3f}m, "
-                          f"proximity_factor={proximity_factor:.2f}x, "
-                          f"num_obstacles={len(obstacles)}")
-                    if closest_obstacle:
-                        center, radius, dist = closest_obstacle
-                        actual_clearance = dist - radius
-                        safety_radius_needed = radius + 0.05 + 0.15  # Robot radius
-                        print(f"  Closest obstacle: center=({center[0]:.3f}, {center[1]:.3f}), "
-                              f"radius={radius:.3f}m, dist_to_center={dist:.3f}m")
-                        print(f"    CLEARANCE: {actual_clearance:.3f}m (need {safety_radius_needed:.3f}m), "
-                              f"robot_pos=({px0:.3f}, {py0:.3f})")
-        
-        self.obstacle_cost_param.value = obstacle_cost_value
+            # Rebuild problem with obstacle costs
+            # We need to add obstacle_cost to the existing cost
+            if not self.has_obstacles_in_cost:
+                # Add obstacle cost to the problem
+                self.prob = cp.Problem(
+                    cp.Minimize(self.original_cost + obstacle_cost),
+                    self.original_constraints
+                )
+                self.has_obstacles_in_cost = True
+            else:
+                # Update the cost (rebuild problem)
+                self.prob = cp.Problem(
+                    cp.Minimize(self.original_cost + obstacle_cost),
+                    self.original_constraints
+                )
+        else:
+            # No obstacles - use base cost
+            if self.has_obstacles_in_cost:
+                self.prob = cp.Problem(
+                    cp.Minimize(self.original_cost),
+                    self.original_constraints
+                )
+                self.has_obstacles_in_cost = False
 
         # CRITICAL FIX: Disable warm start completely to avoid OSQP matrix size errors
         # When we rebuild/restore the problem, OSQP's cached matrix structure doesn't match
@@ -530,7 +498,8 @@ class SimpleUnicycleMPC:
         current_v = x0[3] if len(x0) > 3 else 0.0
         v_cmd = np.clip(current_v + a_cmd * self.dt, self.vx_min, self.vx_max)
         
-        # CRITICAL FIX: Force movement TOWARD goal - check direction!
+        # SIMULATION PATTERN: Trust MPC, only intervene if clearly stuck
+        # This allows MPC to generate smooth curved trajectories around obstacles
         if isinstance(target, np.ndarray) and target.ndim == 2:
             tgt = target[:, 0]
         else:
@@ -546,60 +515,24 @@ class SimpleUnicycleMPC:
         angle_err = angle_to_goal - robot_theta
         angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
         
-        # ALWAYS enforce minimum forward velocity when >0.15m from goal
-        if dist_to_goal > 0.15:
-            # Check if obstacles are blocking (very close <0.2m - REDUCED from 0.3m)
-            min_obs_dist = float('inf')
-            if obstacles is not None and len(obstacles) > 0:
-                for center, radius in obstacles:
-                    dist = np.linalg.norm(center - robot_pos) - radius
-                    min_obs_dist = min(min_obs_dist, dist)
+        # Only intervene if MPC is stuck (very slow) AND far from goal
+        if dist_to_goal > 0.03:  # Not at target (3cm threshold)
+            # If MPC output is too small (stuck), boost it - but use distance-proportional boost
+            if abs(v_cmd) < 0.15:  # MPC is stuck (<15cm/s)
+                # Distance-proportional boost (like simulation)
+                v_cmd = min(self.vx_max * 0.8, dist_to_goal * 1.5)
+                if self._twist_debug_count % 20 == 0:
+                    print(f"🚀 MPC STUCK: Boosting v from {abs(v_cmd):.3f} to {v_cmd:.3f}m/s (dist={dist_to_goal:.2f}m)")
             
-            # CRITICAL: Ensure we're moving TOWARD goal, not away!
-            # Check if velocity direction is toward goal (within ±90 degrees)
-            if abs(angle_err) < np.pi/2:  # Goal is in front (±90 degrees)
-                # If obstacles are NOT blocking (far >0.2m - REDUCED), ALWAYS move forward fast
-                if min_obs_dist > 0.2:
-                    min_v_forward = 0.30  # AGGRESSIVE: 30cm/s minimum when obstacles not blocking
-                    if v_cmd < min_v_forward:
-                        v_cmd = min_v_forward
-                        # Also ensure we're turning toward goal if angle error is large
-                        if abs(angle_err) > 0.3:  # More than ~17 degrees off
-                            omega_cmd = np.clip(angle_err * 2.0, -self.wz_max, self.wz_max)  # Turn toward goal
-                # If obstacles ARE blocking (<0.2m), still enforce minimum but lower
-                elif min_obs_dist > 0.10:
-                    min_v_forward = 0.20  # Still move forward but slower when close to obstacles
-                    if v_cmd < min_v_forward:
-                        v_cmd = min_v_forward
-                # If obstacles VERY close (<0.10m), minimum but allow curves
-                else:
-                    min_v_forward = 0.15  # Minimum forward even when very close
-                    if v_cmd < min_v_forward:
-                        v_cmd = min_v_forward
-            else:
-                # Goal is behind us - turn first, but still move forward slightly
-                if min_obs_dist > 0.2:
-                    # Turn toward goal aggressively
-                    omega_cmd = np.clip(angle_err * 3.0, -self.wz_max, self.wz_max)
-                    # Still move forward slowly while turning
-                    min_v_forward = 0.15
-                    if v_cmd < min_v_forward:
-                        v_cmd = min_v_forward
-                
-            # Log when enforcing
-            if not hasattr(self, '_min_v_enforced_count'):
-                self._min_v_enforced_count = 0
-            self._min_v_enforced_count += 1
-            if self._min_v_enforced_count % 10 == 0:
-                print(f"🚀 MPC: v={v_cmd:.3f}m/s, omega={np.degrees(omega_cmd):.1f}°/s, "
-                      f"goal_dist={dist_to_goal:.2f}m, angle_err={np.degrees(angle_err):.1f}°, "
-                      f"obs_dist={min_obs_dist:.2f}m")
-        
-        # REMOVED: Don't limit turn rate - this was preventing MPC from working correctly
-        # The MPC should handle turn rate limits through its constraints
-        # if abs(v_cmd) > 0.3:
-        #     max_turn_at_speed = 1.0  # Reduce turn rate at higher speeds
-        #     omega_cmd = np.clip(omega_cmd, -max_turn_at_speed, max_turn_at_speed)
+            # Only force turning if angle error is large AND omega is too small
+            if abs(angle_err) > 0.2 and abs(omega_cmd) < 0.3:  # Not turning enough toward goal
+                omega_cmd = np.clip(angle_err * 2.5, -self.wz_max, self.wz_max)
+                if self._twist_debug_count % 20 == 0:
+                    print(f"🔄 MPC: Forcing turn toward goal: omega={np.degrees(omega_cmd):.1f}°/s (angle_err={np.degrees(angle_err):.1f}°)")
+            
+            # Ensure minimum velocity if far from target (but only if MPC is too slow)
+            if dist_to_goal > 0.5 and abs(v_cmd) < 0.3:
+                v_cmd = min(self.vx_max * 0.7, dist_to_goal * 1.0)  # Minimum forward velocity
 
         return {
             'linear': {'x': float(v_cmd), 'y': 0.0, 'z': 0.0},

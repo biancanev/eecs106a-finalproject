@@ -281,21 +281,41 @@ class FastLocalGrid(Node):
                     self.grid[gx, gy] = log_odds
     
     def publish_map(self):
-        """Publish occupancy grid"""
+        """Publish occupancy grid
+        ROBUST FRAME HANDLING: Grid is published in 'map' frame with robot-centric window.
+        The origin moves with the robot and is ALWAYS synchronized with current robot pose.
+        This ensures subscribers can extract obstacles in correct world coordinates.
+        """
         msg = OccupancyGrid()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = 'map'  # All coordinates are in map frame
         
         # Map metadata
         msg.info.resolution = self.resolution
         msg.info.width = self.width
         msg.info.height = self.height
         
-        # Origin is bottom-left corner of grid
-        msg.info.origin.position.x = self.robot_x - self.grid_size / 2
-        msg.info.origin.position.y = self.robot_y - self.grid_size / 2
+        # ROBUST: Origin is bottom-left corner of robot-centric window in WORLD/MAP frame
+        # CRITICAL: This origin is ALWAYS computed from CURRENT robot pose
+        # This ensures grid origin is synchronized with robot position
+        # When extracting obstacles: world_x = grid_x * resolution + origin_x
+        # Subscribers can validate origin against their current robot pose
+        grid_size = self.width * self.resolution  # Actual grid size
+        msg.info.origin.position.x = self.robot_x - grid_size / 2
+        msg.info.origin.position.y = self.robot_y - grid_size / 2
         msg.info.origin.position.z = 0.0
         msg.info.origin.orientation.w = 1.0
+        
+        # DEBUG: Log origin periodically to verify synchronization
+        if not hasattr(self, '_origin_log_count'):
+            self._origin_log_count = 0
+        self._origin_log_count += 1
+        if self._origin_log_count % 100 == 0:  # Every 10 seconds at 10Hz
+            self.get_logger().info(
+                f"📐 Grid origin: ({msg.info.origin.position.x:.3f}, {msg.info.origin.position.y:.3f}), "
+                f"Robot: ({self.robot_x:.3f}, {self.robot_y:.3f}), "
+                f"Grid size: {grid_size:.3f}m"
+            )
         
         # Convert log-odds to occupancy probability [0, 100]
         occupancy = np.zeros((self.width, self.height), dtype=np.int8)
