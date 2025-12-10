@@ -208,17 +208,14 @@ class MPCNode(Node):
         # Initialize MPC
         self.mpc = SimpleUnicycleMPC(horizon=self.N, dt=self.dt)
 
-        # Startup delay: Wait 5 seconds for LIDAR, SLAM, and MCL to initialize
+        # Startup: 5 second test routine (forward/backward) then MPC starts
         self.startup_time = self.get_clock().now()
-        self.startup_delay = 65.0  # 5 seconds delay (reduced from 60s - was blocking robot)
 
         # Timer for MPC updates
-        # Start timer immediately, but check startup delay in callback
         self.timer = self.create_timer(self.dt, self.timer_callback)
 
         self.get_logger().info(
-            f'MPC node initialized (lab8 control patterns) - '
-            f'Waiting {self.startup_delay}s for LIDAR/SLAM/MCL initialization...'
+            f'🚀 MPC node initialized - Starting 5s motor test (forward/backward), then MPC control'
         )
 
     def map_callback(self, msg: OccupancyGrid):
@@ -1498,19 +1495,43 @@ class MPCNode(Node):
 
     def timer_callback(self):
         """Main MPC control loop (lab8 pattern - with fallback control)"""
-        # Check startup delay - wait 10 seconds for initialization
         elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
-        if elapsed < self.startup_delay:
-            # Log countdown every 2 seconds
-            if not hasattr(self, '_startup_log_count'):
-                self._startup_log_count = 0
-            self._startup_log_count += 1
-            if self._startup_log_count % 20 == 0:  # Every 2 seconds at 10Hz
-                remaining = self.startup_delay - elapsed
-                self.get_logger().info(
-                    f'MPC startup delay: {remaining:.1f}s remaining for LIDAR/SLAM/MCL initialization...'
-                )
-            return  # Don't run MPC until startup delay is over
+        
+        # STARTUP TEST: Move robot forward and backward to verify motors work
+        # Phase 1 (0-2s): Wait for sensors
+        # Phase 2 (2-3s): Move FORWARD
+        # Phase 3 (3-4s): Move BACKWARD  
+        # Phase 4 (4-5s): Stop
+        # Phase 5 (5s+): Normal MPC control
+        if elapsed < 5.0:
+            twist = Twist()
+            if elapsed < 2.0:
+                # Phase 1: Wait for sensors
+                if int(elapsed * 10) % 20 == 0:
+                    self.get_logger().info(f'⏳ Startup: Waiting for sensors... {2.0 - elapsed:.1f}s')
+                twist.linear.x = 0.0
+                twist.angular.z = 0.0
+            elif elapsed < 3.0:
+                # Phase 2: FORWARD TEST
+                if int(elapsed * 10) % 10 == 0:
+                    self.get_logger().info(f'🚀 Startup TEST: Moving FORWARD at 0.15 m/s')
+                twist.linear.x = 0.15
+                twist.angular.z = 0.0
+            elif elapsed < 4.0:
+                # Phase 3: BACKWARD TEST
+                if int(elapsed * 10) % 10 == 0:
+                    self.get_logger().info(f'🔙 Startup TEST: Moving BACKWARD at -0.15 m/s')
+                twist.linear.x = -0.15
+                twist.angular.z = 0.0
+            else:
+                # Phase 4: Stop
+                if int(elapsed * 10) % 10 == 0:
+                    self.get_logger().info(f'⏹️ Startup TEST: Stopped. Starting MPC in {5.0 - elapsed:.1f}s')
+                twist.linear.x = 0.0
+                twist.angular.z = 0.0
+            
+            self.cmd_pub.publish(twist)
+            return  # Don't run MPC during startup test
         
         # CRITICAL: Always publish cmd_vel, even if seeker_state is None
         # This ensures robot doesn't stop completely if pose is temporarily unavailable
@@ -1740,8 +1761,7 @@ class MPCNode(Node):
                     f"dist={dist:.3f}m, v_cmd={v_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°"
                 )
             
-            # SIMPLE PROPORTIONAL CONTROL FALLBACK - GUARANTEED TO WORK!
-            # If MPC fails or outputs garbage, this ensures the robot moves toward goal
+            # MPC OUTPUT VALIDATION - only boost if MPC is clearly stuck
             dx_goal = target_seq[0,0] - x0[0]
             dy_goal = target_seq[1,0] - x0[1]
             dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
@@ -1749,24 +1769,18 @@ class MPCNode(Node):
             angle_err = angle_to_goal - x0[2]
             angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
             
-            # CRITICAL: If robot is far from goal and not moving, USE SIMPLE CONTROL
-            if dist_to_goal > 0.1:  # More than 10cm from goal
-                # ALWAYS turn toward goal first
-                if abs(angle_err) > 0.3:  # More than ~17 degrees off
-                    # Turn in place toward goal
-                    omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
-                    v_cmd = 0.1  # Slow forward while turning
-                else:
-                    # Aligned - DRIVE FORWARD!
-                    v_cmd = min(self.v_max_base, dist_to_goal * 1.0)  # Distance proportional
-                    omega_cmd = np.clip(angle_err * 1.5, -self.omega_max, self.omega_max)  # Small corrections
-                
-                # Log what's happening
+            # Only intervene if MPC outputs near-zero when we should be moving
+            if dist_to_goal > 0.1 and abs(v_cmd) < 0.05:  # MPC stuck
+                # Boost velocity proportionally
+                v_cmd = min(self.v_max_base * 0.5, dist_to_goal * 0.5)
                 if self._mpc_cmd_count % 20 == 0:
-                    self.get_logger().info(
-                        f"🎯 CONTROL: dist={dist_to_goal:.2f}m, angle_err={np.degrees(angle_err):.1f}°, "
-                        f"v={v_cmd:.2f}m/s, omega={np.degrees(omega_cmd):.1f}°/s"
-                    )
+                    self.get_logger().warn(f"🚀 MPC boosted: v={v_cmd:.2f}m/s")
+            
+            # Only intervene on omega if angle is large and MPC not turning
+            if abs(angle_err) > 0.4 and abs(omega_cmd) < 0.2:
+                omega_cmd = np.clip(angle_err * 1.5, -self.omega_max, self.omega_max)
+                if self._mpc_cmd_count % 20 == 0:
+                    self.get_logger().warn(f"🔄 MPC omega boosted: omega={np.degrees(omega_cmd):.1f}°/s")
             
             # Clip commands to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
