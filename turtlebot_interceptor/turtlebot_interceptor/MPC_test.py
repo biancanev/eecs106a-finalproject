@@ -381,21 +381,14 @@ class SimpleUnicycleMPC:
                 py = self.X[1, k]
                 for center, radius in obstacles:
                     # Distance from robot position (optimization variable) to obstacle
+                    # CRITICAL: Use cp.square() for DCP compliance, not manual multiplication
                     dx = px - center[0]
                     dy = py - center[1]
-                    dist_sq = dx*dx + dy*dy
+                    dist_sq = cp.square(dx) + cp.square(dy)  # DCP-compliant squared distance
+                    
                     # CRITICAL: Safety radius = obstacle radius + robot radius + safety buffer
                     safety_radius = radius + robot_radius + safety_radius_buffer
                     safety_radius_sq = safety_radius * safety_radius
-                    min_safe_dist_sq = safety_radius * safety_radius  # Minimum safe distance squared
-                    
-                    # HARD CONSTRAINT: Robot must stay outside safety radius
-                    # dist_sq >= min_safe_dist_sq
-                    # This is equivalent to: ||[px, py] - center|| >= safety_radius
-                    # We'll use a quadratic constraint approximation
-                    # For CVXPY, we can use: dist_sq >= min_safe_dist_sq
-                    # But this is non-convex, so we'll use a linear approximation
-                    # Instead, we'll use a VERY STRONG cost that acts like a hard constraint
                     
                     # CONVEX OBSTACLE COST: Quadratic penalty for proper optimization
                     # Penalty = repulsion_weight * max(0, safety_radius_sq - dist_sq)^2
@@ -417,28 +410,20 @@ class SimpleUnicycleMPC:
                     obstacle_cost += penalty + extra_penalty
             
             # Rebuild problem with obstacle costs and constraints
-            # We need to add obstacle_cost to the existing cost
-            if not self.has_obstacles_in_cost:
-                # Add obstacle cost to the problem
-                self.prob = cp.Problem(
-                    cp.Minimize(self.original_cost + obstacle_cost),
-                    new_constraints
-                )
-                self.has_obstacles_in_cost = True
-            else:
-                # Update the cost (rebuild problem)
-                self.prob = cp.Problem(
-                    cp.Minimize(self.original_cost + obstacle_cost),
-                    new_constraints
-                )
+            # CRITICAL: Always rebuild to ensure DCP compliance
+            # The obstacle cost is added to the original cost
+            self.prob = cp.Problem(
+                cp.Minimize(self.original_cost + obstacle_cost),
+                new_constraints
+            )
+            self.has_obstacles_in_cost = True
         else:
             # No obstacles - use base cost
-            if self.has_obstacles_in_cost:
-                self.prob = cp.Problem(
-                    cp.Minimize(self.original_cost),
-                    self.original_constraints
-                )
-                self.has_obstacles_in_cost = False
+            self.prob = cp.Problem(
+                cp.Minimize(self.original_cost),
+                self.original_constraints
+            )
+            self.has_obstacles_in_cost = False
 
         # CRITICAL FIX: Disable warm start completely to avoid OSQP matrix size errors
         # When we rebuild/restore the problem, OSQP's cached matrix structure doesn't match
