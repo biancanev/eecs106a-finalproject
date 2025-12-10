@@ -200,8 +200,8 @@ class SimpleUnicycleMPC:
         self.Ra = self.Ra_base * (1.0 - 0.5 * aggression_factor)
         self.Rw = self.Rw_base * (1.0 - 0.5 * aggression_factor)
         
-        # FIXED: Reduce obstacle weight when very close to goal (allow tighter navigation)
-        self.Q_obs = self.Q_obs_base * (1.0 + 0.5 * (1.0 - aggression_factor))
+        # Maintain strong obstacle avoidance always
+        self.Q_obs = self.Q_obs_base
     
     # --------------------------------------------------------------------------
     # Solve MPC
