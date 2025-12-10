@@ -59,7 +59,7 @@ class MPCNode(Node):
         self.declare_parameter('goal_x', 1.5)
         self.declare_parameter('goal_y', 1.5)
         self.declare_parameter('max_obstacles', 100)  # Max number of obstacles to track
-        self.declare_parameter('obstacle_radius', 0.2)  # Default obstacle radius (meters)
+        self.declare_parameter('obstacle_radius', 0.25)  # Default obstacle radius (meters) - INCREASED for safety
         self.goal_x = self.get_parameter('goal_x').get_parameter_value().double_value
         self.goal_y = self.get_parameter('goal_y').get_parameter_value().double_value
         self.max_obstacles = self.get_parameter('max_obstacles').get_parameter_value().integer_value
@@ -890,12 +890,15 @@ class MPCNode(Node):
                 ux = dx / dist
                 uy = dy / dist
 
-                corrected_x = px + ux * obstacle_radius
-                corrected_y = py + uy * obstacle_radius
+                # AGGRESSIVE: Add safety inflation to scan-matched obstacles
+                safety_inflation = 0.15  # 15cm additional safety margin
+                corrected_x = px + ux * (obstacle_radius + safety_inflation)
+                corrected_y = py + uy * (obstacle_radius + safety_inflation)
                 
                 # Only within 2m
                 if 0.1 < dist < 2.0:
-                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
+                    inflated_radius = obstacle_radius + safety_inflation
+                    obstacles.append((np.array([corrected_x, corrected_y]), inflated_radius))
         except Exception as e:
             # Point cloud parsing can fail, fall back to LIDAR
             if not hasattr(self, '_pointcloud_error_logged'):
@@ -995,12 +998,15 @@ class MPCNode(Node):
             
             # Convert to world frame
             # CRITICAL: Add LIDAR frame offset to correct for mounting orientation
+            # AGGRESSIVE: Add safety inflation to LIDAR obstacles
+            safety_inflation = 0.15  # 15cm additional safety margin
             world_angle = robot_theta + ray_angle + self.lidar_angle_offset
-            obstacle_x = robot_x + (r + obstacle_radius) * np.cos(world_angle)
-            obstacle_y = robot_y + (r + obstacle_radius) * np.sin(world_angle)
+            obstacle_x = robot_x + (r + obstacle_radius + safety_inflation) * np.cos(world_angle)
+            obstacle_y = robot_y + (r + obstacle_radius + safety_inflation) * np.sin(world_angle)
             
             obstacle_pos = np.array([obstacle_x, obstacle_y])
-            obstacles.append((obstacle_pos, obstacle_radius))
+            inflated_radius = obstacle_radius + safety_inflation
+            obstacles.append((obstacle_pos, inflated_radius))
             
             # Add to persistent storage
             self.persistent_obstacles.append((obstacle_pos, obstacle_radius, current_time))
@@ -1146,13 +1152,18 @@ class MPCNode(Node):
                     ux = dx / dist
                     uy = dy / dist
                     
-                    # Push obstacle center AWAY from robot by radius (more conservative)
-                    corrected_x = center_x + ux * obstacle_radius
-                    corrected_y = center_y + uy * obstacle_radius
-                    obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
+                    # AGGRESSIVE: Push obstacle center AWAY from robot by radius + safety margin
+                    # This inflates obstacles to ensure we never get too close
+                    safety_inflation = 0.15  # 15cm additional safety margin
+                    corrected_x = center_x + ux * (obstacle_radius + safety_inflation)
+                    corrected_y = center_y + uy * (obstacle_radius + safety_inflation)
+                    # Use inflated radius for obstacle
+                    inflated_radius = obstacle_radius + safety_inflation
+                    obstacles.append((np.array([corrected_x, corrected_y]), inflated_radius))
                 else:
-                    # Too close or too far, use center as-is
-                    obstacles.append((np.array([center_x, center_y]), obstacle_radius))
+                    # Too close or too far, use center with inflated radius
+                    inflated_radius = obstacle_radius + 0.15  # Safety inflation
+                    obstacles.append((np.array([center_x, center_y]), inflated_radius))
 
         return obstacles
 
@@ -1665,16 +1676,41 @@ class MPCNode(Node):
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
             
-            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification - RELAXED
-            # Only check if we're about to actually collide (<2cm clearance)
+            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification - AGGRESSIVE!
+            # Check if trajectory is safe with LARGE safety margin
             is_safe, clearance = self.verify_full_trajectory_safety(x0, v_cmd, omega_cmd, obstacles)
-            if not is_safe and clearance < 0.02:  # Only if truly colliding (<2cm)
-                self.get_logger().warn(
-                    f"⚠️ Trajectory very close! Min clearance: {clearance:.3f}m. Reducing speed slightly."
-                )
-                # Just reduce speed slightly - don't stop or back up
-                v_cmd *= 0.6  # Reduce by 40% (was 30%)
-                # Don't reduce turn rate - allow curves
+            if not is_safe or clearance < 0.15:  # AGGRESSIVE: 15cm minimum clearance (was 2cm)
+                if clearance < 0.05:  # CRITICAL: Less than 5cm - EMERGENCY STOP!
+                    self.get_logger().error(
+                        f"🚨 EMERGENCY STOP! Trajectory unsafe! Min clearance: {clearance:.3f}m. "
+                        f"Stopping immediately!"
+                    )
+                    v_cmd = 0.0  # STOP!
+                    omega_cmd = 0.0  # STOP!
+                elif clearance < 0.10:  # WARNING: Less than 10cm - aggressive slowdown
+                    self.get_logger().warn(
+                        f"⚠️ Trajectory too close! Min clearance: {clearance:.3f}m. "
+                        f"Aggressively reducing speed."
+                    )
+                    v_cmd *= 0.3  # Reduce by 70% - AGGRESSIVE
+                    # Force turn away from obstacle
+                    if obstacles and len(obstacles) > 0:
+                        # Find closest obstacle
+                        robot_pos = np.array([x0[0], x0[1]])
+                        closest_obs = min(obstacles, key=lambda obs: np.linalg.norm(obs[0] - robot_pos))
+                        obs_center = closest_obs[0]
+                        # Direction away from obstacle
+                        away_vec = robot_pos - obs_center
+                        away_angle = np.arctan2(away_vec[1], away_vec[0])
+                        # Turn toward away direction
+                        angle_err = away_angle - x0[2]
+                        angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
+                        omega_cmd = np.clip(angle_err * 3.0, -self.omega_max, self.omega_max)
+                else:  # 10-15cm clearance - moderate slowdown
+                    self.get_logger().warn(
+                        f"⚠️ Trajectory close! Min clearance: {clearance:.3f}m. Reducing speed."
+                    )
+                    v_cmd *= 0.6  # Reduce by 40%
             
             # CRITICAL DEBUG: Log everything to find the bug
             if not hasattr(self, '_mpc_cmd_count'):
@@ -1767,13 +1803,16 @@ class MPCNode(Node):
             if len(self.trajectory_history) > self.max_history_length:
                 self.trajectory_history.pop(0)
         
-        # SAFETY FILTER: DISABLED - MPC handles obstacle avoidance through cost function
-        # Only check if we're about to hit something IMMEDIATELY (<5cm)
+        # SAFETY FILTER: AGGRESSIVE - Final safety check before publishing
+        # This is a last-resort check to prevent collisions
         if v_cmd > 0.1:  # Only check if moving forward
             if not self.is_command_safe(v_cmd, omega_cmd):
-                # Only reduce speed slightly - don't stop or back up
-                v_cmd *= 0.7  # Reduce speed by 30% (was 50%)
-                # Don't reduce turn rate - allow curves
+                # AGGRESSIVE: Stop or significantly reduce speed
+                self.get_logger().error(
+                    f"🚨 SAFETY FILTER: Command unsafe! Stopping to prevent collision."
+                )
+                v_cmd = 0.0  # STOP - safety first!
+                omega_cmd = 0.0  # STOP
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
@@ -1827,9 +1866,10 @@ class MPCNode(Node):
             # Extremely close - minimum speed (but still move!)
             return 0.5  # Was 0.3 - too slow, now 0.5 for progress
     
-    def verify_full_trajectory_safety(self, x0, v, omega, obstacles, horizon_steps=10):
+    def verify_full_trajectory_safety(self, x0, v, omega, obstacles, horizon_steps=15):
         """
         ALGORITHMIC IMPROVEMENT: Verify safety of ENTIRE predicted trajectory, not just first step.
+        AGGRESSIVE: Uses larger safety margin and longer horizon.
         Simulates robot motion forward and checks for collisions at each step.
         
         Returns: (is_safe, min_clearance_along_path)
@@ -1841,6 +1881,8 @@ class MPCNode(Node):
         dt = 0.1  # 100ms steps
         x, y, theta, v_curr = x0[0], x0[1], x0[2], x0[3]
         min_clearance = float('inf')
+        robot_radius = 0.105  # Robot radius
+        safety_margin = 0.15  # AGGRESSIVE: 15cm safety margin (was 2cm)
         
         for step in range(horizon_steps):
             # Simple kinematic model (same as MPC)
@@ -1853,11 +1895,12 @@ class MPCNode(Node):
             robot_pos = np.array([x, y])
             for obs_center, obs_radius in obstacles:
                 dist_to_center = np.linalg.norm(obs_center - robot_pos)
-                clearance = dist_to_center - obs_radius - 0.105  # Robot radius
+                # Clearance = distance to obstacle surface - robot radius - safety margin
+                clearance = dist_to_center - obs_radius - robot_radius - safety_margin
                 min_clearance = min(min_clearance, clearance)
                 
                 # If collision imminent, trajectory is unsafe
-                if clearance < 0.02:  # 2cm safety margin - only reject if truly colliding (was 5cm - too aggressive)
+                if clearance < 0.0:  # AGGRESSIVE: Any negative clearance = unsafe
                     return False, clearance
         
         return True, min_clearance
@@ -1883,7 +1926,7 @@ class MPCNode(Node):
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         
-        safety_dist = 0.12  # 12cm safety threshold - relaxed to allow progress (was 20cm - too aggressive)
+        safety_dist = 0.25  # 25cm safety threshold - AGGRESSIVE to prevent collisions (was 12cm)
         
         # Check direction we're moving
         move_direction = np.arctan2(new_y - y, new_x - x) - theta
