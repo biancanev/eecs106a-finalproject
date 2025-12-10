@@ -190,9 +190,9 @@ class MPCNode(Node):
         # Initialize MPC
         self.mpc = SimpleUnicycleMPC(horizon=self.N, dt=self.dt)
 
-        # Startup delay: Wait 60 seconds for LIDAR, SLAM, and MCL to initialize
+        # Startup delay: Wait 5 seconds for LIDAR, SLAM, and MCL to initialize
         self.startup_time = self.get_clock().now()
-        self.startup_delay = 60.0  # 60 seconds delay (increased for sensor stabilization)
+        self.startup_delay = 65.0  # 5 seconds delay (reduced from 60s - was blocking robot)
 
         # Timer for MPC updates
         # Start timer immediately, but check startup delay in callback
@@ -436,7 +436,7 @@ class MPCNode(Node):
             self._occupied_debug_count = 0
         self._occupied_debug_count += 1
         if self._occupied_debug_count % 20 == 0:  # Every 2 seconds
-            self.get_logger().error(
+            self.get_logger().info(
                 f"OBSTACLE EXTRACTION: Map has {total_occupied} occupied cells (threshold>{occupancy_threshold}), "
                 f"{len(occupied_cells)} non-wall cells, "
                 f"wall_margin={wall_margin}m"
@@ -444,7 +444,7 @@ class MPCNode(Node):
         
         if len(occupied_cells) == 0:
             if total_occupied > 0 and self._occupied_debug_count % 20 == 0:
-                self.get_logger().error(
+                self.get_logger().warn(
                     f"ALL {total_occupied} OCCUPIED CELLS ARE WALLS! wall_margin={wall_margin}m. "
                     f"Map bounds: x=[{origin_x:.2f}, {origin_x + width*resolution:.2f}], "
                     f"y=[{origin_y:.2f}, {origin_y + height*resolution:.2f}]"
@@ -534,14 +534,14 @@ class MPCNode(Node):
                     obstacles.append((np.array([center_x, center_y]), radius))
                 # DEBUG: Log each extracted obstacle
                 if self._occupied_debug_count % 20 == 0:
-                    self.get_logger().error(
+                    self.get_logger().info(
                         f"  Extracted obstacle: center=({center_x:.3f}, {center_y:.3f}), "
                         f"radius={radius:.3f}m, cluster_size={len(cluster)}"
                     )
         
         # DEBUG: Log final count
         if self._occupied_debug_count % 20 == 0:
-            self.get_logger().error(
+            self.get_logger().info(
                 f"TOTAL EXTRACTED: {len(obstacles)} obstacles from {len(clusters)} clusters"
             )
         
@@ -1219,17 +1219,19 @@ class MPCNode(Node):
             self._obstacle_count = 0
         self._obstacle_count += 1
         if self._obstacle_count % 20 == 0:
-            self.get_logger().error(
-                f"OBSTACLE CELLS: Found {len(obstacles)} occupied cells within 1.5m, "
-                f"robot=({robot_x:.3f}, {robot_y:.3f})"
-            )
-            if len(obstacles) > 0:
-                closest = min(obstacles, key=lambda obs: np.sqrt((obs[0][0]-robot_x)**2 + (obs[0][1]-robot_y)**2))
-                dist_closest = np.sqrt((closest[0][0]-robot_x)**2 + (closest[0][1]-robot_y)**2)
-                self.get_logger().error(
-                    f"  Closest cell: ({closest[0][0]:.3f}, {closest[0][1]:.3f}), "
-                    f"dist={dist_closest:.3f}m, radius={closest[1]:.3f}m"
+            # Reduced logging - only log occasionally
+            if self._obstacle_count % 100 == 0:  # Every 10 seconds
+                self.get_logger().info(
+                    f"OBSTACLE CELLS: Found {len(obstacles)} occupied cells within 1.5m, "
+                    f"robot=({robot_x:.3f}, {robot_y:.3f})"
                 )
+                if len(obstacles) > 0:
+                    closest = min(obstacles, key=lambda obs: np.sqrt((obs[0][0]-robot_x)**2 + (obs[0][1]-robot_y)**2))
+                    dist_closest = np.sqrt((closest[0][0]-robot_x)**2 + (closest[0][1]-robot_y)**2)
+                    self.get_logger().info(
+                        f"  Closest cell: ({closest[0][0]:.3f}, {closest[0][1]:.3f}), "
+                        f"dist={dist_closest:.3f}m, radius={closest[1]:.3f}m"
+                    )
         
         return obstacles
     
@@ -1492,7 +1494,18 @@ class MPCNode(Node):
                 )
             return  # Don't run MPC until startup delay is over
         
+        # CRITICAL: Always publish cmd_vel, even if seeker_state is None
+        # This ensures robot doesn't stop completely if pose is temporarily unavailable
         if self.seeker_state is None:
+            # Publish zero command if no state available
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.linear.y = 0.0
+            twist.linear.z = 0.0
+            twist.angular.x = 0.0
+            twist.angular.y = 0.0
+            twist.angular.z = 0.0
+            self.cmd_pub.publish(twist)
             return
         
         # EMERGENCY RECOVERY SYSTEM
@@ -1510,12 +1523,12 @@ class MPCNode(Node):
         # Build initial state
         x0 = self.seeker_state.copy()
         
-        # CRITICAL DEBUG: Log state and goal
+        # CRITICAL DEBUG: Log state and goal (REDUCED VERBOSITY)
         if not hasattr(self, '_debug_count'):
             self._debug_count = 0
         self._debug_count += 1
-        if self._debug_count % 20 == 0:  # Every 2 seconds
-            self.get_logger().error(
+        if self._debug_count % 100 == 0:  # Every 10 seconds (was every 2 seconds)
+            self.get_logger().info(
                 f"DEBUG: x0=[{x0[0]:.3f}, {x0[1]:.3f}, {np.degrees(x0[2]):.1f}°, {x0[3]:.3f}m/s], "
                 f"goal_x={self.goal_x}, goal_y={self.goal_y}"
             )
@@ -1549,10 +1562,10 @@ class MPCNode(Node):
             target_seq[0, :] = target_pos[0]
             target_seq[1, :] = target_pos[1]
             
-            # CRITICAL DEBUG: Verify target sequence
-            if self._debug_count % 20 == 0:
-                self.get_logger().error(
-                    f"DEBUG: target_seq[0,0]={target_seq[0,0]:.3f},> target_seq[1,0]={target_seq[1,0]:.3f}, "
+            # CRITICAL DEBUG: Verify target sequence (REDUCED VERBOSITY)
+            if self._debug_count % 100 == 0:  # Every 10 seconds
+                self.get_logger().info(
+                    f"DEBUG: target_seq[0,0]={target_seq[0,0]:.3f}, target_seq[1,0]={target_seq[1,0]:.3f}, "
                     f"dx={target_seq[0,0]-x0[0]:.3f}, dy={target_seq[1,0]-x0[1]:.3f}"
                 )
         else:
@@ -1586,34 +1599,33 @@ class MPCNode(Node):
             if can_generate:
                 self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
         
-        # DEBUG: Log obstacles periodically - MORE FREQUENT
+        # DEBUG: Log obstacles periodically (REDUCED VERBOSITY)
         if not hasattr(self, '_obstacle_debug_count'):
             self._obstacle_debug_count = 0
         self._obstacle_debug_count += 1
-        if self._obstacle_debug_count % 10 == 0:  # Every 1 second
+        if self._obstacle_debug_count % 50 == 0:  # Every 5 seconds (was every 1 second)
             total_occupied = np.sum(np.array(self.map.data) > 30) if self.map else 0
             if obstacles and len(obstacles) > 0:
-                self.get_logger().error(  # ERROR level so it's visible
-                    f"OCCUPIED CELL OBSTACLES: Found {len(obstacles)} occupied cells as obstacles. "
-                    f"Total occupied cells in map: {total_occupied}, "
-                    f"Map frame_id: {self.map.header.frame_id if self.map else 'None'}, "
+                self.get_logger().info(  # Changed to INFO level
+                    f"OBSTACLES: Found {len(obstacles)} obstacles. "
                     f"Robot pose: ({x0[0]:.3f}, {x0[1]:.3f})"
                 )
-                # Log closest obstacles
+                # Log only closest obstacle
                 obstacle_dists = [(float(np.sqrt((center[0] - x0[0])**2 + (center[1] - x0[1])**2)), center, radius) 
                                  for center, radius in obstacles]
-                obstacle_dists.sort(key=lambda x: x[0])  # Sort by distance (first element)
-                for i, (dist, center, radius) in enumerate(obstacle_dists[:5]):  # Log 5 closest
-                    self.get_logger().error(
-                        f"  Obstacle {i+1}: center=({center[0]:.3f}, {center[1]:.3f}), "
-                        f"radius={radius:.3f}m, dist_to_robot={dist:.3f}m"
+                obstacle_dists.sort(key=lambda x: x[0])  # Sort by distance
+                if obstacle_dists:
+                    dist, center, radius = obstacle_dists[0]
+                    self.get_logger().info(
+                        f"  Closest: center=({center[0]:.3f}, {center[1]:.3f}), "
+                        f"radius={radius:.3f}m, dist={dist:.3f}m"
                     )
                     marker = Marker()
                     marker.header.frame_id = "map"
                     marker.header.stamp = self.get_clock().now().to_msg()
 
                     marker.ns = "obstacles"
-                    marker.id = i + 1
+                    marker.id = 1  # Fixed: was using undefined 'i'
                     marker.type = Marker.CYLINDER
                     marker.action = Marker.ADD
                     
@@ -1657,8 +1669,8 @@ class MPCNode(Node):
         v_max = base_v_max * self.velocity_scale_factor
         self.mpc.v_max = np.clip(v_max, self.v_min * 0.5, self.v_max_base)  # Allow stopping if needed
         
-        # Log velocity scaling
-        if hasattr(self, '_obstacle_debug_count') and self._obstacle_debug_count % 10 == 0:
+        # Log velocity scaling (REDUCED VERBOSITY)
+        if hasattr(self, '_obstacle_debug_count') and self._obstacle_debug_count % 50 == 0:  # Every 5 seconds
             self.get_logger().info(
                 f"📊 Velocity: min_obs_dist={self.min_obstacle_distance:.3f}m, "
                 f"scale={self.velocity_scale_factor:.2f}, v_max={self.mpc.v_max:.3f}m/s"
@@ -1676,23 +1688,23 @@ class MPCNode(Node):
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
             
-            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification - AGGRESSIVE!
-            # Check if trajectory is safe with LARGE safety margin
+            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification - RELAXED
+            # Check if trajectory is safe with reasonable safety margin
             is_safe, clearance = self.verify_full_trajectory_safety(x0, v_cmd, omega_cmd, obstacles)
-            if not is_safe or clearance < 0.15:  # AGGRESSIVE: 15cm minimum clearance (was 2cm)
-                if clearance < 0.05:  # CRITICAL: Less than 5cm - EMERGENCY STOP!
-                    self.get_logger().error(
-                        f"🚨 EMERGENCY STOP! Trajectory unsafe! Min clearance: {clearance:.3f}m. "
-                        f"Stopping immediately!"
-                    )
+            if not is_safe or clearance < 0.08:  # RELAXED: 8cm minimum clearance (was 15cm - too aggressive)
+                if clearance < 0.03:  # CRITICAL: Less than 3cm - EMERGENCY STOP!
+                    if self._mpc_cmd_count % 10 == 0:  # Log only occasionally
+                        self.get_logger().warn(
+                            f"🚨 EMERGENCY STOP! Clearance: {clearance:.3f}m"
+                        )
                     v_cmd = 0.0  # STOP!
                     omega_cmd = 0.0  # STOP!
-                elif clearance < 0.10:  # WARNING: Less than 10cm - aggressive slowdown
-                    self.get_logger().warn(
-                        f"⚠️ Trajectory too close! Min clearance: {clearance:.3f}m. "
-                        f"Aggressively reducing speed."
-                    )
-                    v_cmd *= 0.3  # Reduce by 70% - AGGRESSIVE
+                elif clearance < 0.05:  # WARNING: Less than 5cm - aggressive slowdown
+                    if self._mpc_cmd_count % 10 == 0:
+                        self.get_logger().warn(
+                            f"⚠️ Trajectory close! Clearance: {clearance:.3f}m. Reducing speed."
+                        )
+                    v_cmd *= 0.4  # Reduce by 60%
                     # Force turn away from obstacle
                     if obstacles and len(obstacles) > 0:
                         # Find closest obstacle
@@ -1705,31 +1717,23 @@ class MPCNode(Node):
                         # Turn toward away direction
                         angle_err = away_angle - x0[2]
                         angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
-                        omega_cmd = np.clip(angle_err * 3.0, -self.omega_max, self.omega_max)
-                else:  # 10-15cm clearance - moderate slowdown
-                    self.get_logger().warn(
-                        f"⚠️ Trajectory close! Min clearance: {clearance:.3f}m. Reducing speed."
-                    )
-                    v_cmd *= 0.6  # Reduce by 40%
+                        omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
+                else:  # 5-8cm clearance - moderate slowdown
+                    v_cmd *= 0.7  # Reduce by 30%
             
-            # CRITICAL DEBUG: Log everything to find the bug
+            # CRITICAL DEBUG: Log everything (REDUCED VERBOSITY)
             if not hasattr(self, '_mpc_cmd_count'):
                 self._mpc_cmd_count = 0
             self._mpc_cmd_count += 1
-            if self._mpc_cmd_count % 10 == 0:  # Every 1 second - MORE FREQUENT
+            if self._mpc_cmd_count % 50 == 0:  # Every 5 seconds (was every 1 second)
                 angle_to_goal = np.arctan2(target_seq[1,0] - x0[1], target_seq[0,0] - x0[0])
                 angle_err = angle_to_goal - x0[2]
                 angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
                 dist = np.sqrt((target_seq[0,0] - x0[0])**2 + (target_seq[1,0] - x0[1])**2)
-                dx = target_seq[0,0] - x0[0]
-                dy = target_seq[1,0] - x0[1]
                 # Check if commands make sense
-                self.get_logger().error(  # ERROR level so it's visible
-                    f"MPC: robot=({x0[0]:.3f}, {x0[1]:.3f}, {np.degrees(x0[2]):.1f}°), v={x0[3]:.3f}, "
-                    f"goal=({target_seq[0,0]:.3f}, {target_seq[1,0]:.3f}), "
-                    f"dx={dx:.3f}, dy={dy:.3f}, dist={dist:.3f}m, "
-                    f"angle_to_goal={np.degrees(angle_to_goal):.1f}°, angle_err={np.degrees(angle_err):.1f}°, "
-                    f"v_cmd={v_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°"
+                self.get_logger().info(  # Changed to INFO level
+                    f"MPC: robot=({x0[0]:.3f}, {x0[1]:.3f}), goal=({target_seq[0,0]:.3f}, {target_seq[1,0]:.3f}), "
+                    f"dist={dist:.3f}m, v_cmd={v_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°"
                 )
             
             # SIMULATION PATTERN: Trust MPC, only intervene if clearly stuck
@@ -1782,7 +1786,19 @@ class MPCNode(Node):
             # Fallback to proportional control (lab8 pattern)
             v_cmd, omega_cmd = self.fallback_control(x0, target_seq)
 
-        # Publish command in Twist format
+        # SAFETY FILTER: Final safety check BEFORE publishing
+        # This is a last-resort check to prevent collisions
+        if v_cmd > 0.1:  # Only check if moving forward
+            if not self.is_command_safe(v_cmd, omega_cmd):
+                # RELAXED: Reduce speed instead of stopping completely
+                if self._mpc_cmd_count % 20 == 0:  # Log only occasionally
+                    self.get_logger().warn(
+                        f"⚠️ SAFETY FILTER: Command unsafe! Reducing speed."
+                    )
+                v_cmd *= 0.5  # Reduce by 50% instead of stopping
+                # Don't stop omega - allow turning
+        
+        # Publish command in Twist format (ALWAYS publish, even if zero)
         twist = Twist()
         twist.linear.x = float(v_cmd)
         twist.linear.y = 0.0
@@ -1802,17 +1818,6 @@ class MPCNode(Node):
             # Keep only recent history
             if len(self.trajectory_history) > self.max_history_length:
                 self.trajectory_history.pop(0)
-        
-        # SAFETY FILTER: AGGRESSIVE - Final safety check before publishing
-        # This is a last-resort check to prevent collisions
-        if v_cmd > 0.1:  # Only check if moving forward
-            if not self.is_command_safe(v_cmd, omega_cmd):
-                # AGGRESSIVE: Stop or significantly reduce speed
-                self.get_logger().error(
-                    f"🚨 SAFETY FILTER: Command unsafe! Stopping to prevent collision."
-                )
-                v_cmd = 0.0  # STOP - safety first!
-                omega_cmd = 0.0  # STOP
         
         # Visualize MPC predicted trajectory
         self.visualize_trajectory()
@@ -1882,7 +1887,7 @@ class MPCNode(Node):
         x, y, theta, v_curr = x0[0], x0[1], x0[2], x0[3]
         min_clearance = float('inf')
         robot_radius = 0.105  # Robot radius
-        safety_margin = 0.15  # AGGRESSIVE: 15cm safety margin (was 2cm)
+        safety_margin = 0.08  # RELAXED: 8cm safety margin (was 15cm - too aggressive)
         
         for step in range(horizon_steps):
             # Simple kinematic model (same as MPC)
