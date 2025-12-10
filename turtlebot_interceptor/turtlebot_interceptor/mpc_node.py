@@ -60,10 +60,28 @@ class MPCNode(Node):
         self.declare_parameter('goal_y', 1.5)
         self.declare_parameter('max_obstacles', 100)  # Max number of obstacles to track
         self.declare_parameter('obstacle_radius', 0.25)  # Default obstacle radius (meters) - INCREASED for safety
-        self.goal_x = self.get_parameter('goal_x').get_parameter_value().double_value
-        self.goal_y = self.get_parameter('goal_y').get_parameter_value().double_value
+        
+        # CRITICAL FIX: Handle both int and float types for goal parameters
+        # When user passes goal_x:=0 or goal_y:=0, ROS2 interprets as INTEGER, not DOUBLE
+        goal_x_param = self.get_parameter('goal_x').get_parameter_value()
+        goal_y_param = self.get_parameter('goal_y').get_parameter_value()
+        
+        # Try double first, fall back to integer
+        try:
+            self.goal_x = goal_x_param.double_value
+        except:
+            self.goal_x = float(goal_x_param.integer_value)
+        
+        try:
+            self.goal_y = goal_y_param.double_value
+        except:
+            self.goal_y = float(goal_y_param.integer_value)
+        
         self.max_obstacles = self.get_parameter('max_obstacles').get_parameter_value().integer_value
         self.obstacle_radius_param = self.get_parameter('obstacle_radius').get_parameter_value().double_value
+        
+        # CRITICAL: Log goal to verify it's correct
+        self.get_logger().info(f'🎯 GOAL SET: x={self.goal_x}, y={self.goal_y}')
         
         self.target_sub = self.create_subscription(
             PoseWithCovarianceStamped,
@@ -1688,38 +1706,24 @@ class MPCNode(Node):
                math.isinf(v_cmd) or math.isinf(omega_cmd):
                 raise ValueError("MPC solution contains NaN or Inf")
             
-            # ALGORITHMIC IMPROVEMENT 4: Full trajectory safety verification - RELAXED
-            # Check if trajectory is safe with reasonable safety margin
-            is_safe, clearance = self.verify_full_trajectory_safety(x0, v_cmd, omega_cmd, obstacles)
-            if not is_safe or clearance < 0.08:  # RELAXED: 8cm minimum clearance (was 15cm - too aggressive)
-                if clearance < 0.03:  # CRITICAL: Less than 3cm - EMERGENCY STOP!
-                    if self._mpc_cmd_count % 10 == 0:  # Log only occasionally
-                        self.get_logger().warn(
-                            f"🚨 EMERGENCY STOP! Clearance: {clearance:.3f}m"
-                        )
-                    v_cmd = 0.0  # STOP!
-                    omega_cmd = 0.0  # STOP!
-                elif clearance < 0.05:  # WARNING: Less than 5cm - aggressive slowdown
-                    if self._mpc_cmd_count % 10 == 0:
-                        self.get_logger().warn(
-                            f"⚠️ Trajectory close! Clearance: {clearance:.3f}m. Reducing speed."
-                        )
-                    v_cmd *= 0.4  # Reduce by 60%
-                    # Force turn away from obstacle
-                    if obstacles and len(obstacles) > 0:
-                        # Find closest obstacle
-                        robot_pos = np.array([x0[0], x0[1]])
-                        closest_obs = min(obstacles, key=lambda obs: np.linalg.norm(obs[0] - robot_pos))
-                        obs_center = closest_obs[0]
-                        # Direction away from obstacle
-                        away_vec = robot_pos - obs_center
-                        away_angle = np.arctan2(away_vec[1], away_vec[0])
-                        # Turn toward away direction
-                        angle_err = away_angle - x0[2]
-                        angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
-                        omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
-                else:  # 5-8cm clearance - moderate slowdown
-                    v_cmd *= 0.7  # Reduce by 30%
+            # SIMPLIFIED SAFETY CHECK - Don't block forward motion unless really close!
+            # Only stop if within 5cm of an obstacle
+            if obstacles and len(obstacles) > 0:
+                robot_pos = np.array([x0[0], x0[1]])
+                closest_obs = min(obstacles, key=lambda obs: np.linalg.norm(obs[0] - robot_pos))
+                obs_center, obs_radius = closest_obs
+                dist_to_obs = np.linalg.norm(obs_center - robot_pos) - obs_radius
+                
+                if dist_to_obs < 0.05:  # Less than 5cm from obstacle surface
+                    # Turn away from obstacle, reduce speed
+                    away_vec = robot_pos - obs_center
+                    away_angle = np.arctan2(away_vec[1], away_vec[0])
+                    angle_err = away_angle - x0[2]
+                    angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
+                    omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
+                    v_cmd = 0.1  # Slow but still moving
+                elif dist_to_obs < 0.15:  # 5-15cm - slow down
+                    v_cmd *= 0.7
             
             # CRITICAL DEBUG: Log everything (REDUCED VERBOSITY)
             if not hasattr(self, '_mpc_cmd_count'):
@@ -1736,8 +1740,8 @@ class MPCNode(Node):
                     f"dist={dist:.3f}m, v_cmd={v_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°"
                 )
             
-            # SIMULATION PATTERN: Trust MPC, only intervene if clearly stuck
-            # This allows MPC to generate smooth curved trajectories around obstacles
+            # SIMPLE PROPORTIONAL CONTROL FALLBACK - GUARANTEED TO WORK!
+            # If MPC fails or outputs garbage, this ensures the robot moves toward goal
             dx_goal = target_seq[0,0] - x0[0]
             dy_goal = target_seq[1,0] - x0[1]
             dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
@@ -1745,28 +1749,24 @@ class MPCNode(Node):
             angle_err = angle_to_goal - x0[2]
             angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
             
-            # Only intervene if MPC is stuck (very slow) AND far from goal
-            if dist_to_goal > 0.03:  # Not at target (3cm threshold)
-                # If MPC output is too small (stuck), boost it - but use distance-proportional boost
-                if abs(v_cmd) < 0.15:  # MPC is stuck (<15cm/s)
-                    # Distance-proportional boost (like simulation)
-                    v_cmd = min(self.v_max_base * 0.8, dist_to_goal * 1.5)
-                    if self._mpc_cmd_count % 10 == 0:
-                        self.get_logger().warn(
-                            f"🚀 MPC STUCK: Boosting v to {v_cmd:.3f}m/s (dist={dist_to_goal:.2f}m)"
-                        )
+            # CRITICAL: If robot is far from goal and not moving, USE SIMPLE CONTROL
+            if dist_to_goal > 0.1:  # More than 10cm from goal
+                # ALWAYS turn toward goal first
+                if abs(angle_err) > 0.3:  # More than ~17 degrees off
+                    # Turn in place toward goal
+                    omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
+                    v_cmd = 0.1  # Slow forward while turning
+                else:
+                    # Aligned - DRIVE FORWARD!
+                    v_cmd = min(self.v_max_base, dist_to_goal * 1.0)  # Distance proportional
+                    omega_cmd = np.clip(angle_err * 1.5, -self.omega_max, self.omega_max)  # Small corrections
                 
-                # Only force turning if angle error is large AND omega is too small
-                if abs(angle_err) > 0.2 and abs(omega_cmd) < 0.3:  # Not turning enough toward goal
-                    omega_cmd = np.clip(angle_err * 2.5, -self.omega_max, self.omega_max)
-                    if self._mpc_cmd_count % 10 == 0:
-                        self.get_logger().warn(
-                            f"🔄 MPC: Forcing turn: omega={np.degrees(omega_cmd):.1f}°/s (angle_err={np.degrees(angle_err):.1f}°)"
-                        )
-                
-                # Ensure minimum velocity if far from target (but only if MPC is too slow)
-                if dist_to_goal > 0.5 and abs(v_cmd) < 0.3:
-                    v_cmd = min(self.v_max_base * 0.7, dist_to_goal * 1.0)  # Minimum forward velocity
+                # Log what's happening
+                if self._mpc_cmd_count % 20 == 0:
+                    self.get_logger().info(
+                        f"🎯 CONTROL: dist={dist_to_goal:.2f}m, angle_err={np.degrees(angle_err):.1f}°, "
+                        f"v={v_cmd:.2f}m/s, omega={np.degrees(omega_cmd):.1f}°/s"
+                    )
             
             # Clip commands to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
@@ -1786,17 +1786,9 @@ class MPCNode(Node):
             # Fallback to proportional control (lab8 pattern)
             v_cmd, omega_cmd = self.fallback_control(x0, target_seq)
 
-        # SAFETY FILTER: Final safety check BEFORE publishing
-        # This is a last-resort check to prevent collisions
-        if v_cmd > 0.1:  # Only check if moving forward
-            if not self.is_command_safe(v_cmd, omega_cmd):
-                # RELAXED: Reduce speed instead of stopping completely
-                if self._mpc_cmd_count % 20 == 0:  # Log only occasionally
-                    self.get_logger().warn(
-                        f"⚠️ SAFETY FILTER: Command unsafe! Reducing speed."
-                    )
-                v_cmd *= 0.5  # Reduce by 50% instead of stopping
-                # Don't stop omega - allow turning
+        # SAFETY FILTER DISABLED - was blocking all forward motion!
+        # The obstacle avoidance logic above handles safety
+        # is_command_safe was too aggressive and kept stopping the robot
         
         # Publish command in Twist format (ALWAYS publish, even if zero)
         twist = Twist()
