@@ -1494,289 +1494,149 @@ class MPCNode(Node):
         return target_seq
 
     def timer_callback(self):
-        """Main MPC control loop (lab8 pattern - with fallback control)"""
+        """SIMPLE PROPORTIONAL CONTROL - GO STRAIGHT TO GOAL"""
         elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
         
-        # STARTUP TEST: Move robot forward and backward to verify motors work
-        # Phase 1 (0-2s): Wait for sensors
-        # Phase 2 (2-3s): Move FORWARD
-        # Phase 3 (3-4s): Move BACKWARD  
-        # Phase 4 (4-5s): Stop
-        # Phase 5 (5s+): Normal MPC control
-        if elapsed < 5.0:
-            twist = Twist()
-            if elapsed < 2.0:
-                # Phase 1: Wait for sensors
-                if int(elapsed * 10) % 20 == 0:
-                    self.get_logger().info(f'⏳ Startup: Waiting for sensors... {2.0 - elapsed:.1f}s')
-                twist.linear.x = 0.0
-                twist.angular.z = 0.0
-            elif elapsed < 3.0:
-                # Phase 2: FORWARD TEST
-                if int(elapsed * 10) % 10 == 0:
-                    self.get_logger().info(f'🚀 Startup TEST: Moving FORWARD at 0.15 m/s')
-                twist.linear.x = 0.15
-                twist.angular.z = 0.0
-            elif elapsed < 4.0:
-                # Phase 3: BACKWARD TEST
-                if int(elapsed * 10) % 10 == 0:
-                    self.get_logger().info(f'🔙 Startup TEST: Moving BACKWARD at -0.15 m/s')
-                twist.linear.x = -0.15
-                twist.angular.z = 0.0
-            else:
-                # Phase 4: Stop
-                if int(elapsed * 10) % 10 == 0:
-                    self.get_logger().info(f'⏹️ Startup TEST: Stopped. Starting MPC in {5.0 - elapsed:.1f}s')
-                twist.linear.x = 0.0
-                twist.angular.z = 0.0
-            
-            self.cmd_pub.publish(twist)
-            return  # Don't run MPC during startup test
-        
-        # CRITICAL: Always publish cmd_vel, even if seeker_state is None
-        # This ensures robot doesn't stop completely if pose is temporarily unavailable
-        if self.seeker_state is None:
-            # Publish zero command if no state available
+        # Wait 2 seconds for sensors
+        if elapsed < 2.0:
             twist = Twist()
             twist.linear.x = 0.0
-            twist.linear.y = 0.0
-            twist.linear.z = 0.0
-            twist.angular.x = 0.0
-            twist.angular.y = 0.0
             twist.angular.z = 0.0
             self.cmd_pub.publish(twist)
+            if int(elapsed * 10) % 20 == 0:
+                self.get_logger().info(f'⏳ Waiting for sensors... {2.0 - elapsed:.1f}s')
             return
         
+        # NO POSE - can't navigate
+        if self.seeker_state is None:
+            twist = Twist()
+            self.cmd_pub.publish(twist)
+            self.get_logger().warn('No pose data!')
+            return
+        
+        # GET ROBOT STATE
+        robot_x = self.seeker_state[0]
+        robot_y = self.seeker_state[1]
+        robot_theta = self.seeker_state[2]
+        
+        # GET GOAL
+        goal_x = self.goal_x
+        goal_y = self.goal_y
+        
+        # COMPUTE DISTANCE AND ANGLE TO GOAL
+        dx = goal_x - robot_x
+        dy = goal_y - robot_y
+        dist_to_goal = np.sqrt(dx**2 + dy**2)
+        angle_to_goal = np.arctan2(dy, dx)
+        
+        # ANGLE ERROR (how much we need to turn)
+        angle_err = angle_to_goal - robot_theta
+        # Wrap to [-pi, pi]
+        while angle_err > np.pi:
+            angle_err -= 2*np.pi
+        while angle_err < -np.pi:
+            angle_err += 2*np.pi
+        
+        # LOG EVERY SECOND
+        if not hasattr(self, '_log_count'):
+            self._log_count = 0
+        self._log_count += 1
+        if self._log_count % 10 == 0:
+            self.get_logger().info(
+                f'🎯 Robot({robot_x:.2f},{robot_y:.2f}) θ={np.degrees(robot_theta):.0f}° → '
+                f'Goal({goal_x:.2f},{goal_y:.2f}) dist={dist_to_goal:.2f}m angle_err={np.degrees(angle_err):.0f}°'
+            )
+        
+        # REACHED GOAL?
+        if dist_to_goal < 0.1:
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.angular.z = 0.0
+            self.cmd_pub.publish(twist)
+            if self._log_count % 10 == 0:
+                self.get_logger().info('🏁 GOAL REACHED!')
+            return
+        
+        # SIMPLE PROPORTIONAL CONTROL
+        # If angle error is large, turn in place
+        # Otherwise, drive forward while correcting angle
+        
+        if abs(angle_err) > 0.5:  # More than ~30 degrees off
+            # TURN IN PLACE
+            v_cmd = 0.0
+            omega_cmd = 1.5 * angle_err  # Proportional turn
+            omega_cmd = np.clip(omega_cmd, -1.0, 1.0)  # Limit turn rate
+        else:
+            # DRIVE FORWARD + small angle corrections
+            v_cmd = min(0.2, dist_to_goal * 0.5)  # Speed proportional to distance
+            omega_cmd = 1.0 * angle_err  # Small angle corrections
+            omega_cmd = np.clip(omega_cmd, -0.5, 0.5)
+        
+        # CHECK FOR OBSTACLES (simple LIDAR check)
+        if self.latest_scan is not None:
+            ranges = self.latest_scan.ranges
+            # Check front 60 degrees
+            n = len(ranges)
+            front_start = n // 2 - n // 12
+            front_end = n // 2 + n // 12
+            front_ranges = ranges[front_start:front_end]
+            min_front = min([r for r in front_ranges if r > 0.01 and r < 10.0], default=10.0)
+            
+            if min_front < 0.25:  # Obstacle within 25cm in front
+                # AVOID: slow down and turn
+                v_cmd = 0.05
+                # Turn away from obstacle (turn right if obstacle on left, etc.)
+                left_avg = np.mean([r for r in ranges[:n//3] if 0.01 < r < 10.0] or [10.0])
+                right_avg = np.mean([r for r in ranges[2*n//3:] if 0.01 < r < 10.0] or [10.0])
+                if left_avg > right_avg:
+                    omega_cmd = 0.5  # Turn left
+                else:
+                    omega_cmd = -0.5  # Turn right
+                if self._log_count % 10 == 0:
+                    self.get_logger().warn(f'⚠️ Obstacle at {min_front:.2f}m! Avoiding...')
+        
+        # PUBLISH COMMAND
+        twist = Twist()
+        twist.linear.x = float(v_cmd)
+        twist.angular.z = float(omega_cmd)
+        self.cmd_pub.publish(twist)
+        
+        # Done - skip all the complex MPC stuff
+        return
+        
+        # ============ OLD MPC CODE BELOW (DISABLED) ============
         # EMERGENCY RECOVERY SYSTEM
         if self.emergency_state != 'NORMAL':
             self.handle_emergency_recovery()
             return
         
-        # Check for immediate collision danger - DISABLED emergency backup
-        # MPC handles obstacle avoidance - don't interfere with its planning
-        pass  # MPC will handle it through cost function
-        
-        # For single robot navigation, use goal point if target not available
-        use_goal = (self.target_pose is None)
-
         # Build initial state
         x0 = self.seeker_state.copy()
+        target_seq = np.zeros((2, self.N + 1))
+        target_seq[0, :] = self.goal_x
+        target_seq[1, :] = self.goal_y
         
-        # CRITICAL DEBUG: Log state and goal (REDUCED VERBOSITY)
-        if not hasattr(self, '_debug_count'):
-            self._debug_count = 0
-        self._debug_count += 1
-        if self._debug_count % 100 == 0:  # Every 10 seconds (was every 2 seconds)
-            self.get_logger().info(
-                f"DEBUG: x0=[{x0[0]:.3f}, {x0[1]:.3f}, {np.degrees(x0[2]):.1f}°, {x0[3]:.3f}m/s], "
-                f"goal_x={self.goal_x}, goal_y={self.goal_y}"
-            )
-
-        # Get target/goal position
-        if use_goal:
-            # Check if we need to use a waypoint or go directly to goal
-            final_goal = np.array([self.goal_x, self.goal_y])
-            dist_to_final_goal = np.linalg.norm(final_goal - x0[:2])
-            
-            # CRITICAL: If very close to FINAL goal, ignore obstacles and just go for it!
-            if dist_to_final_goal < 0.15:  # Within 15cm of final goal
-                self.get_logger().info(f"🎯 Close to final goal ({dist_to_final_goal:.3f}m), ignoring obstacles!")
-                self.current_waypoint = None  # Clear any waypoint
-                target_pos = final_goal
-            # If we have a waypoint and haven't reached it, use waypoint
-            elif self.current_waypoint is not None:
-                dist_to_waypoint = np.linalg.norm(self.current_waypoint - x0[:2])
-                if dist_to_waypoint < self.waypoint_reached_threshold:
-                    self.get_logger().info(f"✓ Reached waypoint, clearing and resuming to final goal")
-                    self.current_waypoint = None
-                    self.waypoint_cleared_time = self.get_clock().now()  # Mark when cleared
-                    target_pos = final_goal
-                else:
-                    target_pos = self.current_waypoint
-            else:
-                target_pos = final_goal
-            
-            # Create constant target sequence
-            target_seq = np.zeros((2, self.N + 1))
-            target_seq[0, :] = target_pos[0]
-            target_seq[1, :] = target_pos[1]
-            
-            # CRITICAL DEBUG: Verify target sequence (REDUCED VERBOSITY)
-            if self._debug_count % 100 == 0:  # Every 10 seconds
-                self.get_logger().info(
-                    f"DEBUG: target_seq[0,0]={target_seq[0,0]:.3f}, target_seq[1,0]={target_seq[1,0]:.3f}, "
-                    f"dx={target_seq[0,0]-x0[0]:.3f}, dy={target_seq[1,0]-x0[1]:.3f}"
-                )
-        else:
-            # Predict target trajectory
-            target_seq = self.predict_target_trajectory()
-            if target_seq is None:
-                return
-
-        # Compute obstacles with uncertainty inflation
-        obstacles = self.compute_obstacles()  # Enable obstacle avoidance
+        obstacles = self.compute_obstacles()
         
-        # ALGORITHMIC IMPROVEMENT 1: Compute minimum distance to obstacles for adaptive behavior
-        self.min_obstacle_distance = self.compute_min_obstacle_distance(x0, obstacles)
-        
-        # ALGORITHMIC IMPROVEMENT 2: Adaptive velocity scaling based on proximity
-        self.velocity_scale_factor = self.compute_velocity_scale(self.min_obstacle_distance)
-        
-        # WAYPOINT GENERATION: Check if path to goal is blocked and generate waypoint
-        # BUT: Don't generate new waypoint immediately after clearing one (cooldown period)
-        if use_goal and self.current_waypoint is None:
-            can_generate = True
-            if self.waypoint_cleared_time is not None:
-                time_since_clear = (self.get_clock().now() - self.waypoint_cleared_time).nanoseconds / 1e9
-                if time_since_clear < self.waypoint_cooldown:
-                    can_generate = False
-                    if self._obstacle_debug_count % 10 == 0:
-                        self.get_logger().info(
-                            f"⏳ Waypoint cooldown: {time_since_clear:.1f}s / {self.waypoint_cooldown}s"
-                        )
-            
-            if can_generate:
-                self.current_waypoint = self.generate_waypoint_if_blocked(x0, final_goal, obstacles)
-        
-        # DEBUG: Log obstacles periodically (REDUCED VERBOSITY)
-        if not hasattr(self, '_obstacle_debug_count'):
-            self._obstacle_debug_count = 0
-        self._obstacle_debug_count += 1
-        if self._obstacle_debug_count % 50 == 0:  # Every 5 seconds (was every 1 second)
-            total_occupied = np.sum(np.array(self.map.data) > 30) if self.map else 0
-            if obstacles and len(obstacles) > 0:
-                self.get_logger().info(  # Changed to INFO level
-                    f"OBSTACLES: Found {len(obstacles)} obstacles. "
-                    f"Robot pose: ({x0[0]:.3f}, {x0[1]:.3f})"
-                )
-                # Log only closest obstacle
-                obstacle_dists = [(float(np.sqrt((center[0] - x0[0])**2 + (center[1] - x0[1])**2)), center, radius) 
-                                 for center, radius in obstacles]
-                obstacle_dists.sort(key=lambda x: x[0])  # Sort by distance
-                if obstacle_dists:
-                    dist, center, radius = obstacle_dists[0]
-                    self.get_logger().info(
-                        f"  Closest: center=({center[0]:.3f}, {center[1]:.3f}), "
-                        f"radius={radius:.3f}m, dist={dist:.3f}m"
-                    )
-                    marker = Marker()
-                    marker.header.frame_id = "map"
-                    marker.header.stamp = self.get_clock().now().to_msg()
-
-                    marker.ns = "obstacles"
-                    marker.id = 1  # Fixed: was using undefined 'i'
-                    marker.type = Marker.CYLINDER
-                    marker.action = Marker.ADD
-                    
-                    # Convert numpy types to Python float for ROS2
-                    marker.pose.position.x = float(center[0])
-                    marker.pose.position.y = float(center[1])
-                    marker.pose.position.z = 0.0
-
-                    marker.pose.orientation.x = 0.0
-                    marker.pose.orientation.y = 0.0
-                    marker.pose.orientation.z = 0.0
-                    marker.pose.orientation.w = 1.0
-
-                    marker.scale.x = float(2.0*radius)
-                    marker.scale.y = float(2.0*radius)
-                    marker.scale.z = 0.1
-
-                    marker.color.r = 1.0
-                    marker.color.g = 1.0
-                    marker.color.b = 0.0
-                    marker.color.a = 0.7
-
-                    self.obs_pub.publish(marker)
-
-            else:
-                self.get_logger().warn(
-                    f"NO OCCUPIED CELLS NEAR ROBOT! Map has {total_occupied} total occupied cells "
-                    f"(threshold=30, lookahead=3.0m)"
-                )
-
-        # ALGORITHMIC IMPROVEMENT 3: Adjust speed based on both uncertainty AND obstacle proximity
-        base_v_max = self.v_max_base
-        
-        # Factor 1: Uncertainty-based scaling (from paper)
-        if self.seeker_cov is not None:
-            sigma_seek = np.sqrt(np.max(np.linalg.eigvals(self.seeker_cov[:2, :2])))
-            alpha = 1.0
-            base_v_max = base_v_max * np.exp(-alpha * sigma_seek)
-        
-        # Factor 2: Obstacle proximity scaling (NEW - algorithmic improvement)
-        v_max = base_v_max * self.velocity_scale_factor
-        self.mpc.v_max = np.clip(v_max, self.v_min * 0.5, self.v_max_base)  # Allow stopping if needed
-        
-        # Log velocity scaling (REDUCED VERBOSITY)
-        if hasattr(self, '_obstacle_debug_count') and self._obstacle_debug_count % 50 == 0:  # Every 5 seconds
-            self.get_logger().info(
-                f"📊 Velocity: min_obs_dist={self.min_obstacle_distance:.3f}m, "
-                f"scale={self.velocity_scale_factor:.2f}, v_max={self.mpc.v_max:.3f}m/s"
-            )
-
-        # Solve MPC (lab8 pattern - with fallback to proportional control)
         try:
-            # Try MPC solve
             twist_cmd = self.mpc.get_twist_command(x0, target_seq, obstacles)
             v_cmd = twist_cmd['linear']['x']
             omega_cmd = twist_cmd['angular']['z']
             
-            # Validate MPC solution
-            if math.isnan(v_cmd) or math.isnan(omega_cmd) or \
-               math.isinf(v_cmd) or math.isinf(omega_cmd):
-                raise ValueError("MPC solution contains NaN or Inf")
-            
-            # SIMPLIFIED SAFETY CHECK - Don't block forward motion unless really close!
-            # Only stop if within 5cm of an obstacle
-            if obstacles and len(obstacles) > 0:
-                robot_pos = np.array([x0[0], x0[1]])
-                closest_obs = min(obstacles, key=lambda obs: np.linalg.norm(obs[0] - robot_pos))
-                obs_center, obs_radius = closest_obs
-                dist_to_obs = np.linalg.norm(obs_center - robot_pos) - obs_radius
-                
-                if dist_to_obs < 0.05:  # Less than 5cm from obstacle surface
-                    # Turn away from obstacle, reduce speed
-                    away_vec = robot_pos - obs_center
-                    away_angle = np.arctan2(away_vec[1], away_vec[0])
-                    angle_err = away_angle - x0[2]
-                    angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
-                    omega_cmd = np.clip(angle_err * 2.0, -self.omega_max, self.omega_max)
-                    v_cmd = 0.1  # Slow but still moving
-                elif dist_to_obs < 0.15:  # 5-15cm - slow down
-                    v_cmd *= 0.7
-            
-            # CRITICAL DEBUG: Log everything (REDUCED VERBOSITY)
             if not hasattr(self, '_mpc_cmd_count'):
                 self._mpc_cmd_count = 0
             self._mpc_cmd_count += 1
-            if self._mpc_cmd_count % 50 == 0:  # Every 5 seconds (was every 1 second)
-                angle_to_goal = np.arctan2(target_seq[1,0] - x0[1], target_seq[0,0] - x0[0])
-                angle_err = angle_to_goal - x0[2]
-                angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
-                dist = np.sqrt((target_seq[0,0] - x0[0])**2 + (target_seq[1,0] - x0[1])**2)
-                # Check if commands make sense
-                self.get_logger().info(  # Changed to INFO level
-                    f"MPC: robot=({x0[0]:.3f}, {x0[1]:.3f}), goal=({target_seq[0,0]:.3f}, {target_seq[1,0]:.3f}), "
-                    f"dist={dist:.3f}m, v_cmd={v_cmd:.3f}, omega_cmd={np.degrees(omega_cmd):.1f}°"
-                )
             
-            # MPC OUTPUT VALIDATION - only boost if MPC is clearly stuck
             dx_goal = target_seq[0,0] - x0[0]
             dy_goal = target_seq[1,0] - x0[1]
             dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
             angle_to_goal = np.arctan2(dy_goal, dx_goal)
             angle_err = angle_to_goal - x0[2]
-            angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
+            angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
             
-            # Only intervene if MPC outputs near-zero when we should be moving
-            if dist_to_goal > 0.1 and abs(v_cmd) < 0.05:  # MPC stuck
-                # Boost velocity proportionally
+            if dist_to_goal > 0.1 and abs(v_cmd) < 0.05:
                 v_cmd = min(self.v_max_base * 0.5, dist_to_goal * 0.5)
-                if self._mpc_cmd_count % 20 == 0:
-                    self.get_logger().warn(f"🚀 MPC boosted: v={v_cmd:.2f}m/s")
             
-            # Only intervene on omega if angle is large and MPC not turning
             if abs(angle_err) > 0.4 and abs(omega_cmd) < 0.2:
                 omega_cmd = np.clip(angle_err * 1.5, -self.omega_max, self.omega_max)
                 if self._mpc_cmd_count % 20 == 0:
