@@ -141,20 +141,6 @@ class SimpleUnicycleMPC:
             # Make position error cost MUCH larger than control costs
             cost += self.Qp_param * (px_err**2 + py_err**2)
             
-            # PROGRESS COST: Encourage forward motion toward goal
-            # This prevents MPC from getting stuck in circles
-            # Penalize trajectories that don't reduce distance to goal
-            if k > 0:
-                # Distance to goal at previous step
-                px_prev = self.X[0, k-1]
-                py_prev = self.X[1, k-1]
-                dist_prev_sq = (px_prev - self.T[0,k-1])**2 + (py_prev - self.T[1,k-1])**2
-                dist_curr_sq = px_err**2 + py_err**2
-                # Penalize if distance is increasing (going wrong way)
-                # Use cp.maximum to make it CVXPY-compatible
-                progress_penalty = 500000.0 * cp.maximum(0, dist_curr_sq - dist_prev_sq)
-                cost += progress_penalty
-            
             # Control penalties - keep VERY small so position error dominates
             cost += self.Ra_param * (a**2) + self.Rw_param * (omega**2)
 
