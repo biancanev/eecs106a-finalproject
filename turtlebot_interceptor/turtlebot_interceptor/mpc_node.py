@@ -1610,13 +1610,20 @@ class MPCNode(Node):
         for obs in obstacles:
             # Check if this obstacle is too close to any existing one
             is_duplicate = False
-            for existing in unique_obstacles:
-                dist = np.sqrt((obs[0][0]-existing[0][0])**2 + (obs[0][1]-existing[0][1])**2)
+            obs_center = obs[0]
+            obs_radius = obs[1]
+            
+            # Convert to tuple for comparison (numpy arrays can't be compared directly)
+            obs_center_tuple = (float(obs_center[0]), float(obs_center[1]))
+            
+            for i, existing in enumerate(unique_obstacles):
+                existing_center = existing[0]
+                existing_radius = existing[1]
+                dist = np.sqrt((obs_center[0]-existing_center[0])**2 + (obs_center[1]-existing_center[1])**2)
                 if dist < 0.20:  # Within 20cm = duplicate (more aggressive)
                     # Keep the one with larger radius (more conservative)
-                    if obs[1] > existing[1]:
-                        unique_obstacles.remove(existing)
-                        unique_obstacles.append(obs)
+                    if obs_radius > existing_radius:
+                        unique_obstacles[i] = obs  # Replace existing with new one
                     is_duplicate = True
                     break
             
