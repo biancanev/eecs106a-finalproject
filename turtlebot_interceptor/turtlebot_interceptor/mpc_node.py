@@ -1817,6 +1817,10 @@ class MPCNode(Node):
         # Primary target for heading/arrival checks
         tgt_x = float(target_seq[0, 0])
         tgt_y = float(target_seq[1, 0])
+        if self.target_pose is not None:
+            # use actual target pose for proximity stop
+            tgt_x = self.target_pose.position.x
+            tgt_y = self.target_pose.position.y
 
         # Compute proximity for adaptive speed scaling
         min_obs_dist = self.compute_min_obstacle_distance(x0, obstacles)
@@ -1865,7 +1869,7 @@ class MPCNode(Node):
             return
         
         # REACHED GOAL?
-        if dist_to_goal < 0.1:
+        if dist_to_goal < 0.6:
             twist = Twist()
             self.cmd_pub.publish(twist)
             return
@@ -1883,6 +1887,7 @@ class MPCNode(Node):
             
             # Clip to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.mpc.v_max)
+            v_cmd = max(0.0, v_cmd)  # avoid backing toward target
             omega_cmd = np.clip(omega_cmd, -self.soft_omega_limit, self.soft_omega_limit)
             # Adaptive slowdown near obstacles (less aggressive now)
             v_cmd *= self.velocity_scale_factor
