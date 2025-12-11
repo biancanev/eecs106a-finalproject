@@ -53,16 +53,15 @@ class NavigationVisualizerNode(Node):
         # Subscriptions
         self.pose_sub = self.create_subscription(
             PoseWithCovarianceStamped,
-            '/amcl_pose',  # MCL estimated pose
+            '/amcl_pose',  # MCL estimated pose (fallback)
             self.pose_callback,
             10
         )
         
-        # Subscribe to odometry for true robot pose (if available)
-        from nav_msgs.msg import Odometry
-        self.odom_sub = self.create_subscription(
+        # Subscribe to EKF odometry for "true" robot pose and covariance
+        self.odom_ekf_sub = self.create_subscription(
             Odometry,
-            '/odom',
+            '/odom_ekf',
             self.odom_callback,
             10
         )
@@ -113,8 +112,12 @@ class NavigationVisualizerNode(Node):
     
     def odom_callback(self, msg):
         """Update true robot pose from odometry"""
-        # Store true pose for comparison
+        # Store true pose and covariance from EKF odometry
         self.true_pose = msg.pose.pose
+        try:
+            self.true_cov = np.array(msg.pose.covariance).reshape((6, 6))
+        except Exception:
+            self.true_cov = None
     
     def map_callback(self, msg: OccupancyGrid):
         """Store map for reference (if needed)"""
@@ -163,6 +166,16 @@ class NavigationVisualizerNode(Node):
             true_pose_marker = self.create_true_pose_marker()
             if true_pose_marker:
                 markers.markers.append(true_pose_marker)
+        # 8. EKF uncertainty ellipse
+        if self.true_pose is not None and getattr(self, 'true_cov', None) is not None:
+            ekf_uncertainty = self.create_ekf_uncertainty_ellipse()
+            if ekf_uncertainty:
+                markers.markers.append(ekf_uncertainty)
+        # 8. EKF uncertainty ellipse
+        if self.true_pose is not None and getattr(self, 'true_cov', None) is not None:
+            ekf_uncertainty = self.create_ekf_uncertainty_ellipse()
+            if ekf_uncertainty:
+                markers.markers.append(ekf_uncertainty)
         
         # Publish all markers
         self.marker_pub.publish(markers)
@@ -333,9 +346,26 @@ class NavigationVisualizerNode(Node):
     
     def create_uncertainty_ellipse(self):
         """Create uncertainty ellipse from MCL covariance"""
-        # Extract 2D position covariance
-        cov_2d = self.current_pose_cov[:2, :2]
-        
+        return self._create_ellipse_marker(
+            cov_2d=self.current_pose_cov[:2, :2],
+            cx=self.current_pose.position.x,
+            cy=self.current_pose.position.y,
+            ns='mcl_uncertainty',
+            color=ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.5)
+        )
+    
+    def create_ekf_uncertainty_ellipse(self):
+        """Create uncertainty ellipse from EKF covariance"""
+        return self._create_ellipse_marker(
+            cov_2d=self.true_cov[:2, :2],
+            cx=self.true_pose.position.x,
+            cy=self.true_pose.position.y,
+            ns='ekf_uncertainty',
+            color=ColorRGBA(r=1.0, g=0.0, b=1.0, a=0.5)
+        )
+    
+    def _create_ellipse_marker(self, cov_2d, cx, cy, ns, color):
+        """Shared ellipse creation for covariance visualization"""
         # Compute eigenvalues and eigenvectors
         eigenvals, eigenvecs = np.linalg.eig(cov_2d)
         eigenvals = np.maximum(eigenvals, 1e-6)  # Ensure positive
@@ -344,7 +374,7 @@ class NavigationVisualizerNode(Node):
         marker = Marker()
         marker.header.frame_id = 'map'
         marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'mcl_uncertainty'
+        marker.ns = ns
         marker.id = self.marker_id
         self.marker_id += 1
         marker.type = Marker.LINE_STRIP
@@ -367,16 +397,15 @@ class NavigationVisualizerNode(Node):
             y_rot = x_local * np.sin(angle) + y_local * np.cos(angle)
             
             point = Point()
-            point.x = float(self.current_pose.position.x + x_rot)
-            point.y = float(self.current_pose.position.y + y_rot)
+            point.x = float(cx + x_rot)
+            point.y = float(cy + y_rot)
             point.z = 0.05
             marker.points.append(point)
         
         # Scale (line width)
         marker.scale.x = 0.02
         
-        # Color (cyan for MCL uncertainty)
-        marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.5)
+        marker.color = color
         
         # Lifetime
         marker.lifetime.sec = 1
@@ -422,4 +451,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

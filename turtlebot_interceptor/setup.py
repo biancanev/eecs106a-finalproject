@@ -50,6 +50,7 @@ setup(
                 'target_est_node = turtlebot_interceptor.target_est_node:main',
                 'camera_cone_detector = turtlebot_interceptor.camera_cone_detector:main',  # Camera-based yellow cone detection
                 'test_camera_cones = turtlebot_interceptor.test_camera_cones:main',  # Test camera cone detection
+                'drive_tester = turtlebot_interceptor.drive_tester:main',  # Drive patterns and compare EKF vs AMCL
         ],
     },
 )

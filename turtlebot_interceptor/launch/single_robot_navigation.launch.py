@@ -56,30 +56,13 @@ def generate_launch_description():
             output='screen'
         ),
         
-        # DISABLED: EKF has drift issues - using raw odometry instead
-        # The EKF integrates velocities and causes massive drift when stationary
-        # For now, use simple_pose_publisher which just republishes /odom
-        # TODO: Fix EKF drift before re-enabling
-        # Node(
-        #     package='turtlebot_interceptor',
-        #     executable='ekf_pose_estimator',
-        #     name='ekf_pose_estimator',
-        #     parameters=[{
-        #         'use_sim_time': LaunchConfiguration('use_sim_time'),
-        #     }],
-        #     output='screen'
-        # ),
-        
-        # Simple pose publisher (republishes /odom as /amcl_pose)
-        # Uses raw wheel odometry - no sensor fusion for now
+        # EKF pose estimator (IMU + mag + encoders)
         Node(
             package='turtlebot_interceptor',
-            executable='simple_pose_publisher',
-            name='simple_pose_publisher',
+            executable='ekf_pose_estimator',
+            name='ekf_pose_estimator',
             parameters=[{
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'use_odom': True,
-                'static_pose': False,
             }],
             output='screen'
         ),
@@ -118,7 +101,8 @@ def generate_launch_description():
                 'camera_info_topic': '/camera_info',
                 'pose_topic': '/amcl_pose',
             }],
-            output='screen'
+            arguments=['--ros-args', '--log-level', 'camera_cone_detector:=warn'],
+            output='log'
         ),
         
         # MCL node (localization using map and LIDAR)
@@ -150,8 +134,8 @@ def generate_launch_description():
             name='mpc_node',
             parameters=[{
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'mpc_horizon': 15,
-                'dt': 0.1,
+                'mpc_horizon': 12,
+                'dt': 0.08,
                 'v_max_base': 0.35,  # Matches MPC v_max for smooth curves (was 0.6)
                 'v_min': 0.0,
                 'omega_max': 2.0,  # Matches MPC wz_max for smooth curves (was 2.5)
@@ -180,6 +164,15 @@ def generate_launch_description():
             }],
             output='screen'
         ),
+
+        # Drive tester (optional) - publishes cmd_vel patterns and logs EKF vs AMCL error
+        # Disable if you don't want automated motions during testing
+        # Node(
+        #     package='turtlebot_interceptor',
+        #     executable='drive_tester',
+        #     name='drive_tester',
+        #     output='screen'
+        # ),
         
         # RViz for visualization
         Node(
@@ -189,4 +182,3 @@ def generate_launch_description():
             output='screen'
         ),
     ])
-

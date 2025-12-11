@@ -35,24 +35,28 @@ class EKFPoseEstimator(Node):
         self.state = np.zeros(6)
         
         # State covariance
-        self.P = np.eye(6) * 0.1
-        self.P[0:2, 0:2] = 0.01  # Low initial position uncertainty
-        self.P[2, 2] = 0.05  # Low initial heading uncertainty
-        self.P[3:6, 3:6] = 0.1  # Higher velocity uncertainty
+        self.P = np.eye(6) * 0.05
+        self.P[0:2, 0:2] = 0.005  # Low initial position uncertainty
+        self.P[2, 2] = 0.02  # Low initial heading uncertainty
+        self.P[3:6, 3:6] = 0.05  # Moderate velocity uncertainty
+        self.initialized_from_odom = False
         
         # Process noise covariance
         self.Q = np.eye(6)
-        self.Q[0:2, 0:2] = 0.001  # Position process noise
-        self.Q[2, 2] = 0.01  # Heading process noise
-        self.Q[3:5, 3:5] = 0.05  # Linear velocity process noise
-        self.Q[5, 5] = 0.05  # Angular velocity process noise
+        self.Q[0:2, 0:2] = 1e-4  # Position process noise (small)
+        self.Q[2, 2] = 5e-3  # Heading process noise
+        self.Q[3:5, 3:5] = 0.01  # Linear velocity process noise
+        self.Q[5, 5] = 0.02  # Angular velocity process noise
         
         # Measurement noise covariances
-        self.R_imu_gyro = 0.01  # IMU gyroscope (omega)
-        self.R_imu_accel = 0.5  # IMU accelerometer (ax, ay)
-        self.R_mag = 0.1  # Magnetometer (heading)
-        self.R_odom_v = 0.02  # Odometry linear velocity
-        self.R_odom_w = 0.02  # Odometry angular velocity
+        self.R_imu_gyro = 0.002  # IMU gyroscope (omega)
+        self.R_imu_accel = 0.4  # IMU accelerometer (ax, ay)
+        self.R_mag = 0.02  # Magnetometer (heading)
+        # Odometry not fully trusted (wheel slip) → higher noise
+        self.R_odom_pos = 0.01  # Odometry position
+        self.R_odom_theta = 0.003  # Odometry heading (tighter)
+        self.R_odom_v = 0.05  # Odometry linear velocity
+        self.R_odom_w = 0.03  # Odometry angular velocity
         
         # Gravity vector (for compensation)
         self.gravity_mag = 9.81  # m/s^2
@@ -72,6 +76,8 @@ class EKFPoseEstimator(Node):
         self.imu_data = None
         self.mag_data = None
         self.odom_data = None
+        self.last_imu_omega = 0.0
+        self.last_imu_accel_mag = 0.0
         
         # QoS profile for sensor data (BEST_EFFORT for hardware compatibility)
         sensor_qos = QoSProfile(
@@ -157,13 +163,15 @@ class EKFPoseEstimator(Node):
             'accel': accel_true[0:2],  # X-Y acceleration (2D motion)
             'timestamp': self.get_clock().now()
         }
+        self.last_imu_omega = float(omega_body[2])
+        self.last_imu_accel_mag = float(np.linalg.norm(accel_true[0:2]))
         
         # Update measurement (angular velocity)
         self.update_imu_gyro(omega_body[2])
-        
-        # DISABLED: Acceleration updates cause drift - rely on wheel odometry instead
-        # if np.linalg.norm(accel_true[0:2]) > 0.1:
-        #     self.update_imu_accel(accel_true[0:2])
+        # If nearly stationary and accel is small, use accel to pull velocities toward zero
+        speed = np.hypot(self.state[3], self.state[4])
+        if speed < 0.05 and np.linalg.norm(accel_true[0:2]) < 0.2:
+            self.update_imu_accel(accel_true[0:2])
     
     def mag_callback(self, msg: MagneticField):
         """Process magnetometer data for absolute heading"""
@@ -193,33 +201,52 @@ class EKFPoseEstimator(Node):
             'heading': heading,
             'timestamp': self.get_clock().now()
         }
-        
-        # Update measurement
-        self.update_magnetometer(heading)
+        # Disabled heading fusion from magnetometer to avoid large yaw jumps
+        return
     
     def odom_callback(self, msg: Odometry):
         """Process wheel odometry data"""
-        # Extract velocities
+        # Extract pose and velocities
+        px = msg.pose.pose.position.x
+        py = msg.pose.pose.position.y
+        # Heading from odom orientation
+        yaw = self.quaternion_to_euler(msg.pose.pose.orientation)[2]
         v_x = msg.twist.twist.linear.x
         v_y = msg.twist.twist.linear.y
         omega = msg.twist.twist.angular.z
         
-        # CRITICAL: Sanity check - if velocities are unreasonably high, robot might be stationary
-        # This prevents integrating noise when robot hasn't started moving yet
-        max_reasonable_v = 1.0  # m/s (TurtleBot max is ~0.6)
-        if abs(v_x) > max_reasonable_v or abs(v_y) > max_reasonable_v:
-            self.get_logger().warn(f'Odom velocity unreasonable: vx={v_x:.2f}, vy={v_y:.2f} - ignoring')
-            return
+        # Slip/stationary gating: if IMU says nearly stationary but odom shows motion, zero the odom velocities
+        imu_stationary = (self.last_imu_accel_mag < 0.2 and abs(self.last_imu_omega) < 0.05)
+        odom_motion = (abs(v_x) > 0.02 or abs(v_y) > 0.02 or abs(omega) > 0.05)
+        if imu_stationary and odom_motion:
+            v_x = 0.0
+            v_y = 0.0
+            omega = 0.0
+            # Do not adjust pose when slipping; keep last px/py/yaw for position update
         
         self.odom_data = {
+            'px': px,
+            'py': py,
+            'yaw': yaw,
             'vx': v_x,
             'vy': v_y,
             'omega': omega,
             'timestamp': self.get_clock().now()
         }
+
+        # Initialize state from first odom to avoid frame offset
+        if not self.initialized_from_odom:
+            self.state[0] = px
+            self.state[1] = py
+            self.state[2] = yaw
+            self.initialized_from_odom = True
+            # Reset covariance for position/heading
+            self.P[0:2, 0:2] = 0.002
+            self.P[2, 2] = 0.01
+            self.last_time = self.get_clock().now()
         
         # Update measurement
-        self.update_odometry(v_x, v_y, omega)
+        self.update_odometry(px, py, yaw, v_x, v_y, omega)
     
     def rotation_matrix(self, yaw, pitch, roll):
         """Construct 3D rotation matrix from Euler angles (ZYX convention)"""
@@ -250,10 +277,9 @@ class EKFPoseEstimator(Node):
         
         # Compute dt
         self.dt = (current_time - self.last_time).nanoseconds / 1e9
+        # Clamp dt to avoid huge jumps on timing hiccups
+        self.dt = np.clip(self.dt, 0.001, 0.05)
         self.last_time = current_time
-        
-        if self.dt <= 0 or self.dt > 0.5:  # Sanity check
-            return
         
         # State: [x, y, theta, vx, vy, omega]
         x, y, theta, vx, vy, omega = self.state
@@ -293,6 +319,8 @@ class EKFPoseEstimator(Node):
     
     def update_imu_gyro(self, omega_measured):
         """EKF update step for IMU gyroscope (angular velocity)"""
+        if omega_measured is None:
+            return
         # Measurement model: z = omega (direct measurement of state[5])
         H = np.zeros((1, 6))
         H[0, 5] = 1.0  # Measures omega
@@ -314,13 +342,35 @@ class EKFPoseEstimator(Node):
     
     def update_imu_accel(self, accel_measured):
         """EKF update step for IMU accelerometer (linear acceleration)"""
-        # DISABLED: Acceleration integration causes massive drift
-        # The double integration of noisy accelerometer data leads to unbounded position error
-        # We rely on wheel odometry for velocity instead
-        return
+        # Use small accel measurement as a proxy for "velocity should be near zero"
+        # Measurement model: z = [vx, vy] with expected ~0 when accel is ~0
+        H = np.zeros((2, 6))
+        H[0, 3] = 1.0  # vx
+        H[1, 4] = 1.0  # vy
+        
+        z = np.array([0.0, 0.0])
+        z_pred = H @ self.state
+        y = z - z_pred
+        
+        R_acc = np.diag([self.R_imu_accel, self.R_imu_accel])
+        S = H @ self.P @ H.T + R_acc
+        
+        try:
+            K = self.P @ H.T @ np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            return
+        
+        self.state = self.state + K @ y
+        self.P = (np.eye(6) - K @ H) @ self.P
     
     def update_magnetometer(self, heading_measured):
         """EKF update step for magnetometer (absolute heading)"""
+        if heading_measured is None:
+            return
+        # Only trust magnetometer when moving slowly (reduce interference)
+        speed = np.hypot(self.state[3], self.state[4])
+        if speed > 0.05:
+            return
         # Measurement model: z = theta (direct measurement of state[2])
         H = np.zeros((1, 6))
         H[0, 2] = 1.0  # Measures theta
@@ -347,21 +397,34 @@ class EKFPoseEstimator(Node):
         
         self.P = (np.eye(6) - np.outer(K, H)) @ self.P
     
-    def update_odometry(self, vx_measured, vy_measured, omega_measured):
-        """EKF update step for wheel odometry (velocities)"""
-        # Measurement model: z = [vx, vy, omega] (direct measurement of state[3:6])
-        H = np.zeros((3, 6))
-        H[0, 3] = 1.0  # vx
-        H[1, 4] = 1.0  # vy
-        H[2, 5] = 1.0  # omega
+    def update_odometry(self, px_measured, py_measured, yaw_measured, vx_measured, vy_measured, omega_measured):
+        """EKF update step for wheel odometry (pose + velocities)"""
+        if px_measured is None or py_measured is None or yaw_measured is None \
+           or vx_measured is None or vy_measured is None or omega_measured is None:
+            return
+        # Measurement model: z = [x, y, theta, vx, vy, omega]
+        H = np.zeros((6, 6))
+        H[0, 0] = 1.0  # x
+        H[1, 1] = 1.0  # y
+        H[2, 2] = 1.0  # theta
+        H[3, 3] = 1.0  # vx
+        H[4, 4] = 1.0  # vy
+        H[5, 5] = 1.0  # omega
         
         # Innovation
-        z = np.array([vx_measured, vy_measured, omega_measured])
+        z = np.array([px_measured, py_measured, yaw_measured, vx_measured, vy_measured, omega_measured])
         z_pred = H @ self.state
         y = z - z_pred
+        # wrap heading innovation
+        y[2] = np.arctan2(np.sin(y[2]), np.cos(y[2]))
         
         # Innovation covariance
-        R_odom = np.diag([self.R_odom_v, self.R_odom_v, self.R_odom_w])
+        R_odom = np.diag([
+            self.R_odom_pos, self.R_odom_pos,
+            self.R_odom_theta,
+            self.R_odom_v, self.R_odom_v,
+            self.R_odom_w
+        ])
         S = H @ self.P @ H.T + R_odom
         
         # Kalman gain
@@ -469,4 +532,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
