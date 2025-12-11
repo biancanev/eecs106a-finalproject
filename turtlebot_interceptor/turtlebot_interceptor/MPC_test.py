@@ -27,14 +27,14 @@ class SimpleUnicycleMPC:
 
         # Robot geometry
         self.robot_radius = 0.105
-        self.safety_buffer = 0.15  # total safety distance added to obstacle radius
+        self.safety_buffer = 0.18  # slight extra clearance to avoid clipping
 
         # Weights
-        self.Qp  = 100.0
-        self.Qtheta = 5.0  # encourage heading alignment to goal
+        self.Qp  = 140.0
+        self.Qtheta = 10.0  # stronger heading alignment
         self.Ra = 0.01
         self.Rw = 0.01
-        self.Q_obs = 500.0  # obstacle hinge penalty
+        self.Q_obs = 900.0  # stronger avoidance while still allowing progress
 
         # Keep baseline weights for any future adaptation logic
         self.Qp_base = self.Qp
@@ -44,7 +44,7 @@ class SimpleUnicycleMPC:
         self.Q_obs_base = self.Q_obs
 
         # Can update without rebuilding
-        self.max_obstacles = 10
+        self.max_obstacles = 20
         self.obs_centers = cp.Parameter((self.max_obstacles, 2))
         self.obs_radii   = cp.Parameter(self.max_obstacles)
         # Linearized obstacle normals and safety distances (per obstacle)
@@ -133,10 +133,9 @@ class SimpleUnicycleMPC:
                 # Penalize slack usage
                 cost += self.Q_obs * cp.square(self.S[i, k])
 
-        # Terminal cost
+        # Terminal cost: position + heading alignment
         cost += 10 * self.Qp * cp.sum_squares(self.X[0:2,N] - self.T[:,N])
-        cost += self.Qtheta * cp.square(self.X[2, N] - self.theta_ref[N])
-
+        cost += 5 * self.Qtheta * cp.square(self.X[2, N] - self.theta_ref[N])
         # Build problem
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
 
@@ -224,7 +223,7 @@ class SimpleUnicycleMPC:
         self.B.value = B
         self.c.value = c
         self.T.value = T
-        # Heading reference: point toward final target position
+        # Heading reference: point toward final target position (wrapped)
         goal_dx = T[0, -1] - x0[0]
         goal_dy = T[1, -1] - x0[1]
         desired_theta = np.arctan2(goal_dy, goal_dx)
@@ -233,6 +232,10 @@ class SimpleUnicycleMPC:
         desired_theta_wrapped = x0[2] + angle_err
         theta_vec = np.full(self.N + 1, desired_theta_wrapped)
         self.theta_ref.value = theta_vec
+
+        # Adapt weights based on time-to-go to encourage minimum-time behavior
+        t_go = self.compute_time_to_go(x0, T[:, 0])
+        self.adapt_weights_for_time_to_go(t_go)
 
         # Obstacle parameters
         centers = np.zeros((self.max_obstacles,2))
@@ -257,9 +260,11 @@ class SimpleUnicycleMPC:
         self.safety_dists.value = safety_d
 
         # Solve
-        # OSQP can throw matrix update errors when warm-starting a non‑DPP problem.
-        # Force a fresh solve each cycle to keep dimensions stable.
+        # Solve with OSQP QP solver (fast/stable)
         self.prob.solve(solver=cp.OSQP, warm_start=False, ignore_dpp=True)
+        status = self.prob.status
+        if status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            raise RuntimeError(f"MPC solve status: {status}")
 
         # Cache solution for visualization/debugging
         self.last_solution = {
@@ -271,7 +276,7 @@ class SimpleUnicycleMPC:
 
         # Controls
         if self.U.value is None:
-            return 0,0
+            raise RuntimeError("MPC solve returned no control")
         return float(self.U[0,0].value), float(self.U[1,0].value)
     
     def get_twist_command(self, x0, target, obstacles=None):

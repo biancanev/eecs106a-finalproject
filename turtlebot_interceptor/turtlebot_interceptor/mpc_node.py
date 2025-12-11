@@ -7,6 +7,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.exceptions import ParameterAlreadyDeclaredException
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, PointStamped
+from nav_msgs.msg import Odometry
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 import numpy as np
@@ -47,10 +48,11 @@ class MPCNode(Node):
         self.Kd_w = self.get_parameter('Kd_w').get_parameter_value().double_value
 
         # Subscriptions
+        # Use EKF odometry if available for more consistent pose/heading
         self.seeker_sub = self.create_subscription(
-            PoseWithCovarianceStamped,
-            '/amcl_pose',
-            self.seeker_callback,
+            Odometry,
+            '/odom_ekf',
+            self.odom_ekf_callback,
             10
         )
 
@@ -140,7 +142,7 @@ class MPCNode(Node):
             10
         )
         self.camera_cones = []  # List of (position, confidence, timestamp) tuples
-        self.camera_cone_timeout = 0.5  # Keep camera detections for 0.5 seconds
+        self.camera_cone_timeout = 3.0  # Keep camera detections longer so close cones persist
 
         # Publishers
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -257,57 +259,40 @@ class MPCNode(Node):
         self.local_map = msg
 
     def seeker_callback(self, msg: PoseWithCovarianceStamped):
-        """Update seeker state (lab8 pattern - improved velocity estimation)"""
-        self.seeker_pose = msg.pose.pose
-        self.seeker_cov = np.array(msg.pose.covariance).reshape((6, 6))
-        
-        # Extract state [px, py, theta, v]
-        q = msg.pose.pose.orientation
-        roll, pitch, yaw = euler.quat2euler([q.w, q.x, q.y, q.z])
-        
-        # Store pose for state update
-        self.seeker_state = np.array([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y,
-            yaw,
-            0.0  # Velocity will be updated below
-        ])
-        
-        # Estimate velocity from previous state (lab8 pattern - more robust)
+        """Fallback seeker state from /amcl_pose (PoseWithCovarianceStamped)"""
+        self._update_seeker_from_pose(msg.pose.pose, msg.pose.covariance, msg.header.stamp)
+
+    def odom_ekf_callback(self, msg: Odometry):
+        """Primary seeker state from /odom_ekf (Odometry)"""
+        self._update_seeker_from_pose(msg.pose.pose, msg.pose.covariance, msg.header.stamp)
+
+    def _update_seeker_from_pose(self, pose, covariance, stamp):
+        self.seeker_pose = pose
+        try:
+            self.seeker_cov = np.array(covariance).reshape((6, 6))
+        except Exception:
+            self.seeker_cov = None
+
+        q = pose.orientation
+        _, _, yaw = euler.quat2euler([q.w, q.x, q.y, q.z])
+
         if self.prev_state is not None:
-            # Use actual time difference from message timestamps for more accurate velocity
-            current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            if hasattr(self, 'prev_time') and self.prev_time is not None:
-                dt_actual = current_time - self.prev_time
-            else:
-                dt_actual = self.dt  # Fallback to nominal dt
-            
-            dx = msg.pose.pose.position.x - self.prev_state[0]
-            dy = msg.pose.pose.position.y - self.prev_state[1]
-            # Use velocity in direction of motion (more accurate)
-            v = np.sqrt(dx**2 + dy**2) / dt_actual if dt_actual > 0.01 else 0.0  # Min dt to avoid division by zero
-            # Smooth velocity estimate (exponential moving average) - more aggressive smoothing
-            v = 0.5 * v + 0.5 * self.prev_velocity  # More smoothing to reduce noise
+            current_time = stamp.sec + stamp.nanosec * 1e-9
+            dt_actual = current_time - self.prev_time if hasattr(self, 'prev_time') and self.prev_time is not None else self.dt
+            dx = pose.position.x - self.prev_state[0]
+            dy = pose.position.y - self.prev_state[1]
+            v = np.sqrt(dx**2 + dy**2) / dt_actual if dt_actual > 0.01 else 0.0
+            v = 0.5 * v + 0.5 * self.prev_velocity
             v = np.clip(v, self.v_min, self.v_max_base)
             self.prev_time = current_time
         else:
             v = 0.0
             self.prev_time = None
-        
-        # Store previous state for next iteration
-        self.prev_state = np.array([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y,
-            yaw
-        ])
+
+        self.prev_state = np.array([pose.position.x, pose.position.y, yaw])
         self.prev_velocity = v
-        
-        self.seeker_state = np.array([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y,
-            yaw,
-            v
-        ])
+
+        self.seeker_state = np.array([pose.position.x, pose.position.y, yaw, v])
 
     def target_callback(self, msg: PoseWithCovarianceStamped):
         """Update target state"""
@@ -628,7 +613,7 @@ class MPCNode(Node):
         forward_dir = np.array([np.cos(robot_theta), np.sin(robot_theta)])
         
         # Only check obstacles that are:
-        # 1. CLOSE (within 0.20m)
+        # 1. CLOSE (within 0.25m)
         # 2. DIRECTLY AHEAD (within ±30 degrees of forward direction)
         blocking_obstacles = []
         for center, radius in obstacles:
@@ -637,7 +622,7 @@ class MPCNode(Node):
             dist_to_obstacle = np.linalg.norm(to_obstacle)
             
             # Skip if not close enough
-            if dist_to_obstacle > 0.15:
+            if dist_to_obstacle > 0.25:
                 continue
             
             # Check if it's ahead of us
@@ -811,6 +796,11 @@ class MPCNode(Node):
                 dist = np.linalg.norm(cone_pos - robot_pos)
                 key = (round(cone_pos[0], 2), round(cone_pos[1], 2))
                 
+                # Inflate cones more when they are close; camera tends to drop them late
+                cone_radius = max(self.obstacle_radius_param, 0.35)
+                if dist < 0.6:
+                    cone_radius += 0.15  # extra margin when close
+
                 # If LIDAR/grid already detected this cone, fuse camera for better pose
                 if key in all_obstacles:
                     existing_pos, existing_radius, existing_conf, existing_source = all_obstacles[key]
@@ -819,15 +809,17 @@ class MPCNode(Node):
                         # Fuse: 60% LIDAR (accurate distance) + 40% camera (accurate angle)
                         fused_pos = 0.6 * existing_pos + 0.4 * cone_pos
                         fused_conf = min(0.98, existing_conf + 0.08)  # Boost confidence
-                        all_obstacles[key] = (fused_pos, existing_radius, fused_conf, f'{existing_source}+camera')
+                        fused_radius = max(existing_radius, cone_radius)
+                        all_obstacles[key] = (fused_pos, fused_radius, fused_conf, f'{existing_source}+camera')
                     else:
                         # Far range: just boost confidence
                         fused_conf = min(0.95, existing_conf + 0.05)
-                        all_obstacles[key] = (existing_pos, existing_radius, fused_conf, existing_source)
+                        fused_radius = max(existing_radius, cone_radius)
+                        all_obstacles[key] = (existing_pos, fused_radius, fused_conf, existing_source)
                 else:
                     # No LIDAR detection - camera-only (less trusted, but still valid)
-                    camera_conf_final = 0.75 if dist < 1.0 else 0.65
-                    all_obstacles[key] = (cone_pos, self.obstacle_radius_param, camera_conf_final, 'camera')
+                    camera_conf_final = 0.80 if dist < 1.0 else 0.70
+                    all_obstacles[key] = (cone_pos, cone_radius, camera_conf_final, 'camera')
         
         # STEP 2: Fuse obstacles - Voxel Grid (processed LIDAR) is trusted
         # CRITICAL: Keep ALL obstacles - everything is an obstacle, we just distinguish cones
@@ -1225,10 +1217,10 @@ class MPCNode(Node):
                 if dist < 1.5 and dist > 0.02:
                     obstacles.append((np.array([corrected_x, corrected_y]), obstacle_radius))
         
-        # Limit to closest 30 obstacles (for performance)
-        if len(obstacles) > 30:
+        # Limit to closest 20 obstacles (for performance / MPC max_obstacles=20)
+        if len(obstacles) > 20:
             obstacles.sort(key=lambda obs: np.sqrt((obs[0][0]-robot_x)**2 + (obs[0][1]-robot_y)**2))
-            obstacles = obstacles[:30]
+            obstacles = obstacles[:20]
         
         # DEBUG
         if not hasattr(self, '_obstacle_count'):
@@ -1696,11 +1688,6 @@ class MPCNode(Node):
         # BUILD STATE FOR MPC
         x0 = self.seeker_state.copy()
         
-        # BUILD TARGET SEQUENCE (constant goal)
-        target_seq = np.zeros((2, self.N + 1))
-        target_seq[0, :] = self.goal_x
-        target_seq[1, :] = self.goal_y
-        
         # COMPUTE OBSTACLES - ONLY NEARBY ONES (within 1.5m) AND NOT BEHIND ROBOT
         all_obstacles = self.compute_obstacles()
         obstacles = []
@@ -1722,6 +1709,35 @@ class MPCNode(Node):
                     continue  # Skip obstacles behind us
             
             obstacles.append((center, radius))
+
+        # WAYPOINT LOGIC: if blocked ahead, generate a short waypoint to thread gaps
+        goal_vec = np.array([self.goal_x, self.goal_y])
+        if self.current_waypoint is None:
+            wp = self.generate_waypoint_if_blocked(x0, goal_vec, obstacles)
+            if wp is not None:
+                self.current_waypoint = wp
+                self.get_logger().info(
+                    f"🎯 Using waypoint ({wp[0]:.2f}, {wp[1]:.2f}) to bypass obstacle"
+                )
+        else:
+            # Clear waypoint if reached
+            if np.linalg.norm(self.current_waypoint - robot_pos) < self.waypoint_reached_threshold:
+                self.get_logger().info("✅ Waypoint reached, resuming goal")
+                self.current_waypoint = None
+                self.waypoint_cleared_time = self.get_clock().now()
+
+        # BUILD TARGET SEQUENCE (constant goal or waypoint)
+        target_seq = np.zeros((2, self.N + 1))
+        if self.current_waypoint is not None:
+            target_seq[0, :] = self.current_waypoint[0]
+            target_seq[1, :] = self.current_waypoint[1]
+        else:
+            target_seq[0, :] = self.goal_x
+            target_seq[1, :] = self.goal_y
+
+        # Compute proximity for adaptive speed scaling
+        min_obs_dist = self.compute_min_obstacle_distance(x0, obstacles)
+        self.velocity_scale_factor = self.compute_velocity_scale(min_obs_dist)
         
         # SET MPC VELOCITY LIMITS
         self.mpc.v_max = self.v_max_base
@@ -1733,6 +1749,14 @@ class MPCNode(Node):
         angle_to_goal = np.arctan2(dy_goal, dx_goal)
         angle_err = angle_to_goal - x0[2]
         angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
+
+        # If we're facing more than ~120° away from the goal, rotate in place before driving (more permissive).
+        if abs(angle_err) > (2*np.pi / 3):
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.angular.z = np.clip(angle_err, -self.omega_max, self.omega_max)
+            self.cmd_pub.publish(twist)
+            return
         
         # REACHED GOAL?
         if dist_to_goal < 0.1:
@@ -1754,6 +1778,8 @@ class MPCNode(Node):
             # Clip to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
             omega_cmd = np.clip(omega_cmd, -self.omega_max, self.omega_max)
+            # Adaptive slowdown near obstacles (less aggressive now)
+            v_cmd *= self.velocity_scale_factor
             
         except Exception as e:
             # Fallback to proportional control only if MPC completely fails
@@ -1812,26 +1838,23 @@ class MPCNode(Node):
         ALGORITHMIC IMPROVEMENT: Adaptive velocity scaling based on obstacle proximity.
         Less aggressive - allow progress even near obstacles.
         
-        Returns: scale factor in [0.5, 1.0] (was [0.3, 1.0] - too slow)
+        Returns: scale factor in [0.7, 1.0] to keep speed up but slow a bit more when very close
         """
         if min_obs_dist >= 0.8:
             # Far from obstacles - full speed
             return 1.0
-        elif min_obs_dist >= 0.4:
-            # Moderate distance - slight slowdown
-            # 0.8m -> 1.0, 0.4m -> 0.8
-            return 0.8 + 0.2 * (min_obs_dist - 0.4) / 0.4
-        elif min_obs_dist >= 0.25:
-            # Close - moderate slowdown
-            # 0.4m -> 0.8, 0.25m -> 0.6
-            return 0.6 + 0.2 * (min_obs_dist - 0.25) / 0.15
+        elif min_obs_dist >= 0.5:
+            # 0.8m -> 1.0, 0.5m -> 0.95
+            return 0.95 + 0.05 * (min_obs_dist - 0.5) / 0.3
+        elif min_obs_dist >= 0.3:
+            # 0.5m -> 0.95, 0.3m -> 0.85
+            return 0.85 + 0.10 * (min_obs_dist - 0.3) / 0.2
         elif min_obs_dist >= 0.15:
-            # Very close - significant slowdown but still move
-            # 0.25m -> 0.6, 0.15m -> 0.5
-            return 0.5 + 0.1 * (min_obs_dist - 0.15) / 0.1
+            # 0.3m -> 0.85, 0.15m -> 0.7
+            return 0.7 + 0.15 * (min_obs_dist - 0.15) / 0.15
         else:
-            # Extremely close - minimum speed (but still move!)
-            return 0.5  # Was 0.3 - too slow, now 0.5 for progress
+            # Extremely close
+            return 0.7
     
     def verify_full_trajectory_safety(self, x0, v, omega, obstacles, horizon_steps=15):
         """
@@ -1849,7 +1872,7 @@ class MPCNode(Node):
         x, y, theta, v_curr = x0[0], x0[1], x0[2], x0[3]
         min_clearance = float('inf')
         robot_radius = 0.105  # Robot radius
-        safety_margin = 0.08  # RELAXED: 8cm safety margin (was 15cm - too aggressive)
+        safety_margin = 0.12  # modest safety margin to prevent clipping
         
         for step in range(horizon_steps):
             # Simple kinematic model (same as MPC)
@@ -1976,4 +1999,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
