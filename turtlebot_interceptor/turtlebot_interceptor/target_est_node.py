@@ -95,9 +95,8 @@ class TargetEstimator(Node):
 
     def cone_cb(self, msg: PointStamped):
         """Handle camera cone detection with robust filtering"""
-        if self.locked_pose is not None:
-            # Already locked; ignore further updates
-            return
+        # Allow updates even if locked - CV detections can refine the estimate
+        # (removed early return to allow CV to update locked pose)
         
         # Extract detection position
         detection_pos = np.array([msg.point.x, msg.point.y])
@@ -155,18 +154,11 @@ class TargetEstimator(Node):
         now = self.get_clock().now()
         elapsed = (now - self.start_time).nanoseconds / 1e9
         
-        # Force-lock after warmup duration if not already locked
-        if self.locked_pose is None and elapsed >= self.warmup_duration:
-            # Use filtered state if available, otherwise raw state
-            pos_use = self.filtered_state if self.filtered_state is not None else self.state
-            yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else self.yaw
-            self.locked_pose = (pos_use[0], pos_use[1], yaw_use)
-            self.get_logger().info(
-                f"🔒 Warmup elapsed ({elapsed:.1f}s). Locking target pose at "
-                f"({pos_use[0]:.2f}, {pos_use[1]:.2f}), yaw={math.degrees(yaw_use):.1f}°"
-            )
-
-        # Determine which state to use (filtered if available, otherwise raw)
+        # CRITICAL: Trust warm start - user gave us a good guess!
+        # Check if warm start is non-zero (user actually provided it)
+        warm_start_provided = (abs(self.state[0]) > 0.01 or abs(self.state[1]) > 0.01)
+        
+        # Determine which state to use (filtered if available, otherwise raw/warm start)
         pos_use = self.filtered_state if self.filtered_state is not None else self.state
         
         # If we have recent detection, publish it
@@ -217,10 +209,31 @@ class TargetEstimator(Node):
                 self.publish_pose(pose, confidence=confidence)
                 return
 
-        # No detection yet: publish warm start with very low confidence
+        # No detection yet: publish warm start with HIGH confidence if user provided it
         yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else self.yaw
         pose = (pos_use[0], pos_use[1], yaw_use)
-        self.publish_pose(pose, confidence=0.15)  # Very low confidence for warm start
+        
+        # Trust warm start - user knows where target is!
+        if warm_start_provided:
+            confidence = 0.75  # HIGH confidence for user-provided warm start
+            self.get_logger().info(
+                f"🔥 Using warm start: ({pos_use[0]:.3f}, {pos_use[1]:.3f}), confidence={confidence:.2f}"
+            )
+        else:
+            confidence = 0.15  # Low confidence if no warm start provided
+        
+        self.publish_pose(pose, confidence=confidence)
+        
+        # Force-lock after warmup duration if not already locked
+        if self.locked_pose is None and elapsed >= self.warmup_duration:
+            # Use filtered state if available, otherwise raw/warm start
+            pos_use = self.filtered_state if self.filtered_state is not None else self.state
+            yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else self.yaw
+            self.locked_pose = (pos_use[0], pos_use[1], yaw_use)
+            self.get_logger().info(
+                f"🔒 Warmup elapsed ({elapsed:.1f}s). Locking target pose at "
+                f"({pos_use[0]:.2f}, {pos_use[1]:.2f}), yaw={math.degrees(yaw_use):.1f}°"
+            )
 
     def yaw_from_odom(self):
         """Compute relative yaw from odom frames if available."""
