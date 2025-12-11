@@ -43,6 +43,7 @@ setup(
                 'ekf_pose_estimator = turtlebot_interceptor.ekf_pose_estimator:main',  # EKF sensor fusion (IMU + Mag + Encoders)
                 'cartographer_pose_bridge = turtlebot_interceptor.cartographer_pose_bridge:main',  # Bridge Cartographer pose to /amcl_pose
                 'fast_local_grid = turtlebot_interceptor.fast_local_grid:main',  # Fast local occupancy grid (5-10 Hz)
+                'fast_local_grid_target = turtlebot_interceptor.fast_local_grid_target:main',  # Fast local occupancy grid (5-10 Hz)
                 'navigation_visualizer = turtlebot_interceptor.navigation_visualizer_node:main',  # RViz visualization
                 'animated_sim = turtlebot_interceptor.animated_sim:main',  # Standalone simulation
                 'target_est_node = turtlebot_interceptor.target_est_node:main',

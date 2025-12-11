@@ -75,11 +75,11 @@ class SimplePosePublisher(Node):
         if not hasattr(self, '_pose_pub_count'):
             self._pose_pub_count = 0
         self._pose_pub_count += 1
-        if self._pose_pub_count % 50 == 0:  # Every 5 seconds at 10Hz
-            self.get_logger().info(
-                f'Published pose: ({msg.pose.pose.position.x:.2f}, '
-                f'{msg.pose.pose.position.y:.2f})'
-            )
+        # if self._pose_pub_count % 50 == 0:  # Every 5 seconds at 10Hz
+        #     self.get_logger().info(
+        #         f'Published pose: ({msg.pose.pose.position.x:.2f}, '
+        #         f'{msg.pose.pose.position.y:.2f})'
+        #     )
     
     def publish_static_pose(self):
         """Publish static pose at origin (for testing)"""
