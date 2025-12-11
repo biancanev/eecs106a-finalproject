@@ -35,6 +35,7 @@ setup(
                 'mpc_node = turtlebot_interceptor.mpc_node:main',
                 'mcl_node = turtlebot_interceptor.mcl_node:main',
                 'ukf_node = turtlebot_interceptor.ukf_node:main',
+                'move_target = turtlebot_interceptor.move_target:main',
                 'target_kf_node = turtlebot_interceptor.target_kf_node:main',  # Legacy - uses UKF
                 'target_measurement_node = turtlebot_interceptor.target_measurement_node:main',  # Artificial + terminal homing
                 'slam_node = turtlebot_interceptor.slam_node:main',
