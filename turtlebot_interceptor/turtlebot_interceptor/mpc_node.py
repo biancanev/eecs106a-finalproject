@@ -434,9 +434,10 @@ class MPCNode(Node):
             center = np.mean(cluster_points, axis=0)
             distances = np.linalg.norm(cluster_points - center, axis=1)
             radius = np.max(distances) + 0.05  # Add 5cm safety margin
-            
+            # Inflate further for safety around cones/people
+            radius += 0.14  # moderate inflation to avoid cones without over-bloating
             # Ensure minimum radius
-            radius = max(radius, 0.08)
+            radius = max(radius, 0.14)
             
             obstacles.append((center, radius))
         
@@ -1825,10 +1826,14 @@ class MPCNode(Node):
         # Compute proximity for adaptive speed scaling
         min_obs_dist = self.compute_min_obstacle_distance(x0, obstacles)
         self.velocity_scale_factor = self.compute_velocity_scale(min_obs_dist)
+        # Extra caution near obstacles: throttle v_max and overall scaling
+        if min_obs_dist < 0.5:
+            self.mpc.v_max = min(self.mpc.v_max, 0.14)
+            self.velocity_scale_factor = min(self.velocity_scale_factor, max(0.35, min_obs_dist / 0.5 * 0.7))
         # Softer angular limit everywhere (reduces over-rotation)
         self.soft_omega_limit = max(
-            0.5,
-            min(self.omega_max * 0.6, 0.7 + 0.3 * max(0.0, min_obs_dist))
+            0.35,  # allow very gentle turns
+            min(self.omega_max * 0.5, 0.6 + 0.2 * max(0.0, min_obs_dist))
         )
         
         # SET MPC VELOCITY LIMITS
@@ -1854,7 +1859,9 @@ class MPCNode(Node):
         if self.line_of_sight_clear(x0[:2], np.array([tgt_x, tgt_y]), obstacles, safety_margin=0.2) \
            and abs(angle_err) < np.pi / 2 and min_obs_dist > 0.25:
             twist = Twist()
-            twist.linear.x = min(self.mpc.v_max, self.v_max_base) * self.velocity_scale_factor
+            # Slow down when obstacles are near; very cautious within 0.5m
+            speed_scale = 0.5 if min_obs_dist < 0.5 else 1.0
+            twist.linear.x = min(self.mpc.v_max, self.v_max_base) * self.velocity_scale_factor * speed_scale
             twist.angular.z = np.clip(self.Kp_w * angle_err, -omega_limit, omega_limit)
             if self.is_command_safe(twist.linear.x, twist.angular.z):
                 self.cmd_pub.publish(twist)
@@ -1868,8 +1875,12 @@ class MPCNode(Node):
             self.cmd_pub.publish(twist)
             return
         
+        # FINAL APPROACH MODE: slow down when very close to target/goal
+        if dist_to_goal < 0.5:
+            self.mpc.v_max = min(self.mpc.v_max, 0.15)
+            self.velocity_scale_factor = min(self.velocity_scale_factor, 0.6)
         # REACHED GOAL?
-        if dist_to_goal < 0.6:
+        if dist_to_goal < 0.15:
             twist = Twist()
             self.cmd_pub.publish(twist)
             return
@@ -1888,9 +1899,14 @@ class MPCNode(Node):
             # Clip to safe limits
             v_cmd = np.clip(v_cmd, self.v_min, self.mpc.v_max)
             v_cmd = max(0.0, v_cmd)  # avoid backing toward target
-            omega_cmd = np.clip(omega_cmd, -self.soft_omega_limit, self.soft_omega_limit)
-            # Adaptive slowdown near obstacles (less aggressive now)
-            v_cmd *= self.velocity_scale_factor
+            # Slow and gentle turns near obstacles, but keep enough turning authority
+            if min_obs_dist < 0.6:
+                v_cmd = min(v_cmd, 0.14)
+                omega_cmd = np.clip(omega_cmd, -0.6, 0.6)
+            else:
+                omega_cmd = np.clip(omega_cmd, -self.soft_omega_limit, self.soft_omega_limit)
+            # Adaptive slowdown near obstacles (stronger)
+            v_cmd *= min(self.velocity_scale_factor, 0.75 if min_obs_dist < 0.8 else 1.0)
             
         except Exception as e:
             # Fallback to proportional control only if MPC completely fails
@@ -1917,7 +1933,21 @@ class MPCNode(Node):
             self.get_logger().warn('MPC command trimmed by safety check')
 
         self.cmd_pub.publish(twist)
-        
+
+        # Heartbeat when we appear stationary to help debug "freezes"
+        speed_mag = abs(twist.linear.x) + abs(twist.angular.z)
+        if speed_mag < 1e-3:
+            now = self.get_clock().now()
+            if not hasattr(self, '_idle_last_log'):
+                self._idle_last_log = now
+            elapsed_idle = (now - self._idle_last_log).nanoseconds / 1e9
+            if elapsed_idle > 2.0:
+                self._idle_last_log = now
+                self.get_logger().warn(
+                    f'🛑 Idle: dist_to_goal={dist_to_goal:.2f}m, target_avail={self.target_pose is not None}, '
+                    f'obstacles={len(obstacles)}, warmup_left={max(self.startup_warmup - elapsed,0):.1f}s'
+                )
+
         # Record trajectory history
         if self.seeker_state is not None:
             self.trajectory_history.append({
