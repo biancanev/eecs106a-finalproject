@@ -22,7 +22,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'goal_x',
-            default_value='1.5',
+            default_value='0.0',
             description='Goal X position (meters)'
         ),
         DeclareLaunchArgument(
@@ -37,7 +37,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'obstacle_radius',
-            default_value='0.20',
+            default_value='0.08',
             description='Obstacle radius in meters (smaller = less conservative)'
         ),
         
@@ -87,6 +87,38 @@ def generate_launch_description():
             package='turtlebot_interceptor',
             executable='fast_local_grid',
             name='fast_local_grid',
+            output='screen'
+        ),
+        # Target-side fast local grid (for target estimator alignment)
+        Node(
+            package='turtlebot_interceptor',
+            executable='fast_local_grid_target',
+            name='fast_local_grid_target',
+            output='screen'
+        ),
+
+        # Target EKF (fuses pose measurements into smooth target estimate)
+        Node(
+            package='turtlebot_interceptor',
+            executable='target_ekf_node',
+            name='target_ekf_node',
+            parameters=[{
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+            }],
+            output='screen'
+        ),
+
+        # Target estimator (align target map to seeker map) -> drives seeker toward target
+        Node(
+            package='turtlebot_interceptor',
+            executable='target_est_node',
+            name='target_estimator',
+            parameters=[{
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+            }],
+            remappings=[
+                ('/target_est', '/target_estimate'),  # feed MPC
+            ],
             output='screen'
         ),
         

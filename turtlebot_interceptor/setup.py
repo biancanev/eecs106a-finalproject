@@ -42,6 +42,8 @@ setup(
                 'lidar_processor_node = turtlebot_interceptor.lidar_processor_node:main',
                 'simple_pose_publisher = turtlebot_interceptor.simple_pose_publisher:main',  # For LIDAR validation
                 'ekf_pose_estimator = turtlebot_interceptor.ekf_pose_estimator:main',  # EKF sensor fusion (IMU + Mag + Encoders)
+                'target_ekf_node = turtlebot_interceptor.target_ekf_node:main',  # Target EKF (CV) tracker
+                'initial_target_publisher = turtlebot_interceptor.initial_target_publisher:main',  # Seed target estimate
                 'cartographer_pose_bridge = turtlebot_interceptor.cartographer_pose_bridge:main',  # Bridge Cartographer pose to /amcl_pose
                 'fast_local_grid = turtlebot_interceptor.fast_local_grid:main',  # Fast local occupancy grid (5-10 Hz)
                 'fast_local_grid_target = turtlebot_interceptor.fast_local_grid_target:main',  # Fast local occupancy grid (5-10 Hz)
@@ -51,6 +53,7 @@ setup(
                 'camera_cone_detector = turtlebot_interceptor.camera_cone_detector:main',  # Camera-based yellow cone detection
                 'test_camera_cones = turtlebot_interceptor.test_camera_cones:main',  # Test camera cone detection
                 'drive_tester = turtlebot_interceptor.drive_tester:main',  # Drive patterns and compare EKF vs AMCL
+                'trajectory_logger = turtlebot_interceptor.trajectory_logger:main',  # Post-processing logger
         ],
     },
 )

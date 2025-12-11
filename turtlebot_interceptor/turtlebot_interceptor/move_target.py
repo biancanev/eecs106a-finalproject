@@ -27,7 +27,8 @@ class MoveTarget(Node):
         # Timer
         self.timer = self.create_timer(2.0, self.move)  # Check every second
         self.start_time = time.time()  # Store the start time
-        self.moving = True  # Flag to check if 60 seconds are up
+        self.warmup_duration = 65.0
+        self.moving = False  # Hold still until warmup finishes
         self.mode = 'circle'  # Default mode, change this to 'line' or 'square' as needed
         self.state = 'forwards'
         self.side_length = 2.0  # Side length for square movement (in meters)
@@ -36,10 +37,10 @@ class MoveTarget(Node):
     def move(self):
         current_time = time.time()
 
-        # Only start moving after 60 seconds
-        if current_time - self.start_time >= 60 and not self.moving:
+        # Only start moving after warmup
+        if current_time - self.start_time >= self.warmup_duration and not self.moving:
             self.moving = True
-            self.get_logger().info("60 seconds have passed, starting movement.")
+            self.get_logger().info(f"{int(self.warmup_duration)} seconds have passed, starting movement.")
 
         if self.moving:
             if self.mode == 'circle':
@@ -49,7 +50,8 @@ class MoveTarget(Node):
             elif self.mode == 'square':
                 self.move_square()
         else:
-            self.get_logger().info(f"Waiting to start movement... {60 - int(current_time - self.start_time)} seconds remaining.")
+            remaining = max(int(self.warmup_duration - (current_time - self.start_time)), 0)
+            self.get_logger().info(f"Waiting to start movement... {remaining} seconds remaining.")
 
     def move_circle(self):
         twist = Twist()

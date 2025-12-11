@@ -29,6 +29,7 @@ class MPCNode(Node):
         self.declare_parameter('v_max_base', 0.6)
         self.declare_parameter('v_min', 0.0)
         self.declare_parameter('omega_max', 1.5)
+        self.declare_parameter('startup_warmup', 65.0)
         # use_sim_time may be passed from launch file - declare only if not already set
         try:
             self.declare_parameter('use_sim_time', False)
@@ -45,6 +46,7 @@ class MPCNode(Node):
         self.v_max_base = self.get_parameter('v_max_base').get_parameter_value().double_value
         self.v_min = self.get_parameter('v_min').get_parameter_value().double_value
         self.omega_max = self.get_parameter('omega_max').get_parameter_value().double_value
+        self.startup_warmup = self.get_parameter('startup_warmup').get_parameter_value().double_value
         # Fallback control gains
         self.Kp_v = self.get_parameter('Kp_v').get_parameter_value().double_value
         self.Kp_w = self.get_parameter('Kp_w').get_parameter_value().double_value
@@ -64,7 +66,7 @@ class MPCNode(Node):
         self.declare_parameter('goal_x', 1.5)
         self.declare_parameter('goal_y', 1.5)
         self.declare_parameter('max_obstacles', 100)  # Max number of obstacles to track
-        self.declare_parameter('obstacle_radius', 0.25)  # Default obstacle radius (meters) - INCREASED for safety
+        self.declare_parameter('obstacle_radius', 0.08)  # Default obstacle radius (meters) - INCREASED for safety
         
         # CRITICAL FIX: Handle both int and float types for goal parameters
         # When user passes goal_x:=0 or goal_y:=0, ROS2 interprets as INTEGER, not DOUBLE
@@ -91,6 +93,13 @@ class MPCNode(Node):
         self.target_sub = self.create_subscription(
             PoseWithCovarianceStamped,
             '/target_estimate',
+            self.target_callback,
+            10
+        )
+        # Slower, covariance-inflated broadcast coming from UKF to keep the seeker cautious
+        self.target_sub_slow = self.create_subscription(
+            PoseWithCovarianceStamped,
+            '/target_estimate_slow',
             self.target_callback,
             10
         )
@@ -215,18 +224,20 @@ class MPCNode(Node):
         self.prev_state = None  # Previous state for velocity estimation
         self.prev_velocity = 0.0  # Previous velocity (lab8 pattern)
         self.prev_time = None  # Previous timestamp for accurate velocity estimation
+        self.target_velocity = np.zeros(2)
+        self.target_stamp = None
+        self.max_target_jump = 1.5  # meters; reject obviously bad jumps
 
         # Initialize MPC
         self.mpc = SimpleUnicycleMPC(horizon=self.N, dt=self.dt)
 
-        # Startup: 5 second test routine (forward/backward) then MPC starts
         self.startup_time = self.get_clock().now()
 
         # Timer for MPC updates
         self.timer = self.create_timer(self.dt, self.timer_callback)
 
         self.get_logger().info(
-            f'🚀 MPC node initialized - Starting 5s motor test (forward/backward), then MPC control'
+            f'🚀 MPC node initialized - {self.startup_warmup:.0f}s warmup before commanding (sensors + target EKF)'
         )
 
     def map_callback(self, msg: OccupancyGrid):
@@ -1730,15 +1741,16 @@ class MPCNode(Node):
     def timer_callback(self):
         """SIMPLE PROPORTIONAL CONTROL - GO STRAIGHT TO GOAL"""
         elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
-        
-        # Wait 2 seconds for sensors
-        if elapsed < 2.0:
+
+        # Warmup to let EKF/UKF settle before commanding
+        if elapsed < self.startup_warmup:
             twist = Twist()
             twist.linear.x = 0.0
             twist.angular.z = 0.0
             self.cmd_pub.publish(twist)
-            if int(elapsed * 10) % 20 == 0:
-                self.get_logger().info(f'⏳ Waiting for sensors... {2.0 - elapsed:.1f}s')
+            if int(elapsed) % 5 == 0:
+                remaining = max(self.startup_warmup - elapsed, 0.0)
+                self.get_logger().info(f'⏳ Warmup ({remaining:.0f}s left) - holding position')
             return
         
         # NO POSE - can't navigate
@@ -1773,7 +1785,10 @@ class MPCNode(Node):
             obstacles.append((center, radius))
 
         # WAYPOINT LOGIC: if blocked ahead, generate a short waypoint to thread gaps
-        goal_vec = np.array([self.goal_x, self.goal_y])
+        if self.target_pose is not None:
+            goal_vec = np.array([self.target_pose.position.x, self.target_pose.position.y])
+        else:
+            goal_vec = np.array([self.goal_x, self.goal_y])
         if self.current_waypoint is None:
             wp = self.generate_waypoint_if_blocked(x0, goal_vec, obstacles)
             if wp is not None:
@@ -1788,35 +1803,64 @@ class MPCNode(Node):
                 self.current_waypoint = None
                 self.waypoint_cleared_time = self.get_clock().now()
 
-        # BUILD TARGET SEQUENCE (constant goal or waypoint)
-        target_seq = np.zeros((2, self.N + 1))
-        if self.current_waypoint is not None:
-            target_seq[0, :] = self.current_waypoint[0]
-            target_seq[1, :] = self.current_waypoint[1]
-        else:
-            target_seq[0, :] = self.goal_x
-            target_seq[1, :] = self.goal_y
+        # BUILD TARGET SEQUENCE (prefer EKF target, fall back to waypoint/goal)
+        target_seq = self.predict_target_trajectory()
+        if target_seq is None:
+            target_seq = np.zeros((2, self.N + 1))
+            if self.current_waypoint is not None:
+                target_seq[0, :] = self.current_waypoint[0]
+                target_seq[1, :] = self.current_waypoint[1]
+            else:
+                target_seq[0, :] = self.goal_x
+                target_seq[1, :] = self.goal_y
+
+        # Primary target for heading/arrival checks
+        tgt_x = float(target_seq[0, 0])
+        tgt_y = float(target_seq[1, 0])
 
         # Compute proximity for adaptive speed scaling
         min_obs_dist = self.compute_min_obstacle_distance(x0, obstacles)
         self.velocity_scale_factor = self.compute_velocity_scale(min_obs_dist)
+        # Softer angular limit everywhere (reduces over-rotation)
+        self.soft_omega_limit = max(
+            0.5,
+            min(self.omega_max * 0.6, 0.7 + 0.3 * max(0.0, min_obs_dist))
+        )
         
         # SET MPC VELOCITY LIMITS
         self.mpc.v_max = self.v_max_base
-        
+        # Slow down if target covariance is inflated (uncertainty)
+        if self.target_cov is not None:
+            pos_cov_trace = np.trace(self.target_cov[:2, :2])
+            if pos_cov_trace > 0.5:
+                scale = max(0.4, min(1.0, 1.0 / (pos_cov_trace)))
+                self.mpc.v_max = self.v_max_base * scale
+                self.get_logger().debug(f'Target covariance trace={pos_cov_trace:.2f}, scaling v_max -> {self.mpc.v_max:.2f}')
+
         # COMPUTE GOAL DIRECTION FIRST
-        dx_goal = self.goal_x - x0[0]
-        dy_goal = self.goal_y - x0[1]
+        dx_goal = tgt_x - x0[0]
+        dy_goal = tgt_y - x0[1]
         dist_to_goal = np.sqrt(dx_goal**2 + dy_goal**2)
         angle_to_goal = np.arctan2(dy_goal, dx_goal)
         angle_err = angle_to_goal - x0[2]
         angle_err = np.mod(angle_err + np.pi, 2*np.pi) - np.pi
 
+        # If straight line is clear and heading is reasonable, drive straight to avoid needless weaving
+        omega_limit = self.soft_omega_limit  # soften turning globally
+        if self.line_of_sight_clear(x0[:2], np.array([tgt_x, tgt_y]), obstacles, safety_margin=0.2) \
+           and abs(angle_err) < np.pi / 2 and min_obs_dist > 0.25:
+            twist = Twist()
+            twist.linear.x = min(self.mpc.v_max, self.v_max_base) * self.velocity_scale_factor
+            twist.angular.z = np.clip(self.Kp_w * angle_err, -omega_limit, omega_limit)
+            if self.is_command_safe(twist.linear.x, twist.angular.z):
+                self.cmd_pub.publish(twist)
+                return
+
         # If we're facing more than ~120° away from the goal, rotate in place before driving (more permissive).
         if abs(angle_err) > (2*np.pi / 3):
             twist = Twist()
             twist.linear.x = 0.0
-            twist.angular.z = np.clip(angle_err, -self.omega_max, self.omega_max)
+            twist.angular.z = np.clip(angle_err, -omega_limit, omega_limit)
             self.cmd_pub.publish(twist)
             return
         
@@ -1838,8 +1882,8 @@ class MPCNode(Node):
                 raise ValueError("MPC solution contains NaN or Inf")
             
             # Clip to safe limits
-            v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
-            omega_cmd = np.clip(omega_cmd, -self.omega_max, self.omega_max)
+            v_cmd = np.clip(v_cmd, self.v_min, self.mpc.v_max)
+            omega_cmd = np.clip(omega_cmd, -self.soft_omega_limit, self.soft_omega_limit)
             # Adaptive slowdown near obstacles (less aggressive now)
             v_cmd *= self.velocity_scale_factor
             
@@ -1861,6 +1905,12 @@ class MPCNode(Node):
         twist.angular.x = 0.0
         twist.angular.y = 0.0
         twist.angular.z = float(omega_cmd)
+        # Safety check using current scan; if unsafe, trim speed
+        if not self.is_command_safe(twist.linear.x, twist.angular.z):
+            twist.linear.x *= 0.5
+            twist.angular.z *= 0.7
+            self.get_logger().warn('MPC command trimmed by safety check')
+
         self.cmd_pub.publish(twist)
         
         # Record trajectory history
@@ -1894,29 +1944,54 @@ class MPCNode(Node):
             min_dist = min(min_dist, dist_to_surface)
         
         return max(0.0, min_dist)  # Clamp to non-negative
+
+    def line_of_sight_clear(self, start, goal, obstacles, safety_margin=0.2):
+        """Check if straight path from start to goal is free of obstacles (circle models)."""
+        if goal is None or start is None:
+            return False
+        if np.allclose(start, goal):
+            return True
+        for center, radius in obstacles:
+            dist = self.point_to_segment_distance(center, start, goal)
+            if dist < (radius + safety_margin):
+                return False
+        return True
+
+    def point_to_segment_distance(self, point, a, b):
+        """Compute distance from point to line segment ab."""
+        a = np.array(a)
+        b = np.array(b)
+        p = np.array(point)
+        ab = b - a
+        denom = np.dot(ab, ab)
+        if denom < 1e-9:
+            return np.linalg.norm(p - a)
+        t = np.clip(np.dot(p - a, ab) / denom, 0.0, 1.0)
+        proj = a + t * ab
+        return np.linalg.norm(p - proj)
     
     def compute_velocity_scale(self, min_obs_dist):
         """
         ALGORITHMIC IMPROVEMENT: Adaptive velocity scaling based on obstacle proximity.
         Less aggressive - allow progress even near obstacles.
         
-        Returns: scale factor in [0.7, 1.0] to keep speed up but slow a bit more when very close
+        Returns: scale factor in [0.5, 1.0] to keep speed up but slow more when very close
         """
         if min_obs_dist >= 0.8:
             # Far from obstacles - full speed
             return 1.0
         elif min_obs_dist >= 0.5:
-            # 0.8m -> 1.0, 0.5m -> 0.95
-            return 0.95 + 0.05 * (min_obs_dist - 0.5) / 0.3
+            # 0.8m -> 1.0, 0.5m -> 0.9
+            return 0.9 + 0.1 * (min_obs_dist - 0.5) / 0.3
         elif min_obs_dist >= 0.3:
-            # 0.5m -> 0.95, 0.3m -> 0.85
-            return 0.85 + 0.10 * (min_obs_dist - 0.3) / 0.2
+            # 0.5m -> 0.9, 0.3m -> 0.75
+            return 0.75 + 0.15 * (min_obs_dist - 0.3) / 0.2
         elif min_obs_dist >= 0.15:
-            # 0.3m -> 0.85, 0.15m -> 0.7
-            return 0.7 + 0.15 * (min_obs_dist - 0.15) / 0.15
+            # 0.3m -> 0.75, 0.15m -> 0.6
+            return 0.6 + 0.15 * (min_obs_dist - 0.15) / 0.15
         else:
             # Extremely close
-            return 0.7
+            return 0.5
     
     def verify_full_trajectory_safety(self, x0, v, omega, obstacles, horizon_steps=15):
         """
@@ -2046,7 +2121,8 @@ class MPCNode(Node):
         
         # Clip to limits
         v_cmd = np.clip(v_cmd, self.v_min, self.v_max_base)
-        omega_cmd = np.clip(omega_cmd, -self.omega_max, self.omega_max)
+        omega_limit = getattr(self, 'soft_omega_limit', self.omega_max * 0.6)
+        omega_cmd = np.clip(omega_cmd, -omega_limit, omega_limit)
         
         return v_cmd, omega_cmd
 

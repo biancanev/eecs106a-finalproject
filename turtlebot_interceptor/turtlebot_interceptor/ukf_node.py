@@ -177,12 +177,18 @@ class UKFNode(Node):
         self.declare_parameter('dt', 0.1)
         self.declare_parameter('process_noise', 0.02)
         self.declare_parameter('measurement_noise', 0.03)
+        self.declare_parameter('seeker_pub_period', 5.0)
+        self.declare_parameter('seeker_covariance_scale', 4.0)
+        self.declare_parameter('warmup_duration', 65.0)
         self.declare_parameter('use_sim_time', False)
         
         # Get parameters
         dt = self.get_parameter('dt').get_parameter_value().double_value
         process_noise = self.get_parameter('process_noise').get_parameter_value().double_value
         measurement_noise = self.get_parameter('measurement_noise').get_parameter_value().double_value
+        self.seeker_pub_period = self.get_parameter('seeker_pub_period').get_parameter_value().double_value
+        self.seeker_cov_scale = self.get_parameter('seeker_covariance_scale').get_parameter_value().double_value
+        self.warmup_duration = self.get_parameter('warmup_duration').get_parameter_value().double_value
         
         # UKF instance with parameters
         self.ukf = SimpleUKF(dt=dt)
@@ -203,9 +209,19 @@ class UKFNode(Node):
             '/target_estimate',
             10
         )
+        # Slow, cautious broadcast for the seeker (inflated covariance, 5s cadence)
+        self.target_est_pub_slow = self.create_publisher(
+            PoseWithCovarianceStamped,
+            '/target_estimate_slow',
+            10
+        )
         
         # Timer for prediction (UKF always predicts, even without measurements)
         self.prediction_timer = self.create_timer(dt, self.prediction_timer_callback)
+
+        # Throttled publisher for seeker feed (covariance-inflated, slow cadence)
+        self.start_time = self.get_clock().now()
+        self.slow_pub_timer = self.create_timer(self.seeker_pub_period, self.publish_inflated_estimate)
         
         self.get_logger().info('UKF node initialized - ready for hardware')
     
@@ -251,8 +267,57 @@ class UKFNode(Node):
         cov_6x6[:2, :2] = cov[:2, :2]  # Position covariance
         cov_6x6[3:5, 3:5] = cov[2:, 2:]  # Velocity covariance (in orientation field)
         msg.pose.covariance = cov_6x6.flatten().tolist()
-        
+
         self.target_est_pub.publish(msg)
+
+        # Optionally mirror to the seeker feed immediately when called by measurement callbacks
+        # (slow timer also publishes, but immediate updates help reduce lag after a new measurement)
+        self.publish_inflated_estimate(immediate_msg=msg)
+
+    def publish_inflated_estimate(self, immediate_msg=None):
+        """
+        Publish a throttled, covariance-inflated estimate for the seeker/MPC.
+        - Waits for warmup to finish so sensors/filters settle.
+        - Inflates covariance to encourage conservative planning when updates are sparse.
+        """
+        # Respect warmup period
+        elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
+        if elapsed < self.warmup_duration:
+            return
+
+        if not self.ukf.initialized:
+            return
+
+        # Reuse the freshly built msg if provided (saves copies), otherwise build anew
+        if immediate_msg is not None:
+            msg = PoseWithCovarianceStamped()
+            msg.header = immediate_msg.header
+            msg.pose = immediate_msg.pose
+        else:
+            state = self.ukf.get_state()
+            cov = self.ukf.P
+
+            msg = PoseWithCovarianceStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'map'
+            msg.pose.pose.position.x = float(state[0, 0])
+            msg.pose.pose.position.y = float(state[1, 0])
+            msg.pose.pose.position.z = 0.0
+            msg.pose.pose.orientation.w = 1.0
+
+            cov_6x6 = np.zeros((6, 6))
+            cov_6x6[:2, :2] = cov[:2, :2]
+            cov_6x6[3:5, 3:5] = cov[2:, 2:]
+            msg.pose.covariance = cov_6x6.flatten().tolist()
+
+        # Inflate covariance to reflect stale updates / conservative interception
+        cov_matrix = np.array(msg.pose.covariance).reshape((6, 6))
+        cov_matrix[:2, :2] *= self.seeker_cov_scale
+        cov_matrix[3:5, 3:5] *= self.seeker_cov_scale
+        msg.pose.covariance = cov_matrix.flatten().tolist()
+
+        msg.header.stamp = self.get_clock().now().to_msg()
+        self.target_est_pub_slow.publish(msg)
 
 
 def main(args=None):
@@ -265,4 +330,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
