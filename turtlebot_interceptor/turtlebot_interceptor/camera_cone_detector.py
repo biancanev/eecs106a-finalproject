@@ -65,7 +65,12 @@ class CameraConeDetector(Node):
                 self.get_logger().warn(f'⚠️ Failed to load YOLO model: {e}, using color-based detection')
         
         # Cone area in meters^2 (lab8 pattern)
-        self.CONE_AREA = 0.0208227849  # m^2
+        # Yellow cones (obstacles) - original size
+        self.CONE_AREA = 0.0208227849  # m^2 (for yellow cones)
+        
+        # Blue target cone is 4-5x bigger than yellow cones
+        # Using 4.5x (middle of 4-5x range) for accurate depth estimation
+        self.TARGET_CONE_AREA = 0.0208227849 * 4.5  # ~0.0937 m^2 (for blue target cone)
         
         # Transform from camera to base_link (lab8 pattern)
         # G = [[0, 0, 1, 0.115],
@@ -302,18 +307,24 @@ class CameraConeDetector(Node):
         
         # Process detections and convert to world coordinates
         if len(cones_yellow) > 0:
-            processed_cones = self.process_cone_detections(cones_yellow, cv_image)
+            processed_cones = self.process_cone_detections(cones_yellow, cv_image, is_target=False)
             if len(processed_cones) > 0:
                 self.publish_cones(processed_cones, msg.header)
                 self.publish_cones_local(processed_cones, msg.header)
         if len(cones_blue) > 0:
-            processed_targets = self.process_cone_detections(cones_blue, cv_image)
+            processed_targets = self.process_cone_detections(cones_blue, cv_image, is_target=True)
             if len(processed_targets) > 0:
                 self.update_and_publish_target(processed_targets, msg.header)
     
-    def process_cone_detections(self, cones, cv_image):
+    def process_cone_detections(self, cones, cv_image, is_target=False):
         """
         Process detected cones and convert to world coordinates (lab8 pattern).
+        
+        Args:
+            cones: List of detected cones
+            cv_image: OpenCV image
+            is_target: True if blue target cone (uses larger area), False for yellow cones
+        
         Returns list of (world_x, world_y, depth, confidence, pixel_pos) tuples.
         """
         processed = []
@@ -323,7 +334,8 @@ class CameraConeDetector(Node):
         
         for cx, cy, w, h, area, mask_pixels in cones:
             # Use mask pixel count for depth estimation (lab8 pattern)
-            point_3d, depth = self.pixel_to_3d_from_mask(mask_pixels, cy, cx)  # u=y, v=x
+            # Pass is_target flag to use correct cone area (larger for blue target)
+            point_3d, depth = self.pixel_to_3d_from_mask(mask_pixels, cy, cx, is_target=is_target)  # u=y, v=x
             
             if point_3d is None:
                 continue
@@ -643,14 +655,15 @@ class CameraConeDetector(Node):
             cones.append((center_x, center_y, w, h, area, mask_pixels))
         return cones
     
-    def pixel_to_3d_from_mask(self, mask_pixels, u, v):
+    def pixel_to_3d_from_mask(self, mask_pixels, u, v, is_target=False):
         """
         Convert pixel coordinates to 3D using mask pixel count (lab8 pattern).
         Uses heuristic: depth = sqrt((fx * fy * CONE_AREA) / pixel_count)
         
         Args:
-            mask_pixels: Number of pixels in the mask (yellow region)
+            mask_pixels: Number of pixels in the mask
             u, v: Pixel coordinates (u=y, v=x in image)
+            is_target: True for blue target cone (uses TARGET_CONE_AREA), False for yellow (uses CONE_AREA)
         
         Returns:
             (x, y, z) in camera frame, estimated_depth
@@ -661,9 +674,18 @@ class CameraConeDetector(Node):
         fx, fy, cx, cy = self.camera_intrinsics
         
         # Depth estimation from pixel count (lab8 pattern)
-        # depth = sqrt((fx * fy * CONE_AREA) / pixel_count)
-        depth = np.sqrt((fx * fy * self.CONE_AREA) / mask_pixels)
+        # Use larger area for blue target cone (4.5x bigger), smaller for yellow cones
+        cone_area = self.TARGET_CONE_AREA if is_target else self.CONE_AREA
+        depth = np.sqrt((fx * fy * cone_area) / mask_pixels)
         depth = np.clip(depth, 0.2, self.max_range)
+        
+        # Log which area is being used (first time only)
+        if not hasattr(self, '_cone_area_logged'):
+            self.get_logger().info(
+                f'📐 Depth calculation: Yellow cones use area={self.CONE_AREA:.6f} m², '
+                f'Blue target uses area={self.TARGET_CONE_AREA:.6f} m² (4.5x larger)'
+            )
+            self._cone_area_logged = True
         
         # Convert pixel to 3D (lab8 pattern: v=x, u=y)
         X = (v - cx) * depth / fx  # v is x-coordinate in image
@@ -838,33 +860,37 @@ class CameraConeDetector(Node):
             if detection_count < self.cone_min_detections:
                 continue
             
-            # Create BRIGHT YELLOW marker - CLEAN and STABLE
+            # Create BRIGHT YELLOW CYLINDER marker - CLEAN and STABLE
             marker = Marker()
             marker.header.frame_id = "map"
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = "camera_cones"
-            marker.id = len(marker_array.markers)  # Sequential IDs
-            marker.type = Marker.CYLINDER
-            marker.action = Marker.ADD
+            marker.id = len(marker_array.markers)  # Sequential IDs (0, 1, 2, ...)
+            # CRITICAL: Use CYLINDER (3) not SPHERE (2) for yellow cones
+            marker.type = Marker.CYLINDER  # CYLINDER = 3, SPHERE = 2
+            marker.action = Marker.ADD  # ADD = 0
             
             marker.pose.position.x = float(smoothed_pos[0])
             marker.pose.position.y = float(smoothed_pos[1])
             marker.pose.position.z = 0.0
             marker.pose.orientation.w = 1.0
+            marker.pose.orientation.x = 0.0
+            marker.pose.orientation.y = 0.0
+            marker.pose.orientation.z = 0.0
             
-            # Cone dimensions
-            marker.scale.x = self.cone_diameter
-            marker.scale.y = self.cone_diameter
-            marker.scale.z = self.cone_height
+            # Cone dimensions (cylinder: x/y = diameter, z = height)
+            marker.scale.x = self.cone_diameter  # 0.15m diameter
+            marker.scale.y = self.cone_diameter  # 0.15m diameter
+            marker.scale.z = self.cone_height    # 0.3m height
             
-            # BRIGHT YELLOW - ensure correct color (not purple!)
+            # BRIGHT YELLOW color - CRITICAL: r=1.0, g=1.0, b=0.0 (NOT purple!)
             marker.color.r = 1.0  # Full red
             marker.color.g = 1.0  # Full green (yellow = red + green)
-            marker.color.b = 0.0  # NO blue (blue would make it purple/white)
-            marker.color.a = 1.0  # Fully opaque for clear visibility
+            marker.color.b = 0.0  # ZERO blue (any blue makes it purple/white)
+            marker.color.a = 1.0  # Fully opaque
             
             # Set lifetime to prevent stale markers
-            marker.lifetime.sec = 2  # 2 second lifetime
+            marker.lifetime.sec = 3  # 3 second lifetime
             
             marker_array.markers.append(marker)
             published_cones.append((smoothed_pos, confidence))
@@ -878,28 +904,38 @@ class CameraConeDetector(Node):
             point_msg.point.z = 0.0
             self.cone_points_pub.publish(point_msg)
         
-        # Step 4: Publish markers (always publish, even if empty, to clear old ones)
-        # First, delete all old markers by publishing DELETE_ALL
+        # Step 4: Publish markers with proper cleanup
+        # CRITICAL: Always publish DELETEALL first to clear old markers
         delete_markers = MarkerArray()
         delete_marker = Marker()
         delete_marker.header.frame_id = "map"
         delete_marker.header.stamp = self.get_clock().now().to_msg()
         delete_marker.ns = "camera_cones"
-        delete_marker.action = Marker.DELETEALL
+        delete_marker.id = 0
+        delete_marker.action = Marker.DELETEALL  # DELETEALL = 3
         delete_markers.markers.append(delete_marker)
         self.cones_pub.publish(delete_markers)
         
-        # Then publish new markers
+        # Publish new markers - they will replace old ones
+        # If no markers, the DELETEALL above will clear everything
         if len(marker_array.markers) > 0:
             self.cones_pub.publish(marker_array)
             if not hasattr(self, '_cone_pub_count'):
                 self._cone_pub_count = 0
             self._cone_pub_count += 1
             if self._cone_pub_count % 10 == 0:  # Log every 10 publishes
-                self.get_logger().info(
-                    f'📷 Published {len(marker_array.markers)} stable yellow cones '
-                    f'(tracks: {len(self.cone_tracks)}, min_detections: {self.cone_min_detections})'
-                )
+                # Verify marker properties
+                if len(marker_array.markers) > 0:
+                    m = marker_array.markers[0]
+                    self.get_logger().info(
+                        f'📷 Published {len(marker_array.markers)} YELLOW CYLINDERS: '
+                        f'type={m.type} (CYLINDER=3), color=({m.color.r:.1f}, {m.color.g:.1f}, {m.color.b:.1f}), '
+                        f'tracks={len(self.cone_tracks)}, min_detections={self.cone_min_detections}'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'📷 No cones to publish (tracks: {len(self.cone_tracks)})'
+                    )
     
     def publish_cones_local(self, cones, header):
         """Publish detected cones in local_map frame (relative to robot)"""
@@ -956,8 +992,20 @@ class CameraConeDetector(Node):
             
             marker_array.markers.append(marker)
         
+        # Always publish (even if empty) to clear old markers
         if len(marker_array.markers) > 0:
             self.cones_local_pub.publish(marker_array)
+        else:
+            # Publish DELETEALL to clear stale markers
+            delete_markers = MarkerArray()
+            delete_marker = Marker()
+            delete_marker.header.frame_id = "base_link"
+            delete_marker.header.stamp = self.get_clock().now().to_msg()
+            delete_marker.ns = "camera_cones_local"
+            delete_marker.id = 0
+            delete_marker.action = Marker.DELETEALL
+            delete_markers.markers.append(delete_marker)
+            self.cones_local_pub.publish(delete_markers)
 
     def publish_targets(self, targets, header):
         """Publish blue cones (targets) as PointStamped + markers."""
@@ -993,14 +1041,24 @@ class CameraConeDetector(Node):
         pt_msg.point.z = 0.0
         self.target_points_pub.publish(pt_msg)
 
-        # Publish marker for target
+        # Publish marker for target (blue sphere - different namespace from yellow cones)
         marker_array = MarkerArray()
+        # First delete old target markers
+        delete_marker = Marker()
+        delete_marker.header.frame_id = "map"
+        delete_marker.header.stamp = self.get_clock().now().to_msg()
+        delete_marker.ns = "camera_targets"
+        delete_marker.id = 0
+        delete_marker.action = Marker.DELETEALL
+        marker_array.markers.append(delete_marker)
+        
+        # Then add new target marker (blue sphere)
         marker = Marker()
         marker.header.frame_id = "map"
         marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "camera_targets"
+        marker.ns = "camera_targets"  # Different namespace from yellow cones
         marker.id = 0
-        marker.type = Marker.SPHERE
+        marker.type = Marker.SPHERE  # SPHERE for target (blue)
         marker.action = Marker.ADD
         marker.pose.position.x = float(smoothed[0])
         marker.pose.position.y = float(smoothed[1])
@@ -1008,7 +1066,7 @@ class CameraConeDetector(Node):
         marker.scale.x = 0.15
         marker.scale.y = 0.15
         marker.scale.z = 0.15
-        marker.color.r = 0.0
+        marker.color.r = 0.0  # Blue color
         marker.color.g = 0.4
         marker.color.b = 1.0
         marker.color.a = 0.9
