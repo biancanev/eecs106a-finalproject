@@ -201,7 +201,7 @@ class CameraConeDetector(Node):
         # Yellow cone temporal smoothing to prevent flickering
         self.cone_tracks = {}  # Map: cone_id -> (smoothed_pos, last_update_time, detection_count)
         self.cone_smoothing_alpha = 0.3  # Lower = more smoothing (less flicker)
-        self.cone_min_detections = 2  # Minimum detections before publishing
+        self.cone_min_detections = 1  # Minimum detections before publishing (was 2, lowered to show immediately)
         self.cone_timeout = 3.0  # Remove cones not seen for 1 second
         self.target_pose = None
         
@@ -869,9 +869,18 @@ class CameraConeDetector(Node):
         marker_array = MarkerArray()
         published_cones = []
         
+        # Log detection status
+        if len(detected_positions) > 0:
+            self.get_logger().debug(
+                f'📷 Processing {len(detected_positions)} cone tracks, min_detections={self.cone_min_detections}'
+            )
+        
         for track_id, (smoothed_pos, confidence, detection_count) in detected_positions.items():
-            # Only publish if seen multiple times (reduces flicker)
+            # Publish immediately (min_detections=1 now)
             if detection_count < self.cone_min_detections:
+                self.get_logger().debug(
+                    f'⏳ Skipping track {track_id}: {detection_count} < {self.cone_min_detections} detections'
+                )
                 continue
             
             # Create BRIGHT YELLOW CYLINDER marker - CLEAN and STABLE
@@ -937,16 +946,23 @@ class CameraConeDetector(Node):
             if not hasattr(self, '_cone_pub_count'):
                 self._cone_pub_count = 0
             self._cone_pub_count += 1
-            if self._cone_pub_count % 10 == 0:  # Log every 10 publishes
-                # Verify marker properties
-                if len(marker_array.markers) > 0:
-                    m = marker_array.markers[0]
-                    self.get_logger().info(
-                        f'📷 Published {len(marker_array.markers)} YELLOW CYLINDERS: '
-                        f'type={m.type} (CYLINDER=3), color=({m.color.r:.1f}, {m.color.g:.1f}, {m.color.b:.1f}), '
-                        f'tracks={len(self.cone_tracks)}, min_detections={self.cone_min_detections}'
-                    )
-                else:
+            # Log every publish to debug visibility issues
+            m = marker_array.markers[0]
+            self.get_logger().info(
+                f'📷 Published {len(marker_array.markers)} YELLOW CYLINDERS: '
+                f'type={m.type} (CYLINDER=3), color=({m.color.r:.1f}, {m.color.g:.1f}, {m.color.b:.1f}), '
+                f'pos=({m.pose.position.x:.2f}, {m.pose.position.y:.2f}), '
+                f'tracks={len(self.cone_tracks)}, min_detections={self.cone_min_detections}'
+            )
+        else:
+            # Log when no markers to publish
+            if len(detected_positions) == 0:
+                self.get_logger().debug('📷 No cone detections to publish')
+            else:
+                self.get_logger().warn(
+                    f'⚠️ {len(detected_positions)} tracks but 0 markers published! '
+                    f'All tracks have < {self.cone_min_detections} detections'
+                )
                     self.get_logger().info(
                         f'📷 No cones to publish (tracks: {len(self.cone_tracks)})'
                     )
