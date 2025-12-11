@@ -20,11 +20,11 @@ import numpy as np
 import transforms3d.euler as euler
 
 
-class FastLocalGrid(Node):
+class FastLocalGridTarget(Node):
     """High-speed local occupancy grid for dynamic navigation"""
     
     def __init__(self):
-        super().__init__('fast_local_grid')
+        super().__init__('fast_local_grid_target')
         
         # Local grid parameters
         self.grid_size = 5.0  # 5m x 5m around robot
@@ -83,14 +83,14 @@ class FastLocalGrid(Node):
         # Subscribers
         self.scan_sub = self.create_subscription(
             LaserScan,
-            '/scan',
+            '/target/scan',
             self.scan_callback,
             lidar_qos
         )
         
         self.pose_sub = self.create_subscription(
             PoseWithCovarianceStamped,
-            '/amcl_pose',
+            '/target/amcl_pose',
             self.pose_callback,
             10
         )
@@ -99,7 +99,7 @@ class FastLocalGrid(Node):
         # This ensures our fast local grid is consistent with global map
         self.global_map_sub = self.create_subscription(
             OccupancyGrid,
-            '/map',
+            '/target/map',
             self.global_map_callback,
             10
         )
@@ -109,7 +109,7 @@ class FastLocalGrid(Node):
         # Publisher
         self.map_pub = self.create_publisher(
             OccupancyGrid,
-            '/local_map',  # Different from Cartographer's /map
+            '/target/local_map',  # Different from Cartographer's /map
             10
         )
         
@@ -339,7 +339,7 @@ class FastLocalGrid(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = FastLocalGrid()
+    node = FastLocalGridTarget()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
