@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Target estimator (vision + warm start)
-- User provides warm-start guess; we publish that immediately.
-- When a blue cone is detected (/camera_cone_positions), we snap goal to it.
-- While the cone is visible, we maintain a constant-velocity estimate.
-- When the cone disappears, we extrapolate for a short horizon then hold.
+Robust Target Estimator (Vision + Odometry Fusion)
+- Fuses camera detections with odometry for accurate target pose
+- Robust filtering and outlier rejection for noisy CV measurements
+- Temporal smoothing and validation
 """
 import rclpy
 from rclpy.node import Node
@@ -39,19 +38,42 @@ class TargetEstimator(Node):
         self.max_extrap_speed = self.get_parameter('max_extrap_speed').get_parameter_value().double_value
         self.visibility_timeout = self.get_parameter('visibility_timeout').get_parameter_value().double_value
 
+        # State variables
         self.state = np.array([self.get_parameter('warm_start_x').get_parameter_value().double_value,
                                self.get_parameter('warm_start_y').get_parameter_value().double_value], dtype=float)
         self.yaw = self.get_parameter('warm_start_yaw').get_parameter_value().double_value
         self.velocity = np.zeros(2)
+        
+        # Detection tracking
         self.last_detection_time = None
+        self.last_detection_pos = None
+        self.detection_history = deque(maxlen=10)  # Store recent detections for filtering
         self.history = deque(maxlen=5)
+        
+        # Odometry
         self.seeker_odom = None
         self.target_odom = None
+        
+        # Filtering parameters
         self.lost_cov_scale = self.get_parameter('lost_cov_scale').get_parameter_value().double_value
         self.lock_conf = self.get_parameter('lock_confidence').get_parameter_value().double_value
         self.warmup_duration = self.get_parameter('warmup_duration').get_parameter_value().double_value
         self.locked_pose = None
         self.start_time = self.get_clock().now()
+        
+        # Robust filtering
+        self.alpha_position = 0.4  # Position smoothing
+        self.alpha_orientation = 0.3  # Orientation smoothing
+        self.filtered_state = None
+        self.filtered_yaw = None
+        
+        # Outlier rejection
+        self.max_jump_distance = 1.5  # meters - reject jumps larger than this
+        self.min_detection_confidence = 0.3  # Minimum confidence to accept detection
+        
+        # Debug counters
+        self.detection_count = 0
+        self.rejected_count = 0
 
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/target_est', 10)
         self.pose_pub2 = self.create_publisher(PoseWithCovarianceStamped, '/target_est_from_maps', 10)
@@ -72,58 +94,161 @@ class TargetEstimator(Node):
         self.target_odom = msg
 
     def cone_cb(self, msg: PointStamped):
+        """Handle camera cone detection with robust filtering"""
         if self.locked_pose is not None:
             # Already locked; ignore further updates
             return
-        now = self.get_clock().now().to_msg()
+        
+        # Extract detection position
+        detection_pos = np.array([msg.point.x, msg.point.y])
+        detection_time = self.get_clock().now()
+        
+        # Validate detection (check for outliers)
+        if self.last_detection_pos is not None:
+            jump_distance = np.linalg.norm(detection_pos - self.last_detection_pos)
+            if jump_distance > self.max_jump_distance:
+                self.rejected_count += 1
+                self.get_logger().warn(
+                    f"⚠️ Rejected CV detection: jump={jump_distance:.2f}m "
+                    f"(max={self.max_jump_distance:.2f}m), rejected={self.rejected_count}"
+                )
+                return  # Reject outlier
+        
+        # Valid detection - update state
+        self.detection_count += 1
+        
+        # Compute velocity if we have previous detection
         if self.last_detection_time is not None:
-            dt = (self.get_clock().now().nanoseconds - self.last_detection_time.nanoseconds) / 1e9
-            if dt > 0.0:
-                vel = np.array([msg.point.x - self.state[0], msg.point.y - self.state[1]]) / dt
+            dt = (detection_time.nanoseconds - self.last_detection_time.nanoseconds) / 1e9
+            if dt > 0.0 and dt < 5.0:  # Reasonable time window
+                vel = (detection_pos - self.last_detection_pos) / dt
                 speed = np.linalg.norm(vel)
                 if speed > self.max_extrap_speed:
                     vel = vel * (self.max_extrap_speed / speed)
-                self.velocity = 0.5 * self.velocity + 0.5 * vel
-        self.state = np.array([msg.point.x, msg.point.y])
-        self.last_detection_time = self.get_clock().now()
+                # Smooth velocity estimate
+                self.velocity = 0.6 * self.velocity + 0.4 * vel
+        
+        # Update state with temporal filtering
+        if self.filtered_state is None:
+            self.filtered_state = detection_pos.copy()
+        else:
+            # Apply exponential smoothing
+            self.filtered_state = (1 - self.alpha_position) * self.filtered_state + self.alpha_position * detection_pos
+        
+        # Store detection
+        self.state = detection_pos.copy()
+        self.last_detection_pos = detection_pos.copy()
+        self.last_detection_time = detection_time
+        self.detection_history.append((detection_pos.copy(), detection_time))
         self.history.append(self.state.copy())
+        
+        # Log periodically
+        if self.detection_count % 10 == 0:
+            self.get_logger().info(
+                f"✅ CV detection #{self.detection_count}: pos=({detection_pos[0]:.3f}, {detection_pos[1]:.3f}), "
+                f"filtered=({self.filtered_state[0]:.3f}, {self.filtered_state[1]:.3f}), "
+                f"rejected={self.rejected_count}"
+            )
 
     def tick(self):
+        """Main update loop with robust pose estimation"""
+        now = self.get_clock().now()
+        elapsed = (now - self.start_time).nanoseconds / 1e9
+        
         # Force-lock after warmup duration if not already locked
-        elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
         if self.locked_pose is None and elapsed >= self.warmup_duration:
+            # Use filtered state if available, otherwise raw state
+            pos_use = self.filtered_state if self.filtered_state is not None else self.state
             yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else self.yaw
-            self.locked_pose = (self.state[0], self.state[1], yaw_use)
-            self.get_logger().info(f"🔒 Warmup elapsed ({elapsed:.1f}s). Locking target pose at ({self.state[0]:.2f}, {self.state[1]:.2f}).")
+            self.locked_pose = (pos_use[0], pos_use[1], yaw_use)
+            self.get_logger().info(
+                f"🔒 Warmup elapsed ({elapsed:.1f}s). Locking target pose at "
+                f"({pos_use[0]:.2f}, {pos_use[1]:.2f}), yaw={math.degrees(yaw_use):.1f}°"
+            )
 
+        # Determine which state to use (filtered if available, otherwise raw)
+        pos_use = self.filtered_state if self.filtered_state is not None else self.state
+        
         # If we have recent detection, publish it
         if self.last_detection_time is not None:
-            dt = (self.get_clock().now().nanoseconds - self.last_detection_time.nanoseconds) / 1e9
+            dt = (now.nanoseconds - self.last_detection_time.nanoseconds) / 1e9
+            
             if dt < self.visibility_timeout:
+                # Recent detection - VERY HIGH confidence for stable detections
                 yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else self.yaw
-                pose = (self.state[0], self.state[1], yaw_use)
-                self.publish_pose(pose, confidence=0.9)
+                
+                # Update filtered yaw
+                if self.filtered_yaw is None:
+                    self.filtered_yaw = yaw_use
+                else:
+                    angle_diff = yaw_use - self.filtered_yaw
+                    angle_diff = math.atan2(math.sin(angle_diff), math.cos(angle_diff))
+                    self.filtered_yaw = self.filtered_yaw + self.alpha_orientation * angle_diff
+                    self.filtered_yaw = math.atan2(math.sin(self.filtered_yaw), math.cos(self.filtered_yaw))
+                
+                pose = (pos_use[0], pos_use[1], self.filtered_yaw)
+                
+                # VERY HIGH confidence if we have multiple detections
+                detection_stability = min(len(self.detection_history) / 10.0, 1.0)  # More detections = more stable
+                base_confidence = 0.92  # Higher base confidence
+                confidence = base_confidence + (1.0 - base_confidence) * detection_stability
+                confidence = min(confidence, 0.98)  # Cap at 98% for safety
+                
+                # If we have many consistent detections, lock it
+                if len(self.detection_history) >= 10 and detection_stability > 0.7:
+                    if self.locked_pose is None:
+                        self.locked_pose = pose
+                        self.get_logger().info(
+                            f"🔒 Locked target pose: ({pose[0]:.3f}, {pose[1]:.3f}), "
+                            f"yaw={math.degrees(pose[2]):.1f}°, confidence={confidence:.2f}, "
+                            f"detections={len(self.detection_history)}"
+                        )
+                
+                self.publish_pose(pose, confidence=confidence)
                 return
             else:
-                # Lost sight: hold last measured position (no extrapolation to avoid drift)
-                yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else self.yaw
-                pose = (self.state[0], self.state[1], yaw_use)
+                # Lost sight: hold last measured position with lower confidence
+                yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else (
+                    self.filtered_yaw if self.filtered_yaw is not None else self.yaw
+                )
+                pose = (pos_use[0], pos_use[1], yaw_use)
                 self.velocity = np.zeros(2)
-                self.publish_pose(pose, confidence=0.3)
+                confidence = 0.4  # Lower confidence when lost sight
+                self.publish_pose(pose, confidence=confidence)
                 return
 
-        # No detection yet: publish warm start
+        # No detection yet: publish warm start with very low confidence
         yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else self.yaw
-        pose = (self.state[0], self.state[1], yaw_use)
-        self.publish_pose(pose, confidence=0.2)
+        pose = (pos_use[0], pos_use[1], yaw_use)
+        self.publish_pose(pose, confidence=0.15)  # Very low confidence for warm start
 
     def yaw_from_odom(self):
         """Compute relative yaw from odom frames if available."""
         if self.seeker_odom is None or self.target_odom is None:
             return None
-        syaw = self.odom_yaw(self.seeker_odom.pose.pose.orientation)
-        tyaw = self.odom_yaw(self.target_odom.pose.pose.orientation)
-        return self.wrap_angle(tyaw - syaw)
+        
+        try:
+            syaw = self.odom_yaw(self.seeker_odom.pose.pose.orientation)
+            tyaw = self.odom_yaw(self.target_odom.pose.pose.orientation)
+            relative_yaw = self.wrap_angle(tyaw - syaw)
+            
+            # Also compute direction from seeker to target position for better accuracy
+            seeker_pos = np.array([
+                self.seeker_odom.pose.pose.position.x,
+                self.seeker_odom.pose.pose.position.y
+            ])
+            target_pos = self.filtered_state if self.filtered_state is not None else self.state
+            if target_pos is not None and len(target_pos) >= 2:
+                direction = target_pos[:2] - seeker_pos
+                direction_yaw = math.atan2(direction[1], direction[0])
+                # Blend odometry yaw with direction yaw (70% odom, 30% direction)
+                relative_yaw = 0.7 * relative_yaw + 0.3 * direction_yaw
+                relative_yaw = self.wrap_angle(relative_yaw)
+            
+            return relative_yaw
+        except Exception as e:
+            self.get_logger().warn(f"⚠️ Error computing yaw from odom: {e}")
+            return None
 
     def odom_yaw(self, q):
         """Extract yaw from geometry_msgs/Quaternion."""
