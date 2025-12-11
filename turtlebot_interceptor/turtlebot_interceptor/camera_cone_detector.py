@@ -80,14 +80,15 @@ class CameraConeDetector(Node):
         ])
         
         # Yellow color range in HSV (cones for obstacles)
-        self.lower_yellow = np.array([20, 100, 100])   # Pure yellow, high saturation (avoids blue)
-        self.upper_yellow = np.array([30, 255, 255])   # Pure yellow, high saturation
+        # Expanded range for better detection in various lighting
+        self.lower_yellow = np.array([15, 80, 80])   # Lower H, lower S/V for dim lighting
+        self.upper_yellow = np.array([35, 255, 255])   # Higher H for orange-yellow
         # Blue color range in HSV (target cone)
         self.lower_blue = np.array([100, 120, 60])
         self.upper_blue = np.array([130, 255, 255])
         
         # Minimum cone size (in pixels) to filter noise
-        self.min_cone_area = 100  # pixels (small to catch cones)
+        self.min_cone_area = 150  # Increased from 100 for better noise filtering
         
         # Maximum detection range (meters) - only detect close cones
         self.max_range = 2.0  # 2 meters
@@ -189,6 +190,12 @@ class CameraConeDetector(Node):
         self.target_required_streak = 5  # require 5 consecutive frames for a stable target
         self.target_alpha = 0.5  # smoothing
         self.target_valid = False
+        
+        # Yellow cone temporal smoothing to prevent flickering
+        self.cone_tracks = {}  # Map: cone_id -> (smoothed_pos, last_update_time, detection_count)
+        self.cone_smoothing_alpha = 0.3  # Lower = more smoothing (less flicker)
+        self.cone_min_detections = 2  # Minimum detections before publishing
+        self.cone_timeout = 3.0  # Remove cones not seen for 1 second
         self.target_pose = None
         
         self.get_logger().info('📷 Camera Cone Detector initialized')
@@ -770,87 +777,128 @@ class CameraConeDetector(Node):
             return None
     
     def publish_cones(self, cones, header):
-        """Publish detected cones with confidence scores"""
-        marker_array = MarkerArray()
-        
+        """Publish detected cones with temporal smoothing to prevent flickering"""
         if self.robot_pose is None:
             return
         
         robot_pos = np.array([self.robot_pose.position.x, self.robot_pose.position.y])
+        current_time = self.get_clock().now()
+        current_time_sec = current_time.nanoseconds / 1e9
         
-        # Process cones (format: world_x, world_y, depth, confidence, pixel_pos)
-        for i, cone_data in enumerate(cones):
-            if len(cone_data) == 5:
-                world_x, world_y, depth, confidence, pixel_pos = cone_data
-                point_map = np.array([world_x, world_y])
-            else:
-                # Fallback: old format
+        # Step 1: Update cone tracks with new detections (temporal smoothing)
+        detected_positions = {}
+        for cone_data in cones:
+            if len(cone_data) != 5:
                 continue
+            
+            world_x, world_y, depth, confidence, pixel_pos = cone_data
+            point_map = np.array([world_x, world_y])
             
             # Compute distance from robot
             distance = np.linalg.norm(point_map[:2] - robot_pos)
-            
-            # Check range
             if distance > self.max_range:
                 continue
             
-            # Use provided confidence (already computed)
+            # Find closest existing track (within 0.2m)
+            closest_track_id = None
+            min_distance = 0.2  # 20cm matching radius
             
-            # Create BRIGHT YELLOW marker for clear visibility
+            for track_id, (track_pos, last_time, count) in self.cone_tracks.items():
+                dist = np.linalg.norm(point_map[:2] - track_pos)
+                if dist < min_distance:
+                    min_distance = dist
+                    closest_track_id = track_id
+            
+            if closest_track_id is not None:
+                # Update existing track with temporal smoothing
+                old_pos, old_time, old_count = self.cone_tracks[closest_track_id]
+                smoothed_pos = (1 - self.cone_smoothing_alpha) * old_pos + self.cone_smoothing_alpha * point_map[:2]
+                self.cone_tracks[closest_track_id] = (smoothed_pos, current_time_sec, old_count + 1)
+                detected_positions[closest_track_id] = (smoothed_pos, confidence, old_count + 1)
+            else:
+                # New cone - create track
+                track_id = f"cone_{len(self.cone_tracks)}"
+                self.cone_tracks[track_id] = (point_map[:2].copy(), current_time_sec, 1)
+                detected_positions[track_id] = (point_map[:2], confidence, 1)
+        
+        # Step 2: Remove stale tracks (not seen recently)
+        stale_tracks = []
+        for track_id, (track_pos, last_time, count) in self.cone_tracks.items():
+            if current_time_sec - last_time > self.cone_timeout:
+                stale_tracks.append(track_id)
+        for track_id in stale_tracks:
+            del self.cone_tracks[track_id]
+        
+        # Step 3: Publish only stable cones (seen multiple times)
+        marker_array = MarkerArray()
+        published_cones = []
+        
+        for track_id, (smoothed_pos, confidence, detection_count) in detected_positions.items():
+            # Only publish if seen multiple times (reduces flicker)
+            if detection_count < self.cone_min_detections:
+                continue
+            
+            # Create BRIGHT YELLOW marker - CLEAN and STABLE
             marker = Marker()
             marker.header.frame_id = "map"
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = "camera_cones"
-            marker.id = i
-            marker.type = Marker.CYLINDER  # Cylinder = circle from top view
+            marker.id = len(marker_array.markers)  # Sequential IDs
+            marker.type = Marker.CYLINDER
             marker.action = Marker.ADD
             
-            marker.pose.position.x = float(point_map[0])
-            marker.pose.position.y = float(point_map[1])
+            marker.pose.position.x = float(smoothed_pos[0])
+            marker.pose.position.y = float(smoothed_pos[1])
             marker.pose.position.z = 0.0
-            
             marker.pose.orientation.w = 1.0
             
-            # Use actual cone dimensions (15 cm diameter)
-            marker.scale.x = self.cone_diameter  # 15 cm diameter
-            marker.scale.y = self.cone_diameter  # 15 cm diameter
-            marker.scale.z = self.cone_height  # 30 cm height
+            # Cone dimensions
+            marker.scale.x = self.cone_diameter
+            marker.scale.y = self.cone_diameter
+            marker.scale.z = self.cone_height
             
-            # BRIGHT YELLOW color (255, 255, 0 in RGB = yellow)
-            # Make it very visible and clear
-            marker.color.r = 1.0  # Red component
-            marker.color.g = 1.0  # Green component (yellow = red + green)
-            marker.color.b = 0.0  # No blue
-            marker.color.a = 0.9  # Very opaque (90%) for clear visibility
+            # BRIGHT YELLOW - ensure correct color (not purple!)
+            marker.color.r = 1.0  # Full red
+            marker.color.g = 1.0  # Full green (yellow = red + green)
+            marker.color.b = 0.0  # NO blue (blue would make it purple/white)
+            marker.color.a = 1.0  # Fully opaque for clear visibility
+            
+            # Set lifetime to prevent stale markers
+            marker.lifetime.sec = 2  # 2 second lifetime
             
             marker_array.markers.append(marker)
+            published_cones.append((smoothed_pos, confidence))
             
-            # Publish as PointStamped in map frame
+            # Publish as PointStamped (only stable cones)
             point_msg = PointStamped()
             point_msg.header.frame_id = "map"
             point_msg.header.stamp = marker.header.stamp
-            point_msg.point.x = float(point_map[0])
-            point_msg.point.y = float(point_map[1])
+            point_msg.point.x = float(smoothed_pos[0])
+            point_msg.point.y = float(smoothed_pos[1])
             point_msg.point.z = 0.0
             self.cone_points_pub.publish(point_msg)
-            
-            # Store confidence for this detection
-            cone_id = f"{point_map[0]:.3f}_{point_map[1]:.3f}"
-            self.cone_confidences[cone_id] = confidence
         
+        # Step 4: Publish markers (always publish, even if empty, to clear old ones)
+        # First, delete all old markers by publishing DELETE_ALL
+        delete_markers = MarkerArray()
+        delete_marker = Marker()
+        delete_marker.header.frame_id = "map"
+        delete_marker.header.stamp = self.get_clock().now().to_msg()
+        delete_marker.ns = "camera_cones"
+        delete_marker.action = Marker.DELETEALL
+        delete_markers.markers.append(delete_marker)
+        self.cones_pub.publish(delete_markers)
+        
+        # Then publish new markers
         if len(marker_array.markers) > 0:
             self.cones_pub.publish(marker_array)
-            avg_confidence = np.mean([self.compute_camera_confidence(
-                np.linalg.norm(np.array([m.pose.position.x, m.pose.position.y]) - robot_pos)
-            ) for m in marker_array.markers])
-            self.get_logger().info(
-                f'📷 Detected {len(marker_array.markers)} cones on MAP, avg confidence: {avg_confidence:.2f}'
-            )
-            # Log positions for verification
-            for m in marker_array.markers:
+            if not hasattr(self, '_cone_pub_count'):
+                self._cone_pub_count = 0
+            self._cone_pub_count += 1
+            if self._cone_pub_count % 10 == 0:  # Log every 10 publishes
                 self.get_logger().info(
-                    f'   🟡 Cone at map: ({m.pose.position.x:.3f}, {m.pose.position.y:.3f}), '
-                    f'dist from robot: {np.linalg.norm(np.array([m.pose.position.x, m.pose.position.y]) - robot_pos):.3f}m'
+                    f'📷 Published {len(marker_array.markers)} stable yellow cones '
+                    f'(tracks: {len(self.cone_tracks)}, min_detections: {self.cone_min_detections})'
                 )
     
     def publish_cones_local(self, cones, header):
