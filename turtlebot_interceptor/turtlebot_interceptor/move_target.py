@@ -33,6 +33,13 @@ class MoveTarget(Node):
         self.state = 'forwards'
         self.side_length = 2.0  # Side length for square movement (in meters)
         self.square_step = 0  # To track which side of the square we're on
+        # Safety stop on obstacles
+        self.min_range = 0.35
+        self.last_scan = None
+        self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
+
+    def scan_cb(self, msg: LaserScan):
+        self.last_scan = msg
 
     def move(self):
         current_time = time.time()
@@ -52,8 +59,22 @@ class MoveTarget(Node):
         else:
             remaining = max(int(self.warmup_duration - (current_time - self.start_time)), 0)
             self.get_logger().info(f"Waiting to start movement... {remaining} seconds remaining.")
+            # Ensure stop
+            self.cmd_pub.publish(Twist())
+
+    def safe_to_move(self):
+        if self.last_scan is None:
+            return True
+        rngs = [r for r in self.last_scan.ranges if np.isfinite(r)]
+        if len(rngs) == 0:
+            return True
+        return min(rngs) > self.min_range
 
     def move_circle(self):
+        if not self.safe_to_move():
+            self.cmd_pub.publish(Twist())
+            self.get_logger().warn("Obstacle too close; stopping target.")
+            return
         twist = Twist()
         twist.linear.x = 0.0  # Move forward with a constant speed 1.0
         twist.angular.z = 0.5  # Rotate at a constant rate 0.2

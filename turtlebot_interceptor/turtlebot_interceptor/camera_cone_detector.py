@@ -12,6 +12,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
+import math
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, qos_profile_sensor_data
 from geometry_msgs.msg import PoseWithCovarianceStamped
 import tf2_ros
@@ -78,10 +79,12 @@ class CameraConeDetector(Node):
             [0, 0, 0, 1]
         ])
         
-        # Yellow color range in HSV (for yellow cones ONLY - NOT blue, NOT green)
-        # Pure yellow range - Hue 20-30 is standard yellow in OpenCV HSV
+        # Yellow color range in HSV (cones for obstacles)
         self.lower_yellow = np.array([20, 100, 100])   # Pure yellow, high saturation (avoids blue)
         self.upper_yellow = np.array([30, 255, 255])   # Pure yellow, high saturation
+        # Blue color range in HSV (target cone)
+        self.lower_blue = np.array([100, 120, 60])
+        self.upper_blue = np.array([130, 255, 255])
         
         # Minimum cone size (in pixels) to filter noise
         self.min_cone_area = 100  # pixels (small to catch cones)
@@ -172,24 +175,25 @@ class CameraConeDetector(Node):
             10
         )
         
-        # Individual cone positions with confidence (for MPC integration)
-        # Create custom message type for cone with confidence
-        from geometry_msgs.msg import Point
-        from std_msgs.msg import Float32
-        
-        # For now, use PointStamped and add confidence in a separate topic
-        # Or create a custom message (better approach)
-        self.cone_points_pub = self.create_publisher(
-            PointStamped,
-            '/camera_cone_positions',
-            10
-        )
+        # Individual cone positions (map frame)
+        self.cone_points_pub = self.create_publisher(PointStamped, '/camera_cone_positions', 10)
+        # Target (blue cone) positions
+        self.target_points_pub = self.create_publisher(PointStamped, '/camera_target_positions', 10)
+        # Separate marker publisher for targets to avoid clobbering yellow markers
+        self.target_marker_pub = self.create_publisher(MarkerArray, '/camera_target_markers', 10)
         
         # Store confidence for each detection
         self.cone_confidences = {}  # Map cone_id -> confidence
+        # Target smoothing/debounce
+        self.target_history = []
+        self.target_required_streak = 5  # require 5 consecutive frames for a stable target
+        self.target_alpha = 0.5  # smoothing
+        self.target_valid = False
+        self.target_pose = None
         
         self.get_logger().info('📷 Camera Cone Detector initialized')
         self.get_logger().info(f'   Yellow range: HSV {self.lower_yellow} - {self.upper_yellow}')
+        self.get_logger().info(f'   Blue range: HSV {self.lower_blue} - {self.upper_blue}')
         self.get_logger().info(f'   Min cone area: {self.min_cone_area} pixels')
         self.get_logger().info(f'   Max range: {self.max_range}m')
         self.get_logger().info(f'   Cone diameter: {self.cone_diameter*100:.1f}cm, height: {self.cone_height*100:.1f}cm')
@@ -204,9 +208,9 @@ class CameraConeDetector(Node):
         try:
             self.camera_info = msg
             
-            # Extract intrinsics from camera matrix K (lab8 pattern)
+            # Extract intrinsics from camera matrix K
             # K matrix is 3x3: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
-            K = msg.k
+            K = list(msg.k)
             if len(K) != 9:
                 self.get_logger().error(f'Invalid K matrix size: {len(K)}, expected 9')
                 return
@@ -242,7 +246,7 @@ class CameraConeDetector(Node):
         self.robot_pose = msg.pose.pose
     
     def image_callback(self, msg: Image):
-        """Process camera image to detect yellow cones (lab8 pattern)"""
+        """Process camera image to detect cones"""
         # Log immediately when callback is called
         if not hasattr(self, '_image_callback_called'):
             self.get_logger().info('🔔 image_callback CALLED!')
@@ -277,27 +281,28 @@ class CameraConeDetector(Node):
             return
         
         # Detect cones using heuristic-based color detection
-        cones = self.detect_yellow_cones(cv_image)
+        cones_yellow = self.detect_yellow_cones(cv_image)
+        cones_blue = self.detect_blue_cones(cv_image)
         
         # Log detection results periodically
         if self._detection_count % 30 == 0:  # Log every 30 frames (~1 second at 30fps)
-            self.get_logger().info(f'📷 Processed {self._detection_count} frames, found {len(cones)} cone candidates')
+            self.get_logger().info(
+                f'📷 Processed {self._detection_count} frames, yellow={len(cones_yellow)}, blue={len(cones_blue)}'
+            )
         
         # ALWAYS publish debug image (even if no cones) so we can see what camera sees
-        self.publish_debug_image(cv_image, cones)
+        self.publish_debug_image(cv_image, cones_yellow + cones_blue)
         
         # Process detections and convert to world coordinates
-        if len(cones) > 0:
-            processed_cones = self.process_cone_detections(cones, cv_image)
+        if len(cones_yellow) > 0:
+            processed_cones = self.process_cone_detections(cones_yellow, cv_image)
             if len(processed_cones) > 0:
-                # Publish cones to map frame (yellow circles)
                 self.publish_cones(processed_cones, msg.header)
-                # Also publish to local_map frame (relative to robot)
                 self.publish_cones_local(processed_cones, msg.header)
-            elif self.robot_pose is None:
-                if not hasattr(self, '_no_pose_logged'):
-                    self.get_logger().warn('⚠️ Cones detected but robot_pose is None (waiting for /amcl_pose)')
-                    self._no_pose_logged = True
+        if len(cones_blue) > 0:
+            processed_targets = self.process_cone_detections(cones_blue, cv_image)
+            if len(processed_targets) > 0:
+                self.update_and_publish_target(processed_targets, msg.header)
     
     def process_cone_detections(self, cones, cv_image):
         """
@@ -601,6 +606,35 @@ class CameraConeDetector(Node):
                     self.get_logger().warn(f'⚠️ ALL {len(contours)} CONTOURS FILTERED OUT! Check filters above.')
         
         return cones
+
+    def detect_blue_cones(self, cv_image):
+        """Detect blue cones (targets) using similar heuristics to yellow."""
+        cones = []
+        try:
+            hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+        except Exception as e:
+            self.get_logger().warn(f'Failed to convert to HSV (blue): {e}')
+            return cones
+
+        mask = cv2.inRange(hsv, self.lower_blue, self.upper_blue)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.min_cone_area:
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            center_x = x + w / 2
+            center_y = y + h / 2
+            aspect_ratio = h / w if w > 0 else 0
+            if aspect_ratio < 0.8 or aspect_ratio > 5.0:
+                continue
+            mask_pixels = int(np.sum(mask[y:y+h, x:x+w] > 0))
+            if mask_pixels < self.min_cone_area:
+                continue
+            cones.append((center_x, center_y, w, h, area, mask_pixels))
+        return cones
     
     def pixel_to_3d_from_mask(self, mask_pixels, u, v):
         """
@@ -791,14 +825,13 @@ class CameraConeDetector(Node):
             
             marker_array.markers.append(marker)
             
-            # Publish as PointStamped with confidence in frame_id (temporary solution)
-            # Better: create custom message type
+            # Publish as PointStamped in map frame
             point_msg = PointStamped()
-            point_msg.header.frame_id = f"map_confidence_{confidence:.2f}"  # Encode confidence
+            point_msg.header.frame_id = "map"
             point_msg.header.stamp = marker.header.stamp
             point_msg.point.x = float(point_map[0])
             point_msg.point.y = float(point_map[1])
-            point_msg.point.z = float(confidence)  # Store confidence in z coordinate
+            point_msg.point.z = 0.0
             self.cone_points_pub.publish(point_msg)
             
             # Store confidence for this detection
@@ -877,6 +910,63 @@ class CameraConeDetector(Node):
         
         if len(marker_array.markers) > 0:
             self.cones_local_pub.publish(marker_array)
+
+    def publish_targets(self, targets, header):
+        """Publish blue cones (targets) as PointStamped + markers."""
+        # Deprecated in favor of update_and_publish_target
+        return
+
+    def update_and_publish_target(self, targets, header):
+        """Debounce and smooth blue target detections, publish stable PointStamped + markers."""
+        if len(targets) == 0:
+            return
+        # pick closest detection
+        closest = min(targets, key=lambda t: math.hypot(t[0], t[1]))
+        det = np.array([closest[0], closest[1]])
+        self.target_history.append(det)
+        if len(self.target_history) > self.target_required_streak:
+            self.target_history.pop(0)
+
+        if len(self.target_history) < self.target_required_streak:
+            return  # wait for enough consecutive frames
+
+        if self.target_pose is None:
+            smoothed = det
+        else:
+            smoothed = self.target_alpha * det + (1 - self.target_alpha) * self.target_pose
+        self.target_pose = smoothed
+        self.target_valid = True
+
+        # Publish stable point
+        pt_msg = PointStamped()
+        pt_msg.header = header
+        pt_msg.point.x = float(smoothed[0])
+        pt_msg.point.y = float(smoothed[1])
+        pt_msg.point.z = 0.0
+        self.target_points_pub.publish(pt_msg)
+
+        # Publish marker for target
+        marker_array = MarkerArray()
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "camera_targets"
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose.position.x = float(smoothed[0])
+        marker.pose.position.y = float(smoothed[1])
+        marker.pose.position.z = 0.1
+        marker.scale.x = 0.15
+        marker.scale.y = 0.15
+        marker.scale.z = 0.15
+        marker.color.r = 0.0
+        marker.color.g = 0.4
+        marker.color.b = 1.0
+        marker.color.a = 0.9
+        marker.lifetime.sec = 1
+        marker_array.markers.append(marker)
+        self.target_marker_pub.publish(marker_array)
     
     def publish_debug_image(self, cv_image, cones):
         """Publish debug image - EXACT COPY of original with only bounding boxes/text overlays"""
@@ -956,4 +1046,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

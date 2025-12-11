@@ -40,6 +40,21 @@ def generate_launch_description():
             default_value='0.08',
             description='Obstacle radius in meters (smaller = less conservative)'
         ),
+        DeclareLaunchArgument(
+            'warm_start_x',
+            default_value='0.0',
+            description='Initial guess for target X'
+        ),
+        DeclareLaunchArgument(
+            'warm_start_y',
+            default_value='0.0',
+            description='Initial guess for target Y'
+        ),
+        DeclareLaunchArgument(
+            'warm_start_yaw',
+            default_value='0.0',
+            description='Initial guess for target yaw (rad)'
+        ),
         
         # Static TF publisher (map to base_scan for RViz)
         # CRITICAL: This allows RViz to display the occupancy grid map
@@ -108,20 +123,6 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # Target estimator (align target map to seeker map) -> drives seeker toward target
-        Node(
-            package='turtlebot_interceptor',
-            executable='target_est_node',
-            name='target_estimator',
-            parameters=[{
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
-            }],
-            remappings=[
-                ('/target_est', '/target_estimate'),  # feed MPC
-            ],
-            output='screen'
-        ),
-        
         # Camera Cone Detector (yellow cone detection with 15cm diameter)
         # Provides close-range obstacle detection for MPC
         Node(
@@ -135,6 +136,31 @@ def generate_launch_description():
             }],
             arguments=['--ros-args', '--log-level', 'camera_cone_detector:=warn'],
             output='log'
+        ),
+
+        # Target estimator (vision + warm start)
+        Node(
+            package='turtlebot_interceptor',
+            executable='target_est_node',
+            name='target_estimator_vision',
+            parameters=[{
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'warm_start_x': LaunchConfiguration('warm_start_x'),
+                'warm_start_y': LaunchConfiguration('warm_start_y'),
+                'warm_start_yaw': LaunchConfiguration('warm_start_yaw'),
+            }],
+            remappings=[
+                ('/target_est', '/target_estimate'),
+            ],
+            output='screen'
+        ),
+
+        # Target motion driver
+        Node(
+            package='turtlebot_interceptor',
+            executable='move_target',
+            name='move_target',
+            output='screen'
         ),
         
         # MCL node (localization using map and LIDAR)
@@ -174,8 +200,9 @@ def generate_launch_description():
                 'Kp_v': 2.0,  # Fallback control gains (lab8 pattern)
                 'Kp_w': 0.8,
                 'Kd_w': 0.5,
-                'goal_x': LaunchConfiguration('goal_x'),
-                'goal_y': LaunchConfiguration('goal_y'),
+                # Use warm-start as navigation goal (keeps seeker chasing target guess)
+                'goal_x': LaunchConfiguration('warm_start_x'),
+                'goal_y': LaunchConfiguration('warm_start_y'),
                 'max_obstacles': LaunchConfiguration('max_obstacles'),
                 'obstacle_radius': LaunchConfiguration('obstacle_radius'),
             }],

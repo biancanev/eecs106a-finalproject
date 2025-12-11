@@ -23,7 +23,10 @@ class TargetEKF(Node):
         self.declare_parameter('warmup_duration', 65.0)
         self.declare_parameter('seeker_pub_period', 5.0)
         self.declare_parameter('seeker_covariance_scale', 4.0)
-        self.declare_parameter('use_sim_time', False)
+        try:
+            self.declare_parameter('use_sim_time', False)
+        except Exception:
+            pass  # already declared via launch
 
         self.dt = self.get_parameter('dt').get_parameter_value().double_value
         q = self.get_parameter('process_noise').get_parameter_value().double_value
