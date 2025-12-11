@@ -29,11 +29,11 @@ class SimpleUnicycleMPC:
         self.robot_radius = 0.105
         self.safety_buffer = 0.18  # slight extra clearance to avoid clipping
 
-        # Weights
+        # Weights - tuned for linear paths, only curve around obstacles
         self.Qp  = 140.0
-        self.Qtheta = 10.0  # stronger heading alignment
+        self.Qtheta = 25.0  # MUCH stronger heading alignment (was 10.0) - prefer straight paths
         self.Ra = 0.01
-        self.Rw = 0.01
+        self.Rw = 0.15  # MUCH higher angular penalty (was 0.01) - strongly penalize turning
         self.Q_obs = 900.0  # stronger avoidance while still allowing progress
 
         # Keep baseline weights for any future adaptation logic
@@ -133,9 +133,9 @@ class SimpleUnicycleMPC:
                 # Penalize slack usage
                 cost += self.Q_obs * cp.square(self.S[i, k])
 
-        # Terminal cost: position + heading alignment
+        # Terminal cost: position + heading alignment (stronger for straight paths)
         cost += 10 * self.Qp * cp.sum_squares(self.X[0:2,N] - self.T[:,N])
-        cost += 5 * self.Qtheta * cp.square(self.X[2, N] - self.theta_ref[N])
+        cost += 10 * self.Qtheta * cp.square(self.X[2, N] - self.theta_ref[N])  # Increased from 5x to 10x for straighter paths
         # Build problem
         self.prob = cp.Problem(cp.Minimize(cost), constraints)
 
