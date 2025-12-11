@@ -69,8 +69,10 @@ class CameraConeDetector(Node):
         self.CONE_AREA = 0.0208227849  # m^2 (for yellow cones)
         
         # Blue target cone is 4-5x bigger than yellow cones
-        # Using 4.5x (middle of 4-5x range) for accurate depth estimation
-        self.TARGET_CONE_AREA = 0.0208227849 * 4.5  # ~0.0937 m^2 (for blue target cone)
+        # CRITICAL: Target at 2.5-3m appears as 1.4m = depth is ~2x too small
+        # Need larger multiplier: if 5x gives 1.4m, need ~7-8x to get 2.5-3m
+        # Using 7.0x for more accurate depth (was 5.0x, still too small)
+        self.TARGET_CONE_AREA = 0.0208227849 * 7.0  # ~0.146 m^2 (for blue target cone)
         
         # Transform from camera to base_link (lab8 pattern)
         # G = [[0, 0, 1, 0.115],
@@ -351,12 +353,24 @@ class CameraConeDetector(Node):
                     confidence = self.compute_detection_confidence(area, mask_pixels, depth)
                     processed.append((world_pos[0], world_pos[1], depth, confidence, (cx, cy)))
                     
-                    self.get_logger().info(
-                        f'📷 Cone detected: depth={depth:.3f}m, '
-                        f'base_link=({goal_point[0]:.3f}, {goal_point[1]:.3f}), '
-                        f'world=({world_pos[0]:.3f}, {world_pos[1]:.3f}), '
-                        f'pixels={mask_pixels}, confidence={confidence:.2f}'
-                    )
+                    # Enhanced logging for target cones to debug position errors
+                    if is_target:
+                        robot_pos = np.array([self.robot_pose.position.x, self.robot_pose.position.y])
+                        relative_pos = world_pos[:2] - robot_pos
+                        q = self.robot_pose.orientation
+                        robot_yaw = math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z))
+                        self.get_logger().info(
+                            f'🎯 TARGET: camera_3d=({point_3d[0]:.3f}, {point_3d[1]:.3f}, {point_3d[2]:.3f}), '
+                            f'base_link=({goal_point[0]:.3f}, {goal_point[1]:.3f}), '
+                            f'robot=({robot_pos[0]:.3f}, {robot_pos[1]:.3f}, yaw={math.degrees(robot_yaw):.1f}°), '
+                            f'world=({world_pos[0]:.3f}, {world_pos[1]:.3f}), '
+                            f'relative=({relative_pos[0]:.3f}, {relative_pos[1]:.3f}), '
+                            f'depth={depth:.3f}m, pixels={mask_pixels}, area={self.TARGET_CONE_AREA:.6f}m²'
+                        )
+                    else:
+                        self.get_logger().debug(
+                            f'📷 Cone: depth={depth:.3f}m, world=({world_pos[0]:.3f}, {world_pos[1]:.3f})'
+                        )
         
         return processed
     
