@@ -6,7 +6,7 @@ Based on the paper implementation
 import rclpy
 from rclpy.node import Node
 from rclpy.exceptions import ParameterAlreadyDeclaredException
-from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, PointStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, PointStamped, PoseStamped
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
@@ -15,6 +15,9 @@ import math
 import transforms3d.euler as euler
 from turtlebot_interceptor.MPC_test import SimpleUnicycleMPC
 from visualization_msgs.msg import Marker, MarkerArray
+import tf2_ros
+from tf2_ros import TransformException
+from tf2_geometry_msgs import do_transform_pose
 
 class MPCNode(Node):
     def __init__(self):
@@ -158,8 +161,13 @@ class MPCNode(Node):
         self.seeker_cov = None
         self.target_pose = None
         self.target_cov = None
+        self.target_pose_map_frame = None  # Target pose transformed to map frame
         self.latest_scan = None  # Store latest LIDAR scan
         self.local_map = None  # Fast local grid (5-10 Hz updates)
+        
+        # TF2 for frame transformations
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
         # Persistent obstacle storage (keeps obstacles even if Cartographer clears them)
         # Each obstacle: (position, radius, timestamp)
@@ -295,9 +303,56 @@ class MPCNode(Node):
         self.seeker_state = np.array([pose.position.x, pose.position.y, yaw, v])
 
     def target_callback(self, msg: PoseWithCovarianceStamped):
-        """Update target state"""
+        """Update target state with proper frame transformation"""
         self.target_pose = msg.pose.pose
         self.target_cov = np.array(msg.pose.covariance).reshape((6, 6))
+        
+        # CRITICAL: Transform target pose to map frame if needed
+        target_frame = msg.header.frame_id
+        if target_frame == 'map':
+            # Already in map frame - use directly
+            self.target_pose_map_frame = self.target_pose
+        else:
+            # Need to transform to map frame
+            try:
+                # Create PoseStamped for transformation
+                pose_stamped = PoseStamped()
+                pose_stamped.header = msg.header
+                pose_stamped.pose = self.target_pose
+                
+                # Lookup transform from target frame to map frame
+                transform = self.tf_buffer.lookup_transform(
+                    'map',
+                    target_frame,
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.1)
+                )
+                
+                # Transform pose to map frame
+                transformed_pose = do_transform_pose(pose_stamped.pose, transform)
+                self.target_pose_map_frame = transformed_pose
+                
+                if not hasattr(self, '_target_transform_count'):
+                    self._target_transform_count = 0
+                self._target_transform_count += 1
+                if self._target_transform_count % 50 == 0:
+                    self.get_logger().info(
+                        f'✅ Transformed target from {target_frame} to map frame: '
+                        f'({transformed_pose.position.x:.2f}, {transformed_pose.position.y:.2f})'
+                    )
+                    
+            except TransformException as e:
+                # Transform failed - log warning and use original (might be wrong frame)
+                if not hasattr(self, '_target_transform_error_count'):
+                    self._target_transform_error_count = 0
+                self._target_transform_error_count += 1
+                if self._target_transform_error_count % 50 == 0:
+                    self.get_logger().warn(
+                        f'⚠️ Failed to transform target from {target_frame} to map: {e}. '
+                        f'Using original pose (may be in wrong frame!)'
+                    )
+                # Fallback: assume it's already in map frame (might be wrong!)
+                self.target_pose_map_frame = self.target_pose
 
     def improved_obstacle_clustering(self, occupied_points, eps=0.15, min_samples=3):
         """
@@ -1641,11 +1696,18 @@ class MPCNode(Node):
 
     def predict_target_trajectory(self):
         """Predict target trajectory over MPC horizon (lab8 pattern - improved prediction)"""
-        if self.target_pose is None:
-            return None
+        # CRITICAL: Use target pose in map frame (transformed if needed)
+        if self.target_pose_map_frame is None:
+            if self.target_pose is None:
+                return None
+            # Fallback: use original pose if transformation not available
+            self.get_logger().warn('Using untransformed target pose - may be in wrong frame!')
+            target_pose_to_use = self.target_pose
+        else:
+            target_pose_to_use = self.target_pose_map_frame
         
-        px_tgt = self.target_pose.position.x
-        py_tgt = self.target_pose.position.y
+        px_tgt = target_pose_to_use.position.x
+        py_tgt = target_pose_to_use.position.y
         
         # If we have target covariance, extract velocity estimate
         # Target state from UKF: [px, py, vx, vy] in covariance
