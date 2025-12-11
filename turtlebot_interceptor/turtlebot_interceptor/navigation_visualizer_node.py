@@ -57,6 +57,21 @@ class NavigationVisualizerNode(Node):
             self.pose_callback,
             10
         )
+
+        # Target estimate (EKF/UKF) for interception visualization
+        self.target_sub = self.create_subscription(
+            PoseWithCovarianceStamped,
+            '/target_estimate_slow',
+            self.target_callback,
+            10
+        )
+        # Fallback to fast topic if slow feed is unavailable
+        self.target_sub_fast = self.create_subscription(
+            PoseWithCovarianceStamped,
+            '/target_estimate',
+            self.target_callback,
+            10
+        )
         
         # Subscribe to EKF odometry for "true" robot pose and covariance
         self.odom_ekf_sub = self.create_subscription(
@@ -84,6 +99,8 @@ class NavigationVisualizerNode(Node):
         self.current_pose = None  # MCL estimated pose
         self.current_pose_cov = None  # MCL pose covariance
         self.true_pose = None  # True robot pose from odometry
+        self.target_pose = None  # Target EKF/UKF pose
+        self.target_cov = None  # Target covariance
         self.path_history = []  # List of (x, y) tuples
         self.marker_id = 0
         
@@ -118,6 +135,14 @@ class NavigationVisualizerNode(Node):
             self.true_cov = np.array(msg.pose.covariance).reshape((6, 6))
         except Exception:
             self.true_cov = None
+
+    def target_callback(self, msg: PoseWithCovarianceStamped):
+        """Update target estimate for visualization"""
+        self.target_pose = msg.pose.pose
+        try:
+            self.target_cov = np.array(msg.pose.covariance).reshape((6, 6))
+        except Exception:
+            self.target_cov = None
     
     def map_callback(self, msg: OccupancyGrid):
         """Store map for reference (if needed)"""
@@ -171,11 +196,15 @@ class NavigationVisualizerNode(Node):
             ekf_uncertainty = self.create_ekf_uncertainty_ellipse()
             if ekf_uncertainty:
                 markers.markers.append(ekf_uncertainty)
-        # 8. EKF uncertainty ellipse
-        if self.true_pose is not None and getattr(self, 'true_cov', None) is not None:
-            ekf_uncertainty = self.create_ekf_uncertainty_ellipse()
-            if ekf_uncertainty:
-                markers.markers.append(ekf_uncertainty)
+
+        # 9. Target pose + covariance (from EKF/UKF)
+        if self.target_pose is not None:
+            target_marker = self.create_target_marker()
+            markers.markers.append(target_marker)
+            if self.target_cov is not None:
+                target_cov_marker = self.create_target_uncertainty_ellipse()
+                if target_cov_marker:
+                    markers.markers.append(target_cov_marker)
         
         # Publish all markers
         self.marker_pub.publish(markers)
@@ -282,18 +311,20 @@ class NavigationVisualizerNode(Node):
         
         # Points: robot to goal
         marker.points = []
-        
+
         # Robot point
         robot_point = Point()
         robot_point.x = float(self.current_pose.position.x)
         robot_point.y = float(self.current_pose.position.y)
         robot_point.z = 0.1
         marker.points.append(robot_point)
-        
+
         # Goal point
         goal_point = Point()
-        goal_point.x = float(self.goal_x)
-        goal_point.y = float(self.goal_y)
+        goal_x = self.target_pose.position.x if self.target_pose is not None else self.goal_x
+        goal_y = self.target_pose.position.y if self.target_pose is not None else self.goal_y
+        goal_point.x = float(goal_x)
+        goal_point.y = float(goal_y)
         goal_point.z = 0.1
         marker.points.append(goal_point)
         
@@ -313,6 +344,10 @@ class NavigationVisualizerNode(Node):
         # Calculate distance
         dx = self.goal_x - self.current_pose.position.x
         dy = self.goal_y - self.current_pose.position.y
+        goal_x = self.target_pose.position.x if self.target_pose is not None else self.goal_x
+        goal_y = self.target_pose.position.y if self.target_pose is not None else self.goal_y
+        dx = goal_x - self.current_pose.position.x
+        dy = goal_y - self.current_pose.position.y
         distance = math.sqrt(dx*dx + dy*dy)
         
         marker = Marker()
@@ -331,7 +366,7 @@ class NavigationVisualizerNode(Node):
         marker.pose.orientation.w = 1.0
         
         # Text
-        marker.text = f'Goal: ({self.goal_x:.2f}, {self.goal_y:.2f})\nDistance: {distance:.2f}m'
+        marker.text = f'Goal: ({goal_x:.2f}, {goal_y:.2f})\nDistance: {distance:.2f}m'
         
         # Scale (text size)
         marker.scale.z = 0.2  # Text height
@@ -409,8 +444,37 @@ class NavigationVisualizerNode(Node):
         
         # Lifetime
         marker.lifetime.sec = 1
-        
+
         return marker
+
+    def create_target_marker(self):
+        """Create marker for target EKF/UKF pose"""
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'target_pose'
+        marker.id = self.marker_id
+        self.marker_id += 1
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+
+        marker.pose.position = self.target_pose.position
+        marker.pose.orientation = self.target_pose.orientation
+
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.16
+        marker.color = ColorRGBA(r=1.0, g=0.65, b=0.0, a=0.9)  # Orange-ish
+        marker.lifetime.sec = 1
+        return marker
+
+    def create_target_uncertainty_ellipse(self):
+        """Target covariance ellipse"""
+        return self._create_ellipse_marker(
+            cov_2d=self.target_cov[:2, :2],
+            cx=self.target_pose.position.x,
+            cy=self.target_pose.position.y,
+            ns='target_uncertainty',
+            color=ColorRGBA(r=1.0, g=0.65, b=0.0, a=0.4)
+        )
     
     def create_true_pose_marker(self):
         """Create marker for true robot pose (from odometry)"""
