@@ -32,14 +32,12 @@ class TargetEstimator(Node):
         self.declare_parameter('lost_cov_scale', 4.0)  # inflate covariance when target is out of sight
         self.declare_parameter('lock_confidence', 0.8)  # once reached, freeze estimate
         self.declare_parameter('warmup_duration', 65.0)  # seconds before force-lock
-        self.declare_parameter('enable_lock', False)  # default: keep updating from CV even after warmup
 
         # Cache frequently used parameter values
         self.cov_pos_base = self.get_parameter('cov_pos_base').get_parameter_value().double_value
         self.cov_yaw_base = self.get_parameter('cov_yaw_base').get_parameter_value().double_value
         self.max_extrap_speed = self.get_parameter('max_extrap_speed').get_parameter_value().double_value
         self.visibility_timeout = self.get_parameter('visibility_timeout').get_parameter_value().double_value
-        self.enable_lock = self.get_parameter('enable_lock').get_parameter_value().bool_value
 
         # State variables
         self.state = np.array([self.get_parameter('warm_start_x').get_parameter_value().double_value,
@@ -71,13 +69,13 @@ class TargetEstimator(Node):
         self.start_time = self.get_clock().now()
         
         # Robust filtering
-        self.alpha_position = 0.8  # Position smoothing (favor latest detection strongly)
+        self.alpha_position = 0.4  # Position smoothing
         self.alpha_orientation = 0.3  # Orientation smoothing
         self.filtered_state = None
         self.filtered_yaw = None
         
         # Outlier rejection
-        self.max_jump_distance = 1.0  # meters - reject jumps larger than this (tighter for accuracy)
+        self.max_jump_distance = 1.5  # meters - reject jumps larger than this
         self.min_detection_confidence = 0.3  # Minimum confidence to accept detection
         
         # Debug counters
@@ -88,7 +86,7 @@ class TargetEstimator(Node):
         self.pose_pub2 = self.create_publisher(PoseWithCovarianceStamped, '/target_est_from_maps', 10)
         self.meas_pub = self.create_publisher(PoseStamped, '/target_pose_measurement', 10)
 
-        # Only use blue target detections for the target pose (yellow are obstacles)
+        self.create_subscription(PointStamped, '/camera_cone_positions', self.cone_cb, 10)
         self.create_subscription(PointStamped, '/camera_target_positions', self.cone_cb, 10)  # blue cone target
         self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
         self.create_subscription(Odometry, '/target/odom', self.target_odom_cb, 10)
@@ -175,11 +173,11 @@ class TargetEstimator(Node):
                 # Smooth velocity estimate
                 self.velocity = 0.6 * self.velocity + 0.4 * vel
         
-        # Update state with temporal filtering (bias toward latest detection)
+        # Update state with temporal filtering
         if self.filtered_state is None:
             self.filtered_state = detection_pos.copy()
         else:
-            # Apply faster exponential smoothing for quicker convergence
+            # Apply exponential smoothing
             self.filtered_state = (1 - self.alpha_position) * self.filtered_state + self.alpha_position * detection_pos
         
         # Store detection
@@ -188,46 +186,6 @@ class TargetEstimator(Node):
         self.last_detection_time = detection_time
         self.detection_history.append((detection_pos.copy(), detection_time))
         self.history.append(self.state.copy())
-        
-        # If very close to the detection, aggressively pull lock toward it (final 0.8m)
-        if self.seeker_odom is not None:
-            robot_pos = np.array([
-                self.seeker_odom.pose.pose.position.x,
-                self.seeker_odom.pose.pose.position.y
-            ])
-            dist_robot_det = np.linalg.norm(detection_pos - robot_pos)
-            if dist_robot_det < 0.8:
-                # Strong blend toward detection for final approach
-                if self.locked_pose is None:
-                    self.locked_pose = (detection_pos[0], detection_pos[1], self.yaw)
-                else:
-                    lock_xy = np.array([self.locked_pose[0], self.locked_pose[1]])
-                    new_lock = 0.8 * detection_pos + 0.2 * lock_xy
-                    self.locked_pose = (new_lock[0], new_lock[1], self.locked_pose[2])
-                # Also bias filtered state strongly to this detection
-                self.filtered_state = detection_pos.copy()
-                self.get_logger().info(
-                    f"🎯 Final-approach snap: dist={dist_robot_det:.2f}m -> lock=({self.locked_pose[0]:.2f}, {self.locked_pose[1]:.2f})"
-                )
-        
-        # If we already locked, allow small corrective nudges when closer (prevents freeze drift)
-        if self.locked_pose is not None and self.seeker_odom is not None:
-            robot_pos = np.array([
-                self.seeker_odom.pose.pose.position.x,
-                self.seeker_odom.pose.pose.position.y
-            ])
-            lock_xy = np.array([self.locked_pose[0], self.locked_pose[1]])
-            lock_dist = np.linalg.norm(lock_xy - robot_pos)
-            new_dist = np.linalg.norm(detection_pos - robot_pos)
-            shift = np.linalg.norm(detection_pos - lock_xy)
-            # Only nudge if detection is closer and within a reasonable jump
-            if new_dist + 0.05 < lock_dist and shift < 0.8:
-                blend = 0.6  # stronger nudge toward new detection
-                new_lock = (1 - blend) * lock_xy + blend * detection_pos
-                self.locked_pose = (new_lock[0], new_lock[1], self.locked_pose[2])
-                self.get_logger().info(
-                    f"🔧 Nudge locked pose toward CV: shift={shift:.2f}m, dist→{new_dist:.2f}m"
-                )
         
         # Update full state vector for propagation
         # Estimate heading from velocity direction if available
@@ -349,10 +307,8 @@ class TargetEstimator(Node):
         # Check if warm start is non-zero (user actually provided it)
         warm_start_provided = (abs(self.state[0]) > 0.01 or abs(self.state[1]) > 0.01)
         
-        # Determine which state to use: prefer median of recent detections (robust), then filtered, then state
-        pos_use = self.get_smoothed_position()
-        if pos_use is None:
-            pos_use = self.filtered_state if self.filtered_state is not None else self.state
+        # Determine which state to use (filtered if available, otherwise raw/warm start)
+        pos_use = self.filtered_state if self.filtered_state is not None else self.state
         
         # If we have recent detection, publish it
         if self.last_detection_time is not None:
@@ -474,11 +430,9 @@ class TargetEstimator(Node):
         self.publish_pose(pose, confidence=confidence)
         
         # Force-lock after warmup duration if not already locked
-        if self.enable_lock and self.locked_pose is None and elapsed >= self.warmup_duration:
-            # Use robust median if available, otherwise filtered/raw
-            pos_use = self.get_smoothed_position()
-            if pos_use is None:
-                pos_use = self.filtered_state if self.filtered_state is not None else self.state
+        if self.locked_pose is None and elapsed >= self.warmup_duration:
+            # Use filtered state if available, otherwise raw/warm start
+            pos_use = self.filtered_state if self.filtered_state is not None else self.state
             yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else self.yaw
             self.locked_pose = (pos_use[0], pos_use[1], yaw_use)
             self.get_logger().info(
@@ -523,8 +477,8 @@ class TargetEstimator(Node):
         return (ang + math.pi) % (2 * math.pi) - math.pi
 
     def publish_pose(self, pose, confidence):
-        # If locked (and locking enabled), hold that pose regardless of input confidence
-        if self.enable_lock and self.locked_pose is not None:
+        # If locked, hold that pose regardless of input confidence
+        if self.locked_pose is not None:
             pose = self.locked_pose
             confidence = max(confidence, self.lock_conf)
 
@@ -553,9 +507,9 @@ class TargetEstimator(Node):
                 pos_var *= self.lost_cov_scale
                 yaw_var *= self.lost_cov_scale
         # If locked, shrink covariance (high confidence) and set lock
-        if self.enable_lock and confidence >= self.lock_conf and self.locked_pose is None:
+        if confidence >= self.lock_conf and self.locked_pose is None:
             self.locked_pose = (x, y, yaw)
-        if self.enable_lock and self.locked_pose is not None:
+        if self.locked_pose is not None:
             pos_var = min(pos_var, self.cov_pos_base * 0.1)
             yaw_var = min(yaw_var, self.cov_yaw_base * 0.1)
         msg.pose.covariance = [

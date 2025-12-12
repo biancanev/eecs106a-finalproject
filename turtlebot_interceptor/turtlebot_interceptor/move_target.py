@@ -25,23 +25,18 @@ class MoveTarget(Node):
         self.cmd_pub = self.create_publisher(Twist, '/target/cmd_vel', reliable_qos)
         
         # Timer
-        self.timer = self.create_timer(1.0, self.move)  # Check every second
+        self.timer = self.create_timer(2.0, self.move)  # Check every second
         self.start_time = time.time()  # Store the start time
         self.warmup_duration = 65.0
         self.moving = False  # Hold still until warmup finishes
-        self.mode = 'circle'  # Default mode: gentle wandering for a chase
+        self.mode = 'circle'  # Default mode, change this to 'line' or 'square' as needed
         self.state = 'forwards'
         self.side_length = 2.0  # Side length for square movement (in meters)
         self.square_step = 0  # To track which side of the square we're on
         # Safety stop on obstacles
-        self.min_range = 0.45  # more conservative clearance
+        self.min_range = 0.35
         self.last_scan = None
         self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
-        # Wander parameters
-        self.wander_heading = 0.0
-        self.wander_speed = 0.05
-        self.wander_last_change = time.time()
-        self.wander_interval = 3.0  # seconds between heading changes
 
     def scan_cb(self, msg: LaserScan):
         self.last_scan = msg
@@ -61,8 +56,6 @@ class MoveTarget(Node):
                 self.move_line()
             elif self.mode == 'square':
                 self.move_square()
-            elif self.mode == 'wander':
-                self.move_wander()
         else:
             remaining = max(int(self.warmup_duration - (current_time - self.start_time)), 0)
             self.get_logger().info(f"Waiting to start movement... {remaining} seconds remaining.")
@@ -83,8 +76,8 @@ class MoveTarget(Node):
             self.get_logger().warn("Obstacle too close; stopping target.")
             return
         twist = Twist()
-        twist.linear.x = 0.0  # slow forward drift
-        twist.angular.z = 0.0  # Rotate at a constant rate
+        twist.linear.x = 0.0  # Move forward with a constant speed 1.0
+        twist.angular.z = 0.5  # Rotate at a constant rate 0.2
         self.cmd_pub.publish(twist)
         self.get_logger().info("Moving in a circle.")
 
