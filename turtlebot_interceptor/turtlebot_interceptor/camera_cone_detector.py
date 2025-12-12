@@ -991,9 +991,9 @@ class CameraConeDetector(Node):
                     f'⚠️ {len(detected_positions)} tracks but 0 markers published! '
                     f'All tracks have < {self.cone_min_detections} detections'
                 )
-                    self.get_logger().info(
-                        f'📷 No cones to publish (tracks: {len(self.cone_tracks)})'
-                    )
+                self.get_logger().info(
+                    f'📷 No cones to publish (tracks: {len(self.cone_tracks)})'
+                )
     
     def publish_cones_local(self, cones, header):
         """Publish detected cones in local_map frame (relative to robot)"""
