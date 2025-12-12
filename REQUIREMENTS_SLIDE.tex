@@ -1,0 +1,95 @@
+\documentclass[aspectratio=169]{beamer}
+\usetheme{Madrid}
+\usecolortheme{default}
+
+% Custom colors matching the slide design
+\definecolor{darkgray}{RGB}{40,40,40}
+\definecolor{lightgray}{RGB}{200,200,200}
+\definecolor{slidegreen}{RGB}{76,175,80}
+\definecolor{slideyellow}{RGB}{255,193,7}
+
+% Set background
+\setbeamercolor{background canvas}{bg=darkgray}
+\setbeamercolor{normal text}{fg=lightgray}
+\setbeamercolor{frametitle}{fg=slidegreen}
+\setbeamercolor{structure}{fg=slideyellow}
+
+\title{Group 15 Requirements}
+\author{}
+\date{106A Fall '25}
+
+\begin{document}
+
+\begin{frame}[plain]
+\titlepage
+\end{frame}
+
+\begin{frame}{Group 15 Requirements}
+\vspace{-0.3cm}
+\centering
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{|p{0.3\textwidth}|p{0.32\textwidth}|p{0.32\textwidth}|}
+\hline
+\textcolor{slideyellow}{\textbf{Sensing}} & \textcolor{slideyellow}{\textbf{Planning}} & \textcolor{slideyellow}{\textbf{Actuation}} \\
+\hline
+\hline
+\multicolumn{3}{|c|}{\textcolor{slidegreen}{\textbf{Objectives}}} \\
+\hline
+\vspace{0.1cm}
+The seeker turtlebot uses RealSense USB camera and LIDAR to navigate obstacles and locate the target. The target turtlebot also uses LIDAR for mapping. & Using current knowledge of surroundings and state estimates for both robots, calculate an optimal trajectory from seeker to target with obstacle avoidance. & The target turtlebot moves freely along a predesigned trajectory. The seeker turtlebot follows the MPC-calculated optimal trajectory. \\
+\hline
+\hline
+\multicolumn{3}{|c|}{\textcolor{slidegreen}{\textbf{Activities}}} \\
+\hline
+\vspace{0.1cm}
+→ Integrate Cartographer SLAM for global mapping
+
+→ Develop Fast Local Grid for real-time obstacle awareness (5-10 Hz)
+
+→ Integrate 6-layer HSV heuristic system on USB camera to detect cones
+
+→ Implement LIDAR-based target localization using map origins and Kabsch algorithm
+
+→ Handle elevated target cone (~10 cm above ground) in depth estimation & → State estimation of seeker using Extended Kalman Filter (EKF) fusing IMU, magnetometer, and encoders (100 Hz)
+
+→ State estimation of target using multi-sensor fusion (LIDAR map alignment + camera detections + UKF for velocity tracking)
+
+→ Plan optimal trajectories using Model Predictive Control (MPC) with obstacle constraints & → MPC directly outputs velocity commands (\texttt{/cmd\_vel}) to robot base
+
+→ Design simple target trajectories for testing
+
+→ Implement terminal guidance for final approach \\
+\hline
+\hline
+\multicolumn{3}{|c|}{\textcolor{slidegreen}{\textbf{Deliverables}}} \\
+\hline
+\vspace{0.1cm}
+→ Fast local occupancy grids (5-10 Hz updates)
+
+→ Yellow and blue cone detection for obstacles and target respectively (target elevated ~10 cm)
+
+→ Robust LIDAR-based target pose estimation with confidence scoring & → High-rate EKF pose estimation (100 Hz) for smooth control
+
+→ Accurate target state estimation with state propagation during occlusion
+
+→ Efficient, autonomous navigation through obstacles with MPC
+
+→ States and confidences visualized in RViz & → Smooth trajectory following via MPC
+
+→ Terminal guidance and final approach behaviors
+
+→ Interception! \\
+\hline
+\end{tabular}
+\end{table}
+
+\vspace{0.2cm}
+\textcolor{lightgray}{\tiny 106A Fall '25}
+
+\end{frame}
+
+\end{document}
+
