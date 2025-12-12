@@ -73,6 +73,9 @@ class CameraConeDetector(Node):
         # Need larger multiplier: if 5x gives 1.4m, need ~7-8x to get 2.5-3m
         # Using 7.0x for more accurate depth (was 5.0x, still too small)
         self.TARGET_CONE_AREA = 0.0208227849 * 7.0  # ~0.146 m^2 (for blue target cone)
+        # Scale factors to tune perceived depth (increase area -> estimated depth increases)
+        self.CONE_AREA_SCALE = 1.5  # yellow cones appear farther (reduce false near hits)
+        self.TARGET_CONE_AREA_SCALE = 1.0  # keep target depth as-is
         
         # Transform from camera to base_link (lab8 pattern)
         # G = [[0, 0, 1, 0.115],
@@ -116,15 +119,19 @@ class CameraConeDetector(Node):
         # Try /image_raw first (common), fallback to /camera/image_raw
         self.declare_parameter('image_topic', '/image_raw')  # Changed default - camera might publish here
         self.declare_parameter('camera_info_topic', '/camera_info')  # Changed default
+        self.declare_parameter('camera_info_topic_alt', '/camera/camera_info')  # Fallback if primary not present
         self.declare_parameter('pose_topic', '/amcl_pose')
         
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         camera_info_topic = self.get_parameter('camera_info_topic').get_parameter_value().string_value
+        camera_info_topic_alt = self.get_parameter('camera_info_topic_alt').get_parameter_value().string_value
         pose_topic = self.get_parameter('pose_topic').get_parameter_value().string_value
         
         self.get_logger().info(f'📷 Subscribing to:')
         self.get_logger().info(f'   Image: {image_topic}')
         self.get_logger().info(f'   Camera Info: {camera_info_topic}')
+        if camera_info_topic_alt != camera_info_topic:
+            self.get_logger().info(f'   Camera Info (alt): {camera_info_topic_alt}')
         self.get_logger().info(f'   Pose: {pose_topic}')
         
         # Subscriptions
@@ -151,7 +158,16 @@ class CameraConeDetector(Node):
             self.camera_info_callback,
             compatible_qos
         )
+        if camera_info_topic_alt != camera_info_topic:
+            self.camera_info_sub_alt = self.create_subscription(
+                CameraInfo,
+                camera_info_topic_alt,
+                self.camera_info_callback,
+                compatible_qos
+            )
         self.get_logger().info(f'📷 Subscribed to camera_info: {camera_info_topic} with BEST_EFFORT QoS')
+        if camera_info_topic_alt != camera_info_topic:
+            self.get_logger().info(f'📷 Subscribed to camera_info (alt): {camera_info_topic_alt} with BEST_EFFORT QoS')
         
         # Robot pose (for coordinate transforms)
         self.pose_sub = self.create_subscription(
@@ -189,6 +205,9 @@ class CameraConeDetector(Node):
         self.target_points_pub = self.create_publisher(PointStamped, '/camera_target_positions', 10)
         # Separate marker publisher for targets to avoid clobbering yellow markers
         self.target_marker_pub = self.create_publisher(MarkerArray, '/camera_target_markers', 10)
+        # Track last reliable target depth to stabilize near-field
+        self.last_target_depth = None
+        self.last_target_world = None  # Track last accepted target position (map frame) to gate outliers
         
         # Store confidence for each detection
         self.cone_confidences = {}  # Map cone_id -> confidence
@@ -200,9 +219,9 @@ class CameraConeDetector(Node):
         
         # Yellow cone temporal smoothing to prevent flickering
         self.cone_tracks = {}  # Map: cone_id -> (smoothed_pos, last_update_time, detection_count)
-        self.cone_smoothing_alpha = 0.15  # Lower = more smoothing (less flicker)
+        self.cone_smoothing_alpha = 0.3  # Lower = more smoothing (less flicker)
         self.cone_min_detections = 1  # Minimum detections before publishing (was 2, lowered to show immediately)
-        self.cone_timeout = 6  # Remove cones not seen for 1 second
+        self.cone_timeout = 3.0  # Remove cones not seen for 1 second
         self.target_pose = None
         
         self.get_logger().info('📷 Camera Cone Detector initialized')
@@ -334,10 +353,25 @@ class CameraConeDetector(Node):
         if self.camera_intrinsics is None:
             return processed
         
-        for cx, cy, w, h, area, mask_pixels in cones:
+        for entry in cones:
+            if len(entry) == 6:
+                cx, cy, w, h, area, mask_pixels = entry
+                clipped = False
+            else:
+                cx, cy, w, h, area, mask_pixels, clipped = entry
             # Use mask pixel count for depth estimation (lab8 pattern)
             # Pass is_target flag to use correct cone area (larger for blue target)
             point_3d, depth = self.pixel_to_3d_from_mask(mask_pixels, cy, cx, is_target=is_target)  # u=y, v=x
+            
+            # If target cone is clipped and very close, allow detection but clamp depth to last good
+            if is_target and clipped:
+                close_thresh = 0.9  # meters
+                if depth is None or depth > close_thresh:
+                    # If depth unreliable or far, skip clipped detection
+                    continue
+                if self.last_target_depth is not None:
+                    depth = min(depth, self.last_target_depth + 0.1)  # don't jump farther than previous + 10cm
+                self.get_logger().info(f'🎯 Clipped target kept: depth={depth:.2f}m (last={self.last_target_depth})')
             
             if point_3d is None:
                 continue
@@ -349,40 +383,23 @@ class CameraConeDetector(Node):
             if self.robot_pose is not None:
                 world_pos = self.base_link_to_map_frame(goal_point[:3])
                 if world_pos is not None:
-<<<<<<< HEAD
                     # Gate target detections to stay near prior target (reduce sudden jumps)
-                    # BUT: Allow closer detections (as robot approaches, detections should get closer)
                     if is_target and self.last_target_world is not None:
-                        robot_pos = np.array([self.robot_pose.position.x, self.robot_pose.position.y])
-                        jump_distance = np.linalg.norm(world_pos[:2] - self.last_target_world[:2])
-                        dist_to_new = np.linalg.norm(world_pos[:2] - robot_pos)
-                        dist_to_old = np.linalg.norm(self.last_target_world[:2] - robot_pos)
-                        
-                        # Allow jump if new detection is significantly CLOSER (expected when approaching)
-                        # or if jump is reasonable (< 1.5m)
-                        if jump_distance > 1.5:
-                            # Check if new detection is much closer - if so, trust it (robot is approaching)
-                            if dist_to_new < dist_to_old - 0.5:  # New is >0.5m closer - trust it!
-                                self.get_logger().info(
-                                    f'✅ Accepting closer target: jump={jump_distance:.2f}m, '
-                                    f'old_dist={dist_to_old:.2f}m -> new_dist={dist_to_new:.2f}m'
-                                )
-                            else:
-                                self.get_logger().warn(
-                                    f'⚠️ Target outlier rejected: jump {jump_distance:.2f}m '
-                                    f'from last ({self.last_target_world[0]:.2f}, {self.last_target_world[1]:.2f}), '
-                                    f'old_dist={dist_to_old:.2f}m, new_dist={dist_to_new:.2f}m'
-                                )
-                                continue
+                        if np.linalg.norm(world_pos[:2] - self.last_target_world[:2]) > 1.2:
+                            self.get_logger().warn(
+                                f'⚠️ Target outlier rejected: jump {np.linalg.norm(world_pos[:2] - self.last_target_world[:2]):.2f}m '
+                                f'from last ({self.last_target_world[0]:.2f}, {self.last_target_world[1]:.2f})'
+                            )
+                            continue
 
-=======
->>>>>>> c05ae2b (Revert "WE ARE CHARLIE KIRK")
                     # Compute confidence based on detection quality
                     confidence = self.compute_detection_confidence(area, mask_pixels, depth)
                     processed.append((world_pos[0], world_pos[1], depth, confidence, (cx, cy)))
                     
                     # Enhanced logging for target cones to debug position errors
                     if is_target:
+                        self.last_target_depth = depth  # cache last reliable/accepted depth
+                        self.last_target_world = np.array([world_pos[0], world_pos[1]])
                         robot_pos = np.array([self.robot_pose.position.x, self.robot_pose.position.y])
                         relative_pos = world_pos[:2] - robot_pos
                         q = self.robot_pose.orientation
@@ -564,6 +581,7 @@ class CameraConeDetector(Node):
                 self._yellow_pixel_logged = True
         
         cones = []
+        img_height, img_width = cv_image.shape[:2]
         debug_info = {'total_contours': len(contours), 'filtered': {}}
         
         for contour in contours:
@@ -578,6 +596,8 @@ class CameraConeDetector(Node):
             x, y, w, h = cv2.boundingRect(contour)
             center_x = x + w / 2
             center_y = y + h / 2
+            border_margin = 5
+            clipped = x <= border_margin or y <= border_margin or (x + w) >= (img_width - border_margin) or (y + h) >= (img_height - border_margin)
             
             # Heuristic 2: Aspect ratio (cones are roughly vertical/tall)
             # Cones are taller than they are wide
@@ -652,7 +672,7 @@ class CameraConeDetector(Node):
             # Get actual mask pixels for depth estimation (lab8 pattern)
             mask_pixels = yellow_pixels
             
-            cones.append((center_x, center_y, w, h, area, mask_pixels))
+            cones.append((center_x, center_y, w, h, area, mask_pixels, clipped))
         
         # Log debug info periodically
         if self._detection_count % 30 == 0:
@@ -680,6 +700,8 @@ class CameraConeDetector(Node):
         mask = cv2.inRange(hsv, self.lower_blue, self.upper_blue)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        img_height, img_width = cv_image.shape[:2]
+        border_margin = 5
 
         for contour in contours:
             area = cv2.contourArea(contour)
@@ -688,13 +710,14 @@ class CameraConeDetector(Node):
             x, y, w, h = cv2.boundingRect(contour)
             center_x = x + w / 2
             center_y = y + h / 2
+            clipped = x <= border_margin or y <= border_margin or (x + w) >= (img_width - border_margin) or (y + h) >= (img_height - border_margin)
             aspect_ratio = h / w if w > 0 else 0
             if aspect_ratio < 0.8 or aspect_ratio > 5.0:
                 continue
             mask_pixels = int(np.sum(mask[y:y+h, x:x+w] > 0))
             if mask_pixels < self.min_cone_area:
                 continue
-            cones.append((center_x, center_y, w, h, area, mask_pixels))
+            cones.append((center_x, center_y, w, h, area, mask_pixels, clipped))
         return cones
     
     def pixel_to_3d_from_mask(self, mask_pixels, u, v, is_target=False):
@@ -717,7 +740,10 @@ class CameraConeDetector(Node):
         
         # Depth estimation from pixel count (lab8 pattern)
         # Use larger area for blue target cone (4.5x bigger), smaller for yellow cones
-        cone_area = self.TARGET_CONE_AREA if is_target else self.CONE_AREA
+        if is_target:
+            cone_area = self.TARGET_CONE_AREA * self.TARGET_CONE_AREA_SCALE
+        else:
+            cone_area = self.CONE_AREA * self.CONE_AREA_SCALE
         depth = np.sqrt((fx * fy * cone_area) / mask_pixels)
         depth = np.clip(depth, 0.2, self.max_range)
         
@@ -991,9 +1017,6 @@ class CameraConeDetector(Node):
                     f'⚠️ {len(detected_positions)} tracks but 0 markers published! '
                     f'All tracks have < {self.cone_min_detections} detections'
                 )
-                self.get_logger().info(
-                    f'📷 No cones to publish (tracks: {len(self.cone_tracks)})'
-                )
     
     def publish_cones_local(self, cones, header):
         """Publish detected cones in local_map frame (relative to robot)"""
@@ -1074,52 +1097,20 @@ class CameraConeDetector(Node):
         """Debounce and smooth blue target detections, publish stable PointStamped + markers."""
         if len(targets) == 0:
             return
-        # pick closest detection (by depth/3rd element, not world distance)
-        closest = min(targets, key=lambda t: t[2])  # t[2] is depth
+        # pick closest detection
+        closest = min(targets, key=lambda t: math.hypot(t[0], t[1]))
         det = np.array([closest[0], closest[1]])
-        det_depth = closest[2]
-        
-        # If new detection is much closer than current estimate, reset smoothing for faster update
-        if self.target_pose is not None:
-            robot_pos = None
-            if self.robot_pose is not None:
-                robot_pos = np.array([self.robot_pose.position.x, self.robot_pose.position.y])
-                dist_to_current = np.linalg.norm(self.target_pose - robot_pos)
-                dist_to_new = np.linalg.norm(det - robot_pos)
-                
-                # If new detection is >1m closer, reset history for aggressive update
-                if dist_to_new < dist_to_current - 1.0:
-                    self.get_logger().info(
-                        f'🔄 Resetting target smoothing: much closer detection '
-                        f'({dist_to_current:.2f}m -> {dist_to_new:.2f}m, depth={det_depth:.2f}m)'
-                    )
-                    self.target_history = []  # Reset to allow fast update
-                    self.target_pose = None
-        
         self.target_history.append(det)
         if len(self.target_history) > self.target_required_streak:
             self.target_history.pop(0)
 
-        # Reduce required streak when close (faster updates)
-        required_streak = self.target_required_streak
-        if det_depth < 1.0:  # Within 1m, require only 2 frames
-            required_streak = 2
-        elif det_depth < 2.0:  # Within 2m, require 3 frames
-            required_streak = 3
-        
-        if len(self.target_history) < required_streak:
+        if len(self.target_history) < self.target_required_streak:
             return  # wait for enough consecutive frames
 
         if self.target_pose is None:
             smoothed = det
         else:
-            # More aggressive smoothing when closer (higher alpha = less smoothing = faster update)
-            alpha = self.target_alpha
-            if det_depth < 1.0:
-                alpha = 0.7  # More aggressive when very close
-            elif det_depth < 2.0:
-                alpha = 0.6
-            smoothed = alpha * det + (1 - alpha) * self.target_pose
+            smoothed = self.target_alpha * det + (1 - self.target_alpha) * self.target_pose
         self.target_pose = smoothed
         self.target_valid = True
 
