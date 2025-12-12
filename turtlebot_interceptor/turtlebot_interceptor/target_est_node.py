@@ -13,6 +13,7 @@ import numpy as np
 import math
 import transforms3d.euler as euler
 from collections import deque
+import tf2_ros
 
 
 class TargetEstimator(Node):
@@ -94,6 +95,45 @@ class TargetEstimator(Node):
 
         self.timer = self.create_timer(0.2, self.tick)
         self.get_logger().info("Target estimator (vision + warm start) ready")
+
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+
+        # Timer to publish TF after 30 seconds
+        self.timer2 = self.create_timer(30, self.publish_target_tf)
+
+        self.start = False
+
+    def publish_target_tf(self):
+        if self.start:
+            return
+        # Get the target's pose from the calculated estimate
+        if not hasattr(self, 'last_target_pose'):
+            self.get_logger().warning("No target pose available for TF broadcast.")
+            return
+
+        pose_msg = self.last_target_pose  # Assuming this is the latest calculated pose
+        
+        # Create TransformStamped message
+        transform = TransformStamped()
+
+        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.frame_id = 'odom'  # This is the parent frame
+        transform.child_frame_id = 'target/odom'  # This is the child frame
+
+        # Set position from pose (translation part)
+        transform.transform.translation.x = pose_msg.pose.pose.position.x
+        transform.transform.translation.y = pose_msg.pose.pose.position.y
+        transform.transform.translation.z = pose_msg.pose.pose.position.z
+
+        # Set orientation from pose (rotation part)
+        transform.transform.rotation = pose_msg.pose.pose.orientation
+        q = pose_msg.pose.pose.orientation
+        roll, pitch, yaw = euler.quat2euler([q.w, q.x, q.y, q.z])
+
+        # Send the transform
+        self.tf_broadcaster.sendTransform(transform)
+        self.get_logger().info(f"Publishing transform from /odom to /target/odom: (x={transform.transform.translation.x}, y={transform.transform.translation.y}, yaw={yaw})")
+        self.start = True
 
     def odom_cb(self, msg: Odometry):
         self.seeker_odom = msg

@@ -29,7 +29,7 @@ class MoveTarget(Node):
         self.start_time = time.time()  # Store the start time
         self.warmup_duration = 65.0
         self.moving = False  # Hold still until warmup finishes
-        self.mode = 'wander'  # Default mode: gentle wandering for a chase
+        self.mode = 'circle'  # Default mode: gentle wandering for a chase
         self.state = 'forwards'
         self.side_length = 2.0  # Side length for square movement (in meters)
         self.square_step = 0  # To track which side of the square we're on
@@ -39,7 +39,7 @@ class MoveTarget(Node):
         self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
         # Wander parameters
         self.wander_heading = 0.0
-        self.wander_speed = 0.015
+        self.wander_speed = 0.05
         self.wander_last_change = time.time()
         self.wander_interval = 3.0  # seconds between heading changes
 
@@ -83,8 +83,8 @@ class MoveTarget(Node):
             self.get_logger().warn("Obstacle too close; stopping target.")
             return
         twist = Twist()
-        twist.linear.x = 0.15  # slow forward drift
-        twist.angular.z = 0.5  # Rotate at a constant rate
+        twist.linear.x = 0.0  # slow forward drift
+        twist.angular.z = 0.0  # Rotate at a constant rate
         self.cmd_pub.publish(twist)
         self.get_logger().info("Moving in a circle.")
 
@@ -93,7 +93,7 @@ class MoveTarget(Node):
 
         if self.state == 'forwards':
             twist.linear.x = 0.8
-            twist.angular.z = 0.0 
+            twist.angular.z = 0.0
             self.cmd_pub.publish(twist)
             self.state = 'backwards'
 
@@ -167,7 +167,7 @@ class MoveTarget(Node):
             self.wander_heading = 0.3 * self.wander_heading + delta_heading
             # Keep heading very small to stay within a tight radius and bias outward if near seeker
             self.wander_heading = float(np.clip(self.wander_heading, -0.10, 0.10))
-            self.wander_speed = float(np.clip(self.wander_speed + np.random.uniform(-0.005, 0.005), 0.012, 0.025))
+            self.wander_speed = float(np.clip(self.wander_speed + np.random.uniform(-0.005, 0.005), 0.012, 0.25))
             self.wander_last_change = now
             self.get_logger().info(
                 f"Wander update: heading delta={math.degrees(delta_heading):.1f}°, speed={self.wander_speed:.2f} m/s"
