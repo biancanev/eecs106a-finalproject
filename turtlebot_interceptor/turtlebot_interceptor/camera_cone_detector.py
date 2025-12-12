@@ -219,9 +219,9 @@ class CameraConeDetector(Node):
         
         # Yellow cone temporal smoothing to prevent flickering
         self.cone_tracks = {}  # Map: cone_id -> (smoothed_pos, last_update_time, detection_count)
-        self.cone_smoothing_alpha = 0.3  # Lower = more smoothing (less flicker)
+        self.cone_smoothing_alpha = 0.15  # Lower = more smoothing (less flicker)
         self.cone_min_detections = 1  # Minimum detections before publishing (was 2, lowered to show immediately)
-        self.cone_timeout = 3.0  # Remove cones not seen for 1 second
+        self.cone_timeout = 6  # Remove cones not seen for 1 second
         self.target_pose = None
         
         self.get_logger().info('📷 Camera Cone Detector initialized')
