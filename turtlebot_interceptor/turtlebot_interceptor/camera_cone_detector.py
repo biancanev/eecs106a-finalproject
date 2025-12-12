@@ -384,13 +384,29 @@ class CameraConeDetector(Node):
                 world_pos = self.base_link_to_map_frame(goal_point[:3])
                 if world_pos is not None:
                     # Gate target detections to stay near prior target (reduce sudden jumps)
+                    # BUT: Allow closer detections (as robot approaches, detections should get closer)
                     if is_target and self.last_target_world is not None:
-                        if np.linalg.norm(world_pos[:2] - self.last_target_world[:2]) > 1.2:
-                            self.get_logger().warn(
-                                f'⚠️ Target outlier rejected: jump {np.linalg.norm(world_pos[:2] - self.last_target_world[:2]):.2f}m '
-                                f'from last ({self.last_target_world[0]:.2f}, {self.last_target_world[1]:.2f})'
-                            )
-                            continue
+                        robot_pos = np.array([self.robot_pose.position.x, self.robot_pose.position.y])
+                        jump_distance = np.linalg.norm(world_pos[:2] - self.last_target_world[:2])
+                        dist_to_new = np.linalg.norm(world_pos[:2] - robot_pos)
+                        dist_to_old = np.linalg.norm(self.last_target_world[:2] - robot_pos)
+                        
+                        # Allow jump if new detection is significantly CLOSER (expected when approaching)
+                        # or if jump is reasonable (< 1.5m)
+                        if jump_distance > 1.5:
+                            # Check if new detection is much closer - if so, trust it (robot is approaching)
+                            if dist_to_new < dist_to_old - 0.5:  # New is >0.5m closer - trust it!
+                                self.get_logger().info(
+                                    f'✅ Accepting closer target: jump={jump_distance:.2f}m, '
+                                    f'old_dist={dist_to_old:.2f}m -> new_dist={dist_to_new:.2f}m'
+                                )
+                            else:
+                                self.get_logger().warn(
+                                    f'⚠️ Target outlier rejected: jump {jump_distance:.2f}m '
+                                    f'from last ({self.last_target_world[0]:.2f}, {self.last_target_world[1]:.2f}), '
+                                    f'old_dist={dist_to_old:.2f}m, new_dist={dist_to_new:.2f}m'
+                                )
+                                continue
 
                     # Compute confidence based on detection quality
                     confidence = self.compute_detection_confidence(area, mask_pixels, depth)
@@ -1097,20 +1113,52 @@ class CameraConeDetector(Node):
         """Debounce and smooth blue target detections, publish stable PointStamped + markers."""
         if len(targets) == 0:
             return
-        # pick closest detection
-        closest = min(targets, key=lambda t: math.hypot(t[0], t[1]))
+        # pick closest detection (by depth/3rd element, not world distance)
+        closest = min(targets, key=lambda t: t[2])  # t[2] is depth
         det = np.array([closest[0], closest[1]])
+        det_depth = closest[2]
+        
+        # If new detection is much closer than current estimate, reset smoothing for faster update
+        if self.target_pose is not None:
+            robot_pos = None
+            if self.robot_pose is not None:
+                robot_pos = np.array([self.robot_pose.position.x, self.robot_pose.position.y])
+                dist_to_current = np.linalg.norm(self.target_pose - robot_pos)
+                dist_to_new = np.linalg.norm(det - robot_pos)
+                
+                # If new detection is >1m closer, reset history for aggressive update
+                if dist_to_new < dist_to_current - 1.0:
+                    self.get_logger().info(
+                        f'🔄 Resetting target smoothing: much closer detection '
+                        f'({dist_to_current:.2f}m -> {dist_to_new:.2f}m, depth={det_depth:.2f}m)'
+                    )
+                    self.target_history = []  # Reset to allow fast update
+                    self.target_pose = None
+        
         self.target_history.append(det)
         if len(self.target_history) > self.target_required_streak:
             self.target_history.pop(0)
 
-        if len(self.target_history) < self.target_required_streak:
+        # Reduce required streak when close (faster updates)
+        required_streak = self.target_required_streak
+        if det_depth < 1.0:  # Within 1m, require only 2 frames
+            required_streak = 2
+        elif det_depth < 2.0:  # Within 2m, require 3 frames
+            required_streak = 3
+        
+        if len(self.target_history) < required_streak:
             return  # wait for enough consecutive frames
 
         if self.target_pose is None:
             smoothed = det
         else:
-            smoothed = self.target_alpha * det + (1 - self.target_alpha) * self.target_pose
+            # More aggressive smoothing when closer (higher alpha = less smoothing = faster update)
+            alpha = self.target_alpha
+            if det_depth < 1.0:
+                alpha = 0.7  # More aggressive when very close
+            elif det_depth < 2.0:
+                alpha = 0.6
+            smoothed = alpha * det + (1 - alpha) * self.target_pose
         self.target_pose = smoothed
         self.target_valid = True
 

@@ -44,7 +44,13 @@ class TargetEstimator(Node):
         self.state = np.array([self.get_parameter('warm_start_x').get_parameter_value().double_value,
                                self.get_parameter('warm_start_y').get_parameter_value().double_value], dtype=float)
         self.yaw = self.get_parameter('warm_start_yaw').get_parameter_value().double_value
-        self.velocity = np.zeros(2)
+        self.velocity = np.zeros(2)  # [vx, vy] in world frame
+        
+        # Full state vector for propagation: [x, y, vx, vy, theta, omega]
+        # This allows us to propagate state forward when target is out of frame
+        self.full_state = None  # Will be initialized on first detection
+        self.state_covariance = None  # 6x6 covariance matrix
+        self.last_propagation_time = None
         
         # Detection tracking
         self.last_detection_time = None
@@ -183,12 +189,55 @@ class TargetEstimator(Node):
                     f"🔧 Nudge locked pose toward CV: shift={shift:.2f}m, dist→{new_dist:.2f}m"
                 )
         
+        # Update full state vector for propagation
+        # Estimate heading from velocity direction if available
+        if np.linalg.norm(self.velocity) > 0.1:
+            estimated_heading = math.atan2(self.velocity[1], self.velocity[0])
+        else:
+            estimated_heading = self.yaw_from_odom() if self.yaw_from_odom() is not None else self.yaw
+        
+        # Initialize or update full state: [x, y, vx, vy, theta, omega]
+        if self.full_state is None:
+            # Initialize full state
+            self.full_state = np.array([
+                detection_pos[0],
+                detection_pos[1],
+                self.velocity[0],
+                self.velocity[1],
+                estimated_heading,
+                0.0  # omega (angular velocity) - will be estimated from heading changes
+            ])
+            # Initialize covariance (high uncertainty initially)
+            self.state_covariance = np.diag([0.1, 0.1, 0.2, 0.2, 0.2, 0.1])
+        else:
+            # Update position and velocity
+            self.full_state[0] = detection_pos[0]
+            self.full_state[1] = detection_pos[1]
+            self.full_state[2] = self.velocity[0]
+            self.full_state[3] = self.velocity[1]
+            
+            # Update heading (smooth transition)
+            heading_diff = estimated_heading - self.full_state[4]
+            heading_diff = math.atan2(math.sin(heading_diff), math.cos(heading_diff))
+            self.full_state[4] = self.full_state[4] + 0.3 * heading_diff
+            self.full_state[4] = math.atan2(math.sin(self.full_state[4]), math.cos(self.full_state[4]))
+            
+            # Estimate angular velocity from heading change
+            if self.last_propagation_time is not None:
+                dt_prop = (detection_time.nanoseconds - self.last_propagation_time.nanoseconds) / 1e9
+                if dt_prop > 0.0:
+                    omega_est = heading_diff / dt_prop
+                    self.full_state[5] = 0.7 * self.full_state[5] + 0.3 * omega_est
+        
+        self.last_propagation_time = detection_time
+        
         # Log periodically
         if self.detection_count % 10 == 0:
             self.get_logger().info(
                 f"✅ CV detection #{self.detection_count}: pos=({detection_pos[0]:.3f}, {detection_pos[1]:.3f}), "
                 f"filtered=({self.filtered_state[0]:.3f}, {self.filtered_state[1]:.3f}), "
-                f"rejected={self.rejected_count}"
+                f"vel=({self.velocity[0]:.3f}, {self.velocity[1]:.3f}), "
+                f"heading={math.degrees(self.full_state[4]):.1f}°, rejected={self.rejected_count}"
             )
 
     def get_smoothed_position(self):
@@ -197,6 +246,59 @@ class TargetEstimator(Node):
             return None
         points = np.array([p for p, _ in self.detection_history])
         return np.median(points, axis=0)
+    
+    def propagate_state(self, dt):
+        """
+        Propagate target state forward using constant velocity model.
+        Used when target is out of frame to maintain continuous tracking.
+        
+        State: [x, y, vx, vy, theta, omega]
+        """
+        if self.full_state is None:
+            return None, None
+        
+        # Constant velocity propagation model
+        x, y, vx, vy, theta, omega = self.full_state
+        
+        # Propagate position
+        x_new = x + dt * vx
+        y_new = y + dt * vy
+        
+        # Propagate heading
+        theta_new = theta + dt * omega
+        theta_new = math.atan2(math.sin(theta_new), math.cos(theta_new))
+        
+        # Velocity and omega remain constant (constant velocity model)
+        # In reality, they may change, but we model this as process noise
+        
+        propagated_state = np.array([x_new, y_new, vx, vy, theta_new, omega])
+        
+        # Propagate covariance: P_{k+1} = F_k P_k F_k^T + Q_k
+        if self.state_covariance is not None:
+            # State transition matrix (Jacobian of propagation model)
+            F = np.array([
+                [1, 0, dt, 0, 0, 0],
+                [0, 1, 0, dt, 0, 0],
+                [0, 0, 1, 0, 0, 0],
+                [0, 0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 1, dt],
+                [0, 0, 0, 0, 0, 1]
+            ])
+            
+            # Process noise (increases with time since last detection)
+            # Base noise scales
+            base_noise = np.array([0.01, 0.01, 0.05, 0.05, 0.02, 0.05])
+            # Increase noise over time (uncertainty grows when target is lost)
+            time_since_detection = dt
+            noise_scale = 1.0 + 0.5 * time_since_detection  # Grow uncertainty over time
+            Q = np.diag(base_noise * noise_scale)
+            
+            # Covariance propagation
+            propagated_cov = F @ self.state_covariance @ F.T + Q
+        else:
+            propagated_cov = None
+        
+        return propagated_state, propagated_cov
 
     def tick(self):
         """Main update loop with robust pose estimation"""
@@ -250,13 +352,69 @@ class TargetEstimator(Node):
                 self.publish_pose(pose, confidence=confidence)
                 return
             else:
-                # Lost sight: hold last measured position with lower confidence
-                yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else (
-                    self.filtered_yaw if self.filtered_yaw is not None else self.yaw
-                )
+                # Lost sight: PROPAGATE STATE FORWARD using constant velocity model
+                # This is critical for robust tracking when target wanders out of frame
+                if self.full_state is not None and self.last_propagation_time is not None:
+                    # Compute time since last detection
+                    dt_prop = (now.nanoseconds - self.last_propagation_time.nanoseconds) / 1e9
+                    
+                    if dt_prop > 0.0 and dt_prop < 10.0:  # Reasonable propagation window
+                        # Propagate state forward
+                        propagated_state, propagated_cov = self.propagate_state(dt_prop)
+                        
+                        if propagated_state is not None:
+                            # Update full state with propagated values
+                            self.full_state = propagated_state
+                            if propagated_cov is not None:
+                                self.state_covariance = propagated_cov
+                            
+                            # Extract position and heading from propagated state
+                            pos_propagated = np.array([propagated_state[0], propagated_state[1]])
+                            heading_propagated = propagated_state[4]
+                            
+                            # Blend propagated position with last known position (smooth transition)
+                            blend_factor = min(dt_prop / 2.0, 0.7)  # Gradually trust propagation more over time
+                            pos_use = (1 - blend_factor) * pos_use + blend_factor * pos_propagated
+                            
+                            # Use propagated heading
+                            yaw_use = heading_propagated
+                            
+                            # Update velocity estimate from propagated state
+                            self.velocity = np.array([propagated_state[2], propagated_state[3]])
+                            
+                            # Confidence decays exponentially with time
+                            confidence_decay_rate = 0.15  # per second
+                            base_confidence = 0.6  # Start with moderate confidence
+                            confidence = base_confidence * math.exp(-confidence_decay_rate * dt_prop)
+                            confidence = max(confidence, 0.2)  # Minimum confidence floor
+                            
+                            self.get_logger().info(
+                                f"🔄 State propagation: dt={dt_prop:.2f}s, "
+                                f"propagated=({pos_propagated[0]:.3f}, {pos_propagated[1]:.3f}), "
+                                f"vel=({self.velocity[0]:.3f}, {self.velocity[1]:.3f}), "
+                                f"heading={math.degrees(heading_propagated):.1f}°, "
+                                f"confidence={confidence:.2f}"
+                            )
+                        else:
+                            # Fallback: use last known position
+                            yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else (
+                                self.filtered_yaw if self.filtered_yaw is not None else self.yaw
+                            )
+                            confidence = 0.3
+                    else:
+                        # Too long since last detection - use last known position
+                        yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else (
+                            self.filtered_yaw if self.filtered_yaw is not None else self.yaw
+                        )
+                        confidence = 0.2  # Very low confidence after long time
+                else:
+                    # No state to propagate - use last known position
+                    yaw_use = self.yaw_from_odom() if self.yaw_from_odom() is not None else (
+                        self.filtered_yaw if self.filtered_yaw is not None else self.yaw
+                    )
+                    confidence = 0.3
+                
                 pose = (pos_use[0], pos_use[1], yaw_use)
-                self.velocity = np.zeros(2)
-                confidence = 0.4  # Lower confidence when lost sight
                 self.publish_pose(pose, confidence=confidence)
                 return
 
