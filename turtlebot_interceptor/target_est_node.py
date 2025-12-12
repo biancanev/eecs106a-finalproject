@@ -46,11 +46,13 @@ class TargetEstimator(Node):
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
 
         # Timer to publish TF after 30 seconds
-        self.timer2 = self.create_timer(1, self.publish_target_tf)
+        self.timer2 = self.create_timer(30, self.publish_target_tf)
 
         self.start = False
 
     def publish_target_tf(self):
+        if self.start:
+            return
         # Get the target's pose from the calculated estimate
         if not hasattr(self, 'last_target_pose'):
             self.get_logger().warning("No target pose available for TF broadcast.")
@@ -78,6 +80,7 @@ class TargetEstimator(Node):
         # Send the transform
         self.tf_broadcaster.sendTransform(transform)
         self.get_logger().info(f"Publishing transform from /odom to /target/odom: (x={transform.transform.translation.x}, y={transform.transform.translation.y}, yaw={yaw})")
+        self.start = True
 
 
     def seeker_callback(self, msg: OccupancyGrid):
