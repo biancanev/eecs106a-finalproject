@@ -136,6 +136,28 @@
                                 <li><strong>Inputs:</strong> odometry, IMU, lidar-based pose updates</li>
                                 <li><strong>Outputs:</strong> robot pose, covariance, health indicators</li>
                             </ul>
+                            <div class="methods">
+                                <div class="method-block">
+                                    <h4>Simulation</h4>
+                                    <p>Developed sim with known obstacles and estimation on target wandering and seeker state. MPC solution intercepts in 50 steps.</p>
+                                    <div class="method-photos multiple">
+                                        <!-- Two photos for Method 1: side-by-side on wide screens, stacked on small screens -->
+                                        <figure class="method-figure">
+                                            <img src="images/mpc_sim.png" alt="Working Simulation">
+                                            <figcaption>RVIZ Visualization of Target Detection</figcaption>
+                                        </figure>
+                                    </div>
+                                </div>
+                                <div class="method-block">
+                                    <h4>Hardware</h4>
+                                    <p><strong>TODO</strong></p>
+                                    <ul>
+                                        <li><strong>Approach:</strong> object detector (YOLO/SSD/Faster-RCNN) or classification + bbox regression</li>
+                                        <li><strong>Pros:</strong> robust to variation, higher recall/precision when trained well</li>
+                                        <li><strong>Cons:</strong> needs labeled data and more compute</li>
+                                    </ul>
+                                </div>
+                            </div>
                             <p class="hint">Tip: add plots of estimated vs. ground-truth trajectories if available.</p>
                         </div>
                     </article>
