@@ -147,7 +147,7 @@ body {
     border-radius: 8px;
     box-shadow: 0 6px 12px rgba(16,24,40,0.04);
     display: grid;
-    grid-template-rows: auto auto minmax(80px, auto) auto auto auto auto;
+    grid-template-rows: auto auto minmax(20px, auto) auto auto auto auto;
     grid-template-areas: 
         "title"
         "description"
@@ -175,7 +175,7 @@ body {
     grid-area: action-items;
     font-size: 1rem;
     color: var(--accent-2);
-    margin-top: 1.5rem;
+    margin-top: 0.75rem;
     margin-bottom: 0.5rem;
 }
 
@@ -183,7 +183,7 @@ body {
     grid-area: deliverables;
     font-size: 1rem;
     color: var(--accent-2);
-    margin-top: 1.5rem;
+    margin-top: 0.75rem;
     margin-bottom: 0.5rem;
 }
 
