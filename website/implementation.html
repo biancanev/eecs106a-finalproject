@@ -50,10 +50,10 @@
 
                         <div class="impl-body">
                             <h3>Obstacle Detection</h3>
-                            <p>Describe the obstacle detection pipeline here. Include preprocessing, algorithms, and key parameters.</p>
+                            <p>Obstacles are detected using both lidar and camera sensors. Camera detects obstacles(Yellow Cones) through color and shape filtering. LIDAR filters raw scans which are then used to build a fast local robot-centric occupancy grid. These cone positions and the occupancy grid are used to plan paths around obstacles in our MPC node.</p>
                             <ul>
                                 <li><strong>Input:</strong> raw lidar / camera / fused sensor data</li>
-                                <li><strong>Algorithm:</strong> segmentation, clustering, CNN, thresholding</li>
+                                <li><strong>Algorithm:</strong> Color segmentation, shape filtering, Ray-casting occupancy update</li>
                                 <li><strong>Output:</strong> bounding boxes, occupancy grids, confidence scores</li>
                             </ul>
                         </div>
