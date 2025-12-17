@@ -138,7 +138,6 @@ body {
     gap: 1rem;
     grid-template-columns: repeat(3, 1fr);
     margin-top: 0.75rem;
-    align-items: stretch;
 }
 
 .design-item {
@@ -146,60 +145,17 @@ body {
     padding: 1rem;
     border-radius: 8px;
     box-shadow: 0 6px 12px rgba(16,24,40,0.04);
-    display: grid;
-    grid-template-rows: auto auto minmax(20px, auto) auto auto auto auto;
-    grid-template-areas: 
-        "title"
-        "description"
-        "spacer"
-        "action-items"
-        "action-list"
-        "deliverables"
-        "deliverable-list";
-    height: 100%;
 }
 
 .design-item h3 {
-    grid-area: title;
     margin: 0 0 0.5rem 0;
     font-size: 1.1rem;
     color: var(--accent-1);
 }
 
-.design-item > p {
-    grid-area: description;
-    margin-bottom: 0;
-    min-height: 3.5rem; /* Ensure consistent height across all columns */
-}
-
-.design-item h4:nth-of-type(1) {
-    grid-area: action-items;
-    font-size: 1rem;
-    color: var(--accent-2);
-    margin-top: 0.75rem;
-    margin-bottom: 0.5rem;
-}
-
-.design-item h4:nth-of-type(2) {
-    grid-area: deliverables;
-    font-size: 1rem;
-    color: var(--accent-2);
-    margin-top: 0.75rem;
-    margin-bottom: 0.5rem;
-}
-
-.design-item h4:nth-of-type(1) + ul {
-    grid-area: action-list;
+.design-item ul {
     margin-left: 1rem;
-    margin-top: 0;
-    margin-bottom: 0;
-}
-
-.design-item h4:nth-of-type(2) + ul {
-    grid-area: deliverable-list;
-    margin-left: 1rem;
-    margin-top: 0;
-    margin-bottom: 0;
+    margin-top: 0.5rem;
 }
 
 .design-item .hint {
