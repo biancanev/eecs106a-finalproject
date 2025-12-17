@@ -25,13 +25,112 @@
     <main class="container">
         <header class="page-header">
             <h1>Implementation</h1>
-            <p class="subtitle">Technical implementation details</p>
         </header>
 
         <section class="content">
             <div class="card">
                 <h2>Implementation Details</h2>
-                <p>This section will contain technical details about how the project was implemented. Content will be added here soon.</p>
+
+                <div class="impl-grid">
+                    <article class="impl-item obstacle">
+                        <div class="photo-row">
+                            <div class="impl-photo thumb">
+                                <img src="images/ConeDetection.png" alt="Obstacle detection example 1">
+                            </div>
+                            <div class="impl-photo thumb">
+                                <img src="images/RVIZMapping.png" alt="Obstacle detection example 2">
+                            </div>
+                        </div>
+
+                        <div class="impl-body">
+                            <h3>Obstacle Detection</h3>
+                            <p>Describe the obstacle detection pipeline here. Include preprocessing, algorithms, and key parameters.</p>
+                            <ul>
+                                <li><strong>Input:</strong> raw lidar / camera / fused sensor data</li>
+                                <li><strong>Algorithm:</strong> segmentation, clustering, CNN, thresholding</li>
+                                <li><strong>Output:</strong> bounding boxes, occupancy grids, confidence scores</li>
+                            </ul>
+                            <p class="hint">Tip: list sample frame filenames or add camera/lidar snapshots below each description.</p>
+                        </div>
+                    </article>
+
+                    <article class="impl-item">
+                        <div class="impl-body">
+                            <h3>Target Detection</h3>
+                            <p>Detail how targets are detected and classified, and how detections are tracked over time.</p>
+
+                            <div class="methods">
+                                <div class="method-block">
+                                    <h4>Method 1 — LIDAR and Procrutes Algorithm</h4>
+                                    <p>Use image processing and rule-based heuristics for detection. This method is lightweight and interpretable.</p>
+                                    <ul>
+                                        <li><strong>Approach:</strong> color/shape filtering, edge detection, morphological ops</li>
+                                        <li><strong>Pros:</strong> fast, explainable, easy to tune</li>
+                                        <li><strong>Cons:</strong> brittle to lighting and appearance changes</li>
+                                    </ul>
+                                    <div class="method-photos multiple">
+                                        <!-- Two photos for Method 1: side-by-side on wide screens, stacked on small screens -->
+                                        <figure class="method-figure">
+                                            <img src="images/RVIZTargetDetection.png" alt="Method 1 example A">
+                                            <figcaption>RVIZ Visualization of Target Detection</figcaption>
+                                        </figure>
+                                        <figure class="method-figure">
+                                            <img src="images/TargetDetection.png" alt="Method 1 example B">
+                                            <figcaption>Real-world Target Detection setup</figcaption>
+                                        </figure>
+                                    </div>
+                                </div>
+                                <div class="method-block">
+                                    <h4>Method 2 — USB Logitech Camera</h4>
+                                    <p>Use a trained detector (e.g., CNN) for more robust detection and classification under varied conditions.</p>
+                                    <ul>
+                                        <li><strong>Approach:</strong> object detector (YOLO/SSD/Faster-RCNN) or classification + bbox regression</li>
+                                        <li><strong>Pros:</strong> robust to variation, higher recall/precision when trained well</li>
+                                        <li><strong>Cons:</strong> needs labeled data and more compute</li>
+                                    </ul>
+                                    <div class="method-photos small">
+                                        <!-- Add a representative photo for Method 2 -->
+                                        <img src="images/CVTargetDetection.png" alt="Method 2 example">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <ul>
+                                <li><strong>Association:</strong> data association / tracking filters</li>
+                                <li><strong>Metrics:</strong> precision, recall, latency</li>
+                            </ul>
+
+                            <p class="hint">Tip: include before/after images showing detection overlays; list which method was used for each example.</p>
+                        </div>
+                    </article>
+
+                    <article class="impl-item">
+                        <!-- Two state-estimation images displayed side-by-side on wide screens -->
+                        <div class="method-photos multiple state-photos">
+                            <figure class="method-figure">
+                                <img src="images/EKF.png" alt="EKF state estimation example">
+                                <figcaption>EKF: Extended Kalman Filter — fused pose estimate</figcaption>
+                            </figure>
+                            <figure class="method-figure">
+                                <img src="images/MCL.png" alt="MCL state estimation example">
+                                <figcaption>MCL: Monte Carlo Localization — particle distribution</figcaption>
+                            </figure>
+                        </div>
+
+                        <div class="impl-body">
+                            <h3>State Estimation</h3>
+                            <p>Explain the estimator(s) used (EKF/UKF/MCL), sensor fusion strategy, and failure modes.</p>
+                            <ul>
+                                <li><strong>Estimator:</strong> EKF / UKF / Particle Filter</li>
+                                <li><strong>Inputs:</strong> odometry, IMU, lidar-based pose updates</li>
+                                <li><strong>Outputs:</strong> robot pose, covariance, health indicators</li>
+                            </ul>
+                            <p class="hint">Tip: add plots of estimated vs. ground-truth trajectories if available.</p>
+                        </div>
+                    </article>
+                </div>
+
+                <p class="footnote">Add images to `website/images/` and update captions as needed. Duplicate `.impl-item` blocks to add more examples.</p>
             </div>
 
             <div class="card">

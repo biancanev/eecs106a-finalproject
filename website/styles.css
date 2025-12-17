@@ -5,11 +5,21 @@
     box-sizing: border-box;
 }
 
+:root{
+    --bg: #ffffff; /* main white */
+    --surface: #ffffff;
+    --text: #111827; /* dark text */
+    --muted: #6b7280;
+    --accent-1: #0b1620; /* dark slate start */
+    --accent-2: #18242b; /* dark slate end */
+    --accent-contrast: #2b3940;
+}
+
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     line-height: 1.6;
-    color: #333;
-    background-color: #f5f5f5;
+    color: var(--text);
+    background-color: var(--bg);
     min-height: 100vh;
     display: flex;
     flex-direction: column;
@@ -17,10 +27,10 @@ body {
 
 /* Navigation Bar */
 .navbar {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, var(--accent-1) 0%, var(--accent-2) 100%);
     color: white;
     padding: 1rem 0;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
     position: sticky;
     top: 0;
     z-index: 1000;
@@ -52,17 +62,17 @@ body {
     color: white;
     text-decoration: none;
     padding: 0.5rem 1rem;
-    border-radius: 5px;
-    transition: background-color 0.3s ease;
+    border-radius: 6px;
+    transition: background-color 0.18s ease;
     font-weight: 500;
 }
 
 .nav-menu a:hover {
-    background-color: rgba(255, 255, 255, 0.2);
+    background-color: rgba(255,255,255,0.06);
 }
 
 .nav-menu a.active {
-    background-color: rgba(255, 255, 255, 0.3);
+    background-color: rgba(255,255,255,0.12);
     font-weight: 600;
 }
 
@@ -84,7 +94,7 @@ body {
 
 .page-header h1 {
     font-size: 3rem;
-    color: #667eea;
+    color: var(--accent-1);
     margin-bottom: 0.5rem;
     font-weight: 700;
 }
@@ -102,29 +112,250 @@ body {
 }
 
 .card {
-    background: white;
+    background: var(--surface);
     padding: 2rem;
     border-radius: 10px;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    transition: transform 0.3s ease, box-shadow 0.3s ease;
+    box-shadow: 0 6px 14px rgba(16,24,40,0.06);
+    transition: transform 0.25s ease, box-shadow 0.25s ease;
 }
 
 .card:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+    transform: translateY(-6px);
+    box-shadow: 0 10px 18px rgba(16,24,40,0.08);
 }
 
 .card h2 {
-    color: #764ba2;
+    color: var(--accent-2);
     margin-bottom: 1rem;
     font-size: 1.8rem;
-    border-bottom: 2px solid #667eea;
+    border-bottom: 2px solid var(--accent-1);
     padding-bottom: 0.5rem;
+}
+
+/* Design overview: grid of sections (Sensing / Planning / Actuation) */
+.design-grid {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(3, 1fr);
+    margin-top: 0.75rem;
+}
+
+.design-item {
+    background: var(--surface);
+    padding: 1rem;
+    border-radius: 8px;
+    box-shadow: 0 6px 12px rgba(16,24,40,0.04);
+}
+
+.design-item h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.1rem;
+    color: var(--accent-1);
+}
+
+.design-item ul {
+    margin-left: 1rem;
+    margin-top: 0.5rem;
+}
+
+.design-item .hint {
+    margin-top: 0.5rem;
+    font-size: 0.95rem;
+    color: var(--muted);
+}
+
+.footnote {
+    font-size: 0.95rem;
+    color: var(--muted);
+    margin-top: 1rem;
+}
+
+/* Implementation page: grid of implementation examples with photos */
+.impl-grid {
+    display: grid;
+    gap: 1.25rem;
+    grid-template-columns: 1fr; /* each item gets full row */
+    margin-top: 0.75rem;
+}
+
+/* Video row: display two videos side-by-side on wide screens, stack on small screens */
+.video-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.video-item video {
+    width: 100%;
+    height: auto;
+    max-height: 420px;
+    border-radius: 6px;
+    background: #000;
+}
+
+.video-caption {
+    margin-top: 0.5rem;
+    font-size: 0.95rem;
+    color: var(--muted);
+}
+
+@media (max-width: 768px) {
+    .video-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.impl-item {
+    display: flex;
+    flex-direction: column; /* stack photo above text */
+    gap: 1rem;
+    align-items: stretch;
+    background: var(--surface);
+    padding: 0.75rem;
+    border-radius: 8px;
+    box-shadow: 0 6px 12px rgba(16,24,40,0.04);
+}
+
+.impl-photo {
+    width: 100%;
+    max-width: 100%;
+    margin: 0;
+}
+
+.impl-photo img {
+    width: 100%;
+    height: auto;
+    max-height: 600px; /* allow large photos while keeping them constrained */
+    border-radius: 6px;
+    object-fit: cover;
+    display: block;
+    border: 1px solid rgba(0,0,0,0.04);
+}
+
+/* Photo row for multiple thumbnails side-by-side (used in obstacle detection) */
+.photo-row {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+}
+
+.impl-item.obstacle .impl-photo.thumb {
+    flex: 1 1 calc(50% - 0.375rem);
+    max-width: calc(50% - 0.375rem);
+}
+
+.impl-item.obstacle .impl-photo.thumb img {
+    max-height: 240px;
+    width: 100%;
+    height: auto;
+    object-fit: contain; /* preserve full image, avoid cropping */
+    background-color: #fbfbfc; /* subtle background when aspect ratios differ */
+    padding: 4px;
+    box-sizing: border-box;
+    display: block;
+}
+
+.impl-body {
+    flex: 1 1 auto;
+}
+
+.impl-body h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.05rem;
+    color: var(--accent-1);
+}
+
+.impl-body .hint {
+    color: var(--muted);
+    font-size: 0.95rem;
+    margin-top: 0.4rem;
+}
+
+/* Method subsections inside Target Detection */
+.methods {
+    display: grid;
+    gap: 0.75rem;
+    margin: 0.5rem 0 0.75rem 0;
+}
+
+.method-block {
+    border-left: 3px solid var(--accent-1);
+    padding: 0.6rem 0.9rem;
+    background: rgba(0,0,0,0.01);
+    border-radius: 4px;
+}
+
+.method-block h4 {
+    margin: 0 0 0.4rem 0;
+    font-size: 1rem;
+    color: var(--accent-2);
+}
+
+.method-photos {
+    margin-top: 0.5rem;
+    display: block;
+}
+
+.method-photos img {
+    width: 100%;
+    max-width: 640px; /* allow a large representative image */
+    height: auto;
+    border-radius: 6px;
+    object-fit: contain;
+    border: 1px solid rgba(0,0,0,0.04);
+    display: block;
+}
+
+/* Multiple photos layout for Method 1 */
+.method-photos.multiple {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.6rem;
+    align-items: start;
+}
+
+.method-figure {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.method-figure img {
+    width: 100%;
+    height: auto;
+    max-height: 360px;
+    object-fit: contain; /* preserve full image, avoid cropping */
+    background-color: #fbfbfc;
+    padding: 4px;
+    border-radius: 6px;
+    box-sizing: border-box;
+}
+
+.method-figure figcaption {
+    font-size: 0.9rem;
+    color: var(--muted);
+}
+
+@media (max-width: 740px) {
+    .method-photos.multiple {
+        grid-template-columns: 1fr; /* stack on smaller screens */
+    }
+}
+
+/* Smaller representative image for Method 2 */
+.method-photos.small img {
+    max-width: 360px;
+    width: 100%;
+    height: auto;
+    object-fit: contain;
 }
 
 .card p {
     margin-bottom: 1rem;
-    color: #555;
+    color: var(--muted);
     font-size: 1.1rem;
 }
 
@@ -147,13 +378,52 @@ body {
     padding: 0.75rem;
     margin-bottom: 0.5rem;
     background-color: #f8f9fa;
-    border-left: 4px solid #667eea;
+    border-left: 4px solid var(--accent-1);
     border-radius: 4px;
+}
+
+/* Team member layout: image left, text right */
+.team-member {
+    display: flex;
+    gap: 1.5rem;
+    align-items: flex-start;
+    margin: 1rem 0;
+}
+
+.member-photo {
+    flex: 0 0 160px;
+    max-width: 160px;
+}
+
+.member-photo img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
+    object-fit: cover;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+}
+
+.member-info {
+    flex: 1 1 auto;
+}
+
+.member-info h3 {
+    margin: 0 0 0.25rem 0;
+    font-size: 1.25rem;
+    color: var(--text);
+}
+
+.member-sep {
+    border: none;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(0,0,0,0.06), rgba(0,0,0,0));
+    margin: 0.75rem 0;
 }
 
 /* Footer */
 .footer {
-    background-color: #333;
+    background-color: var(--accent-2);
     color: white;
     text-align: center;
     padding: 1.5rem;
@@ -199,6 +469,31 @@ body {
 
     .card h2 {
         font-size: 1.5rem;
+    }
+
+    /* Stack the design grid on small screens */
+    .design-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .design-item h3 {
+        text-align: center;
+    }
+
+    /* Stack member layout on small screens */
+    .team-member {
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+    }
+
+    .member-photo {
+        flex: 0 0 auto;
+        max-width: 220px;
+    }
+
+    .member-info {
+        width: 100%;
     }
 }
 
