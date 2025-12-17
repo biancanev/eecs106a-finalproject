@@ -169,6 +169,7 @@ body {
 .design-item > p {
     grid-area: description;
     margin-bottom: 0;
+    min-height: 3.5rem; /* Ensure consistent height across all columns */
 }
 
 .design-item h4:nth-of-type(1) {
