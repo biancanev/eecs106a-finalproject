@@ -170,6 +170,40 @@ body {
     margin-top: 1rem;
 }
 
+/* Attachments grid: neat two-up layout with captions */
+.attachments-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+    align-items: start;
+    margin-top: 0.75rem;
+}
+
+.attachment-figure {
+    margin: 0;
+    background: var(--surface);
+    padding: 0.5rem;
+    border-radius: 8px;
+    box-shadow: 0 6px 12px rgba(16,24,40,0.03);
+    text-align: center;
+}
+
+.attachment-figure img {
+    width: 100%;
+    height: auto;
+    max-height: 320px;
+    object-fit: contain;
+    border-radius: 6px;
+    display: block;
+    margin: 0 auto;
+}
+
+.attachment-figure figcaption {
+    margin-top: 0.5rem;
+    font-size: 0.95rem;
+    color: var(--muted);
+}
+
 /* Implementation page: grid of implementation examples with photos */
 .impl-grid {
     display: grid;
@@ -478,6 +512,11 @@ body {
 
     .design-item h3 {
         text-align: center;
+    }
+
+    /* Stack attachments grid on small screens */
+    .attachments-grid {
+        grid-template-columns: 1fr;
     }
 
     /* Stack member layout on small screens */
