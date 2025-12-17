@@ -30,41 +30,71 @@
 
         <section class="content">
             <div class="card">
+                <h2>Design Criteria</h2>
+                <ul>
+                    <li><strong>Mapping:</strong> Accurately map the environment to identify obstacles, free space and the seeker and target robot poses.</li>
+                    <li><strong>Trajectory:</strong> Plan and execute an optimal trajectory for the seeker robot to intercept the target robot while avoiding obstacles.</li>
+                    <li><strong>Real-time Performance:</strong> Ensure the system operates in real-time to adapt to dynamic changes in the environment and target movement.</li>
+                </ul>
+            </div>
+
+            <div class="card">
                 <h2>Design Overview</h2>
 
                 <div class="design-grid">
                     <article class="design-item">
                         <h3>Sensing</h3>
                         <p>The seeker turtlebot uses RealSense USB camera and LIDAR to navigate obstacles and locate the target. The target turtlebot also uses LIDAR for mapping.</p>
+                        <h4>Action Items</h4>
                         <ul>
-                            <li><strong>Sensors:</strong> List sensors (e.g., lidar, camera, IMU, odometry)</li>
-                            <li><strong>Processing:</strong> Filtering, segmentation, cone detection, feature extraction</li>
-                            <li><strong>Outputs:</strong> Detections, obstacle maps, confidence metrics</li>
+                            <li>Integrate Cartographer SLAM for global mapping</li>
+                            <li>Develop Fast Local Grid for real-time obstacle awareness (5-10 Hz)</li>
+                            <li>Integrate 6-layer HSV heuristic system on USB camera to detect cones</li>
+                            <li>Implement LIDAR-based target localization using map origins and Kabsch algorithm</li>
                         </ul>
-                        <p class="hint">Notes: Add sample rates, noise characteristics, and any calibration steps.</p>
+                        <h4>Deliverables</h4>
+                        <ul>
+                            <li>Fast local occupancy grids (5-10 Hz updates)</li>
+                            <li>Yellow and blue cone detection for obstacles and target respectively</li>
+                            <li>Robust LIDAR-based target pose estimation with confidence scoring</li>
+                        </ul>
                     </article>
 
                     <article class="design-item">
                         <h3>Planning</h3>
                         <p>Using current knowledge of surroundings and state estimates for both robots, calculate an optimal trajectory from seeker to target with obstacle avoidance.</p>
+                        <h4>Action Items</h4>
                         <ul>
-                            <li><strong>Planner type:</strong> MPC, sampling-based, graph-based, etc.</li>
-                            <li><strong>Objectives:</strong> Cost functions, obstacle avoidance, goal tracking</li>
-                            <li><strong>Constraints:</strong> Dynamics, safety margins, computation limits</li>
+                            <li> State estimation of seeker using Extended Kalman Filter (EKF) fusing IMU, magnetometer, and encoders (100 Hz)</li>
+                            <li>State estimation of target using multi-sensor fusion (LIDAR map alignment + camera detections + UKF for velocity tracking)</li>
+                            <li>Plan optimal trajectories using Model Predictive Control (MPC) with obstacle constraints</li>
                         </ul>
-                        <p class="hint">Notes: Mention horizon lengths, discretization, and tuning considerations.</p>
+
+                        <h4>Deliverables</h4>
+                        <ul>
+                            <li>High-rate EKF pose estimation (100 Hz) for smooth control</li>
+                            <li>Accurate target state estimation with state propagation during occlusion</li>
+                            <li>Efficient, autonomous navigation through obstacles with MPC</li>
+                            <li>States and confidences visualized in RViz</li>
+                        </ul>
                     </article>
 
                     <article class="design-item">
                         <h3>Actuation</h3>
-                        <p>The target turtlebot moves freely along a predesigned trajectory. The seeker turtlebot follows the MPC-calculated optimal trajectory.
-</p>
+                        <p>The target turtlebot moves freely along a predesigned trajectory. The seeker turtlebot follows the MPC-calculated optimal trajectory.</p>
+                        <h4>Action Items</h4>
                         <ul>
-                            <li><strong>Control:</strong> Low-level controllers, control loops, command smoothing</li>
-                            <li><strong>Interfaces:</strong> ROS topics/services, command rates, watchdogs</li>
-                            <li><strong>Hardware:</strong> Motor limits, latency, safety shutdowns</li>
+                            <li>MPC directly outputs velocity commands (/cmd_vel) to robot base</li>
+                            <li>Design simple target trajectories for testing</li>
+                            <li> Implement terminal guidance for final approach</li>
                         </ul>
-                        <p class="hint">Notes: Add typical command ranges and failure-handling strategies.</p>
+
+                        <h4>Deliverables</h4>
+                        <ul>
+                            <li>Smooth trajectory following via MPC</li>
+                            <li>Terminal guidance and final approach behaviors</li>
+                            <li>Interception!</li>
+                        </ul>
                     </article>
                 </div>
 
@@ -72,14 +102,14 @@
             </div>
 
             <div class="card">
-                <h2>Design Principles</h2>
+                <h2>Design Impacts</h2>
                 <p>Key design principles and considerations will be documented here.</p>
             </div>
         </section>
     </main>
 
     <footer class="footer">
-        <p>&copy; 2024 EECS 106A Final Project. All rights reserved.</p>
+        <p>&copy; 2025 EECS 106A Final Project. All rights reserved.</p>
     </footer>
 </body>
 </html>
