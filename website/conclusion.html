@@ -30,13 +30,19 @@
 
         <section class="content">
             <div class="card">
-                <h2>Summary</h2>
-                <p>This section will contain a summary of the project and final conclusions. Content will be added here soon.</p>
+                <h2>Difficulties</h2>
+                <p>There were several challenges faced during the project; key difficulties included:</p>
+                <ul class="difficulties-list">
+                    <li><strong>Tuning the MPC:</strong> Finding controller parameters that balanced responsiveness and stability across scenarios. This took considerable experimentation and iteration.</li>
+                    <li><strong>Perception Reliability:</strong> We initially had set on soley using a lidar based implementation to map our environment, but later integrated computer vision due to the lack of robustness in lidar-only perception.</li>
+                    <li><strong>State Estimation:</strong> Fusing lidar, odometry, and (simulated) sensor data to maintain accurate localization during dynamic maneuvers.</li>
+                    <li><strong>Integration & Timing:</strong> Managing communication delays, synchronization between nodes, and ensuring real-time performance on constrained hardware.</li>
+                </ul>
             </div>
 
             <div class="card">
                 <h2>Future Work</h2>
-                <p>Potential future improvements and extensions to the project will be discussed here.</p>
+                <p>With more time to work on this project, we would focus on improving the robustness of the perception system, further tuning the MPC for better performance. Specically we would look to improve the trajectory of the seeker bot the choose the most optimal path to target and follow it in a smooth manner. Our current implementation does so in a jerky manner, which could be refined to move more smoothly. We also would wish to make the seeker as general as possible and be able to adapt to any complex enviroment of obstacles in its path to the target.</p>
             </div>
         </section>
     </main>

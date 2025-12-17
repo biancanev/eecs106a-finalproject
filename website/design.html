@@ -31,7 +31,44 @@
         <section class="content">
             <div class="card">
                 <h2>Design Overview</h2>
-                <p>This section will contain information about the design phase of our project. Details will be added here soon.</p>
+
+                <div class="design-grid">
+                    <article class="design-item">
+                        <h3>Sensing</h3>
+                        <p>The seeker turtlebot uses RealSense USB camera and LIDAR to navigate obstacles and locate the target. The target turtlebot also uses LIDAR for mapping.</p>
+                        <ul>
+                            <li><strong>Sensors:</strong> List sensors (e.g., lidar, camera, IMU, odometry)</li>
+                            <li><strong>Processing:</strong> Filtering, segmentation, cone detection, feature extraction</li>
+                            <li><strong>Outputs:</strong> Detections, obstacle maps, confidence metrics</li>
+                        </ul>
+                        <p class="hint">Notes: Add sample rates, noise characteristics, and any calibration steps.</p>
+                    </article>
+
+                    <article class="design-item">
+                        <h3>Planning</h3>
+                        <p>Using current knowledge of surroundings and state estimates for both robots, calculate an optimal trajectory from seeker to target with obstacle avoidance.</p>
+                        <ul>
+                            <li><strong>Planner type:</strong> MPC, sampling-based, graph-based, etc.</li>
+                            <li><strong>Objectives:</strong> Cost functions, obstacle avoidance, goal tracking</li>
+                            <li><strong>Constraints:</strong> Dynamics, safety margins, computation limits</li>
+                        </ul>
+                        <p class="hint">Notes: Mention horizon lengths, discretization, and tuning considerations.</p>
+                    </article>
+
+                    <article class="design-item">
+                        <h3>Actuation</h3>
+                        <p>The target turtlebot moves freely along a predesigned trajectory. The seeker turtlebot follows the MPC-calculated optimal trajectory.
+</p>
+                        <ul>
+                            <li><strong>Control:</strong> Low-level controllers, control loops, command smoothing</li>
+                            <li><strong>Interfaces:</strong> ROS topics/services, command rates, watchdogs</li>
+                            <li><strong>Hardware:</strong> Motor limits, latency, safety shutdowns</li>
+                        </ul>
+                        <p class="hint">Notes: Add typical command ranges and failure-handling strategies.</p>
+                    </article>
+                </div>
+
+                <p class="footnote">Tip: Duplicate or expand each section to add diagrams, tables, or links to implementation files.</p>
             </div>
 
             <div class="card">

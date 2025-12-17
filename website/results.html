@@ -25,18 +25,58 @@
     <main class="container">
         <header class="page-header">
             <h1>Results</h1>
-            <p class="subtitle">Project outcomes and findings</p>
         </header>
 
         <section class="content">
             <div class="card">
                 <h2>Results Overview</h2>
-                <p>This section will present the results and findings from our project. Content will be added here soon.</p>
+                <p>Our turtlebot was able to successfully navigate the test environment using the implemented control algorithms. The turtlebots were able to map our it's surrondings using lidar and computer vison and plan a path from seeker to target. While this path was not always the most optimal in most cases it made good decisions on the overall path to take and in some cases even better than we had expected.</p>
             </div>
 
             <div class="card">
-                <h2>Key Findings</h2>
-                <p>Important results and data will be displayed here.</p>
+                <h2>Early Results</h2>
+                <p>Early tests of our MPC controller in action show we had done some things right initially but had a lot of room for improvements. Early tests showed our mappings to be accurate to what we expected; however our implementation of the controller was not behaving as desired with the robot either completely ignoring obstacles or not reacting well enough to continue along its trajectory to target.</p>
+
+                <div class="video-row">
+                    <div class="video-item">
+                        <video controls preload="metadata" poster="images/early1_poster.png">
+                            <source src="videos/early_test1.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                        <div class="video-caption">Early test 1 — mapping + initial controller</div>
+                    </div>
+
+                    <div class="video-item">
+                        <video controls preload="metadata" poster="images/early2_poster.png">
+                            <source src="videos/early_test2.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                        <div class="video-caption">Early test 2 — obstacle interaction</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Recent Results</h2>
+                <p>After some work on the MPC and implementation, we observed significant improvements in the robot's ability to navigate the test environment. It was able to better avoid obstacles and follow the planned trajectory more closely, resulting in more reliable and efficient navigation.</p>
+
+                <div class="video-row">
+                    <div class="video-item">
+                        <video controls preload="metadata" poster="images/recent1_poster.png">
+                            <source src="videos/recent_test1.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                        <div class="video-caption">Recent test 1 — improved tracking</div>
+                    </div>
+
+                    <div class="video-item">
+                        <video controls preload="metadata" poster="images/recent2_poster.png">
+                            <source src="videos/recent_test2.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                        <div class="video-caption">Recent test 2 — robust obstacle avoidance</div>
+                    </div>
+                </div>
             </div>
         </section>
     </main>
