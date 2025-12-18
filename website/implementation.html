@@ -50,11 +50,11 @@
 
                         <div class="impl-body">
                             <h3>Obstacle Detection</h3>
-                            <p>Obstacles are detected using both lidar and camera sensors. Camera detects obstacles(Yellow Cones) through color and shape filtering. LIDAR filters raw scans which are then used to build a fast local robot-centric occupancy grid. These cone positions and the occupancy grid are used to plan paths around obstacles in our MPC node.</p>
+                            <p>Obstacles are detected using both lidar and camera sensors. Camera detects obstacles (Yellow Cones) through color and shape filtering. LIDAR filters raw scans which are then used to build a fast local robot-centric occupancy grid. These cone positions and the occupancy grid are used to plan paths around obstacles in our MPC node.</p>
                             <ul>
-                                <li><strong>Input:</strong> raw lidar / camera / fused sensor data</li>
-                                <li><strong>Algorithm:</strong> Color segmentation, shape filtering, Ray-casting occupancy update</li>
-                                <li><strong>Output:</strong> bounding boxes, occupancy grids, confidence scores</li>
+                                <li><strong>Input:</strong> raw lidar / camera </li>
+                                <li><strong>Algorithm:</strong> ray-casting occupancy update / color segmentation (HSV) and depth and shape filtering, </li>
+                                <li><strong>Output:</strong> occupancy grids / bounding boxes and confidence scores</li>
                             </ul>
                         </div>
                     </article>
@@ -69,9 +69,9 @@
                                     <h4>Method 1 — LIDAR and Procrutes Algorithm</h4>
                                     <p>Use image processing and rule-based heuristics for detection. This method is lightweight and interpretable.</p>
                                     <ul>
-                                        <li><strong>Approach:</strong> color/shape filtering, edge detection, morphological ops</li>
-                                        <li><strong>Pros:</strong> fast, explainable, easy to tune</li>
-                                        <li><strong>Cons:</strong> brittle to lighting and appearance changes</li>
+                                        <li><strong>Approach:</strong> occupancy grid with decay factor for nearest obstacle detection </li>
+                                        <li><strong>Pros:</strong> fast, explainable, no tuning</li>
+                                        <li><strong>Cons:</strong> highly dependent on obstacle recognition quality, cannot scale to more complex configurations where </li>
                                     </ul>
                                     <div class="method-photos multiple">
                                         <!-- Two photos for Method 1: side-by-side on wide screens, stacked on small screens -->
@@ -87,11 +87,11 @@
                                 </div>
                                 <div class="method-block">
                                     <h4>Method 2 — USB Logitech Camera</h4>
-                                    <p>Use a trained detector (e.g., CNN) for more robust detection and classification under varied conditions.</p>
+                                    <p>Reuse HSV model as before except parameters tuned to instead look for blue cone raised off ground instead</p>
                                     <ul>
-                                        <li><strong>Approach:</strong> object detector (YOLO/SSD/Faster-RCNN) or classification + bbox regression</li>
-                                        <li><strong>Pros:</strong> robust to variation, higher recall/precision when trained well</li>
-                                        <li><strong>Cons:</strong> needs labeled data and more compute</li>
+                                        <li><strong>Approach:</strong> shape filtering, color segmentation, depth filtering, and other heuristics </li>
+                                        <li><strong>Pros:</strong> fast, obstacle configuration does not matter</li>
+                                        <li><strong>Cons:</strong> blue cone must be unobstructed at initialization, depth estimate is less accurate then method 1</li>
                                     </ul>
                                     <div class="method-photos small">
                                         <!-- Add a representative photo for Method 2 -->
@@ -122,21 +122,21 @@
 
                         <div class="impl-body">
                             <h3>State Estimation</h3>
-                            <p>Explain the estimator(s) used (EKF/UKF/MCL), sensor fusion strategy, and failure modes.</p>
+                            <p>As shown above, the Extended Kalman filter uses the magnetic field and IMU sensors' information to update the state (x) and Covariance (P) for more stable and reliable pose estimates as opposed to reading from encoders which may slip on the carpet or at higher turtlebot speeds.</p>
                             <ul>
-                                <li><strong>Estimator:</strong> EKF / UKF / Particle Filter</li>
-                                <li><strong>Inputs:</strong> odometry, IMU, lidar-based pose updates</li>
-                                <li><strong>Outputs:</strong> robot pose, covariance, health indicators</li>
+                                <li><strong>Estimator:</strong> EKF </li>
+                                <li><strong>Inputs:</strong> odometry and magnetic field for initialization, IMU-based pose updates</li>
+                                <li><strong>Outputs:</strong> robot pose, covariance </li>
                             </ul>
                         </div>
 
                         <div class="impl-body">
                             <h3>Model Predictive Control(MPC)</h3>
-                            <p>Explain the estimator(s) used (EKF/UKF/MCL), sensor fusion strategy, and failure modes.</p>
+                            <p><strong>TODO: </strong>Briefly explain how our MPC works</p>
                             <ul>
-                                <li><strong>Estimator:</strong> EKF / UKF / Particle Filter</li>
-                                <li><strong>Inputs:</strong> odometry, IMU, lidar-based pose updates</li>
-                                <li><strong>Outputs:</strong> robot pose, covariance, health indicators</li>
+                                <li><strong>Estimator:</strong>EKF</li>
+                                <li><strong>Inputs:</strong>seeker position, target position, lidar-based and camera based obstacle detection</li>
+                                <li><strong>Outputs:</strong>optimal control signal sent to seeker command velocity topic</li>
                             </ul>
                             <div class="methods">
                                 <div class="method-block">
@@ -152,11 +152,10 @@
                                 </div>
                                 <div class="method-block">
                                     <h4>Hardware</h4>
-                                    <p><strong>TODO</strong></p>
+                                    <p>Videos can be found in results tab.</p>
                                     <ul>
-                                        <li><strong>Approach:</strong> object detector (YOLO/SSD/Faster-RCNN) or classification + bbox regression</li>
-                                        <li><strong>Pros:</strong> robust to variation, higher recall/precision when trained well</li>
-                                        <li><strong>Cons:</strong> needs labeled data and more compute</li>
+                                        <li><strong>Pros:</strong> has shown ability find optimal paths and succesfully reach target</li>
+                                        <li><strong>Cons:</strong> lacks robustness, tuning dependent</li>
                                     </ul>
                                 </div>
                             </div>
