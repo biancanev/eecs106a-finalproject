@@ -25,144 +25,431 @@
     <main class="container">
         <header class="page-header">
             <h1>Implementation</h1>
+            <p class="subtitle">Deep dive into our algorithms, sensor fusion, and control systems</p>
         </header>
 
         <section class="content">
-            <div class = "card">
-                <h2>System Architecture</h2>
-                <img src="images/system-diagram.png" alt="System Architecture Diagram">
-                <p>Block diagram of the system architecture</p>
-
-            </div>
             <div class="card">
-                <h2>Implementation Details</h2>
+                <h2>System Architecture</h2>
+                <img src="images/system-diagram.png" alt="System Architecture Diagram" style="max-width: 100%; height: auto; margin: 1rem 0;">
+                <p>Our system integrates multiple sensor modalities, state estimation filters, and control algorithms to achieve robust autonomous interception. The architecture features real-time sensor fusion, multi-modal perception, and optimal control with obstacle avoidance.</p>
+            </div>
 
-                <div class="impl-grid">
-                    <article class="impl-item obstacle">
+            <div class="card">
+                <h2>Perception & Sensing</h2>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Camera-Based Cone Detection: 6-Layer Heuristic System</h3>
+                        <p>We developed a sophisticated multi-layer filtering system for robust cone detection using HSV color segmentation. Each layer progressively filters candidates to eliminate false positives while maintaining high recall for actual cones.</p>
+                        
+                        <div class="methods">
+                            <div class="method-block">
+                                <h4>Layer 1: HSV Color Detection</h4>
+                                <p>Initial color-based segmentation in HSV space provides robustness to lighting variations. Yellow cones use range [15-35, 80-255, 80-255] and blue target cones use [100-130, 120-255, 60-255]. HSV conversion naturally handles different illumination conditions better than RGB.</p>
+                                
+                                <h4>Layer 2: Convolution-Based Refinement</h4>
+                                <p>Morphological operations (erosion, dilation) clean up the binary mask, removing noise and filling gaps caused by reflections or shadows on cone surfaces.</p>
+                                
+                                <h4>Layer 3: Geometric Heuristics</h4>
+                                <p>Contour-based filtering rejects regions that don't match cone dimensions. Minimum area thresholds (200-300 pixels) eliminate small noise clusters. Aspect ratio checks ensure cones are taller than they are wide (ratio 0.8-5.0).</p>
+                                
+                                <h4>Layer 4: Triangular Shape Analysis</h4>
+                                <p>Polygonal approximation (Douglas-Peucker algorithm) identifies cone-like triangular shapes. We verify that the bottom width is at least 15% wider than the top, matching the physical cone geometry. Vertex count analysis (3-12 vertices) further validates shape consistency.</p>
+                                
+                                <h4>Layer 5: Solidity & Color Validation</h4>
+                                <p>Convex hull analysis ensures regions are at least 50% solid (not fragmented). Pixel sampling within regions validates that at least 30% of pixels match the target color, handling partial occlusions.</p>
+                                
+                                <h4>Layer 6: Position & Depth Validation</h4>
+                                <p>Ground-plane constraints: yellow cones must appear in the lower half of the image (cones sit on ground). Blue target cones are elevated ~10 cm, accounted for in depth estimation. Depth computed via pixel area: <code>depth = √(fx × fy × CONE_AREA / pixel_count)</code>, with different area constants for yellow (0.021 m²) vs. blue target (0.146 m², 7× larger).</p>
+                            </div>
+                        </div>
+                        
                         <div class="photo-row">
                             <div class="impl-photo thumb">
-                                <img src="images/ConeDetection.png" alt="Obstacle detection example 1">
+                                <img src="images/ConeDetection.png" alt="Cone detection visualization">
                             </div>
                             <div class="impl-photo thumb">
-                                <img src="images/RVIZMapping.png" alt="Obstacle detection example 2">
+                                <img src="images/CVTargetDetection.png" alt="Target detection visualization">
                             </div>
                         </div>
+                    </div>
+                </article>
 
-                        <div class="impl-body">
-                            <h3>Obstacle Detection</h3>
-                            <p>Obstacles are detected using both lidar and camera sensors. Camera detects obstacles (Yellow Cones) through color and shape filtering. LIDAR filters raw scans which are then used to build a fast local robot-centric occupancy grid. These cone positions and the occupancy grid are used to plan paths around obstacles in our MPC node.</p>
-                            <ul>
-                                <li><strong>Input:</strong> raw lidar / camera </li>
-                                <li><strong>Algorithm:</strong> ray-casting occupancy update / color segmentation (HSV) and depth and shape filtering, </li>
-                                <li><strong>Output:</strong> occupancy grids / bounding boxes and confidence scores</li>
-                            </ul>
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>LIDAR Frame Auto-Calibration</h3>
+                        <p><strong>Challenge:</strong> LIDAR mounting orientation is unknown—could be 0°, 90°, 180°, or 270° relative to robot forward direction. Manual calibration is error-prone and hardware-dependent.</p>
+                        
+                        <p><strong>Solution:</strong> Automated frame offset detection through multi-hypothesis testing and geometric consistency checking.</p>
+                        
+                        <ul>
+                            <li><strong>Algorithm:</strong> Test candidate offsets [0°, 90°, 180°, 270°] by extracting obstacles with each offset</li>
+                            <li><strong>Scoring:</strong> Compare LIDAR obstacle positions against fast local grid obstacles (ground truth from occupancy mapping)</li>
+                            <li><strong>Matching:</strong> Count obstacle matches within 30 cm threshold—correct offset yields highest match rate</li>
+                            <li><strong>Calibration:</strong> Collect 100 samples during normal operation, select offset with highest average score</li>
+                            <li><strong>Robustness:</strong> Works automatically without manual intervention, adapts to different LIDAR mounting configurations</li>
+                        </ul>
+                        
+                        <p>This system eliminates the need for manual frame calibration and ensures consistent obstacle detection regardless of hardware setup variations.</p>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Fast Local Occupancy Grid</h3>
+                        <p>High-frequency local map (5-10 Hz) for real-time obstacle awareness, complementary to Cartographer's slower global map (1-2 Hz).</p>
+                        <ul>
+                            <li><strong>Update Rate:</strong> Log-odds occupancy grid updated at LIDAR rate (5-10 Hz) vs. Cartographer's 1-2 Hz</li>
+                            <li><strong>Frame:</strong> Robot-centric coordinates, automatically transforms to world frame for MPC</li>
+                            <li><strong>Algorithm:</strong> Ray-casting with log-odds update: occupied cells += 0.8, free cells -= 0.6, clipped to [-3.0, 3.0]</li>
+                            <li><strong>Purpose:</strong> Provides immediate obstacle awareness for MPC planning, while Cartographer handles global consistency and loop closure</li>
+                        </ul>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="photo-row">
+                        <div class="impl-photo thumb">
+                            <img src="images/RVIZMapping.png" alt="Occupancy grid mapping">
                         </div>
-                    </article>
-
-                    <article class="impl-item">
-                        <div class="impl-body">
-                            <h3>Target Detection</h3>
-
-                            <div class="methods">
-                                <div class="method-block">
-                                    <h4>Method 1 — LIDAR and Procrutes Algorithm</h4>
-                                    <p>Use image processing and rule-based heuristics for detection. This method is lightweight and interpretable.</p>
-                                    <ul>
-                                        <li><strong>Approach:</strong> occupancy grid with decay factor for nearest obstacle detection </li>
-                                        <li><strong>Pros:</strong> fast, explainable, no tuning</li>
-                                        <li><strong>Cons:</strong> highly dependent on obstacle recognition quality, cannot scale to more complex configurations where </li>
-                                    </ul>
-                                    <div class="method-photos multiple">
-                                        <!-- Two photos for Method 1: side-by-side on wide screens, stacked on small screens -->
-                                        <figure class="method-figure">
-                                            <img src="images/RVIZTargetDetection.png" alt="Method 1 example A">
-                                            <figcaption>RVIZ Visualization of Target Detection</figcaption>
-                                        </figure>
-                                        <figure class="method-figure">
-                                            <img src="images/TargetDetection.png" alt="Method 1 example B">
-                                            <figcaption>Real-world Target Detection setup</figcaption>
-                                        </figure>
-                                    </div>
-                                </div>
-                                <div class="method-block">
-                                    <h4>Method 2 — USB Logitech Camera</h4>
-                                    <p>Reuse HSV model as before except parameters tuned to instead look for blue cone raised off ground instead</p>
-                                    <ul>
-                                        <li><strong>Approach:</strong> shape filtering, color segmentation, depth filtering, and other heuristics </li>
-                                        <li><strong>Pros:</strong> fast, obstacle configuration does not matter</li>
-                                        <li><strong>Cons:</strong> blue cone must be unobstructed at initialization, depth estimate is less accurate then method 1</li>
-                                    </ul>
-                                    <div class="method-photos small">
-                                        <!-- Add a representative photo for Method 2 -->
-                                        <img src="images/CVTargetDetection.png" alt="Method 2 example">
-                                    </div>
-                                </div>
-                            </div>
-
-                            <ul>
-                                <li><strong>Association:</strong> data association / tracking filters</li>
-                                <li><strong>Metrics:</strong> precision, recall, latency</li>
-                            </ul>
+                        <div class="impl-photo thumb">
+                            <img src="images/RVIZTargetDetection.png" alt="Target detection in RViz">
                         </div>
-                    </article>
-
-                    <article class="impl-item">
-                        <!-- Two state-estimation images displayed side-by-side on wide screens -->
-                        <div class="method-photos multiple state-photos">
-                            <figure class="method-figure">
-                                <img src="images/EKF.png" alt="EKF state estimation example">
-                                <figcaption>EKF: Extended Kalman Filter — fused pose estimate</figcaption>
-                            </figure>
-                            <figure class="method-figure">
-                                <img src="images/MCL.png" alt="MCL state estimation example">
-                                <figcaption>MCL: Monte Carlo Localization — particle distribution</figcaption>
-                            </figure>
-                        </div>
-
-                        <div class="impl-body">
-                            <h3>State Estimation</h3>
-                            <p>As shown above, the Extended Kalman filter uses the magnetic field and IMU sensors' information to update the state (x) and Covariance (P) for more stable and reliable pose estimates as opposed to reading from encoders which may slip on the carpet or at higher turtlebot speeds.</p>
-                            <ul>
-                                <li><strong>Estimator:</strong> EKF </li>
-                                <li><strong>Inputs:</strong> odometry and magnetic field for initialization, IMU-based pose updates</li>
-                                <li><strong>Outputs:</strong> robot pose, covariance </li>
-                            </ul>
-                        </div>
-
-                        <div class="impl-body">
-                            <h3>Model Predictive Control(MPC)</h3>
-                            <p><strong>TODO: </strong>Briefly explain how our MPC works</p>
-                            <ul>
-                                <li><strong>Estimator:</strong>EKF</li>
-                                <li><strong>Inputs:</strong>seeker position, target position, lidar-based and camera based obstacle detection</li>
-                                <li><strong>Outputs:</strong>optimal control signal sent to seeker command velocity topic</li>
-                            </ul>
-                            <div class="methods">
-                                <div class="method-block">
-                                    <h4>Simulation</h4>
-                                    <p>Developed sim with known obstacles and estimation on target wandering and seeker state. MPC solution intercepts in 50 steps.</p>
-                                    <div class="method-photos multiple">
-                                        <!-- Two photos for Method 1: side-by-side on wide screens, stacked on small screens -->
-                                        <figure class="method-figure">
-                                            <img src="images/mpc_sim.png" alt="Working Simulation">
-                                            <figcaption>RVIZ Visualization of Target Detection</figcaption>
-                                        </figure>
-                                    </div>
-                                </div>
-                                <div class="method-block">
-                                    <h4>Hardware</h4>
-                                    <p>Videos can be found in results tab.</p>
-                                    <ul>
-                                        <li><strong>Pros:</strong> has shown ability find optimal paths and succesfully reach target</li>
-                                        <li><strong>Cons:</strong> lacks robustness, tuning dependent</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                    </article>
-                </div>
+                    </div>
+                    <div class="impl-body">
+                        <h3>Multi-Modal Obstacle Detection</h3>
+                        <p>Fusion of multiple sensor sources with confidence-based weighting:</p>
+                        <ul>
+                            <li><strong>Fast Local Grid:</strong> 95% confidence (processed LIDAR, most reliable)</li>
+                            <li><strong>Raw LIDAR:</strong> 90% confidence (catches recent obstacles grid might miss)</li>
+                            <li><strong>Scan-Matched Points (Cartographer):</strong> 88% confidence (geometrically validated)</li>
+                            <li><strong>Camera Detections:</strong> 70-80% confidence (close range: 80%, far: 70%)</li>
+                        </ul>
+                        <p><strong>Fusion Strategy:</strong> Grid obstacles take priority. Camera detections refine LIDAR positions at close range (60% LIDAR distance + 40% camera angle). Duplicate obstacles within 20 cm are merged, keeping the higher-confidence or larger-radius version.</p>
+                    </div>
+                </article>
             </div>
 
+            <div class="card">
+                <h2>Target Detection & Tracking</h2>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Dual-Method Target Estimation</h3>
+                        
+                        <div class="methods">
+                            <div class="method-block">
+                                <h4>Method 1: LIDAR-Based Localization (Kabsch Algorithm)</h4>
+                                <p>Geometric alignment using Procrustes analysis (Kabsch algorithm) for optimal rigid body transformation between point sets.</p>
+                                <ul>
+                                    <li><strong>Approach:</strong> Extract obstacles from target robot's local occupancy grid, match to seeker's global map</li>
+                                    <li><strong>Algorithm:</strong> Kabsch algorithm computes optimal rotation and translation via SVD decomposition</li>
+                                    <li><strong>Robustness:</strong> RANSAC-based outlier rejection handles noisy correspondences</li>
+                                    <li><strong>Advantages:</strong> Accurate distance estimation, works when target is partially occluded</li>
+                                    <li><strong>Limitations:</strong> Requires sufficient overlapping obstacles for alignment</li>
+                                </ul>
+                                <div class="method-photos multiple">
+                                    <figure class="method-figure">
+                                        <img src="images/RVIZTargetDetection.png" alt="LIDAR target detection">
+                                        <figcaption>LIDAR-based target localization via map alignment</figcaption>
+                                    </figure>
+                                </div>
+                            </div>
+
+                            <div class="method-block">
+                                <h4>Method 2: Camera-Based Detection</h4>
+                                <p>HSV filtering with depth estimation, accounting for target cone elevation (~10 cm above ground).</p>
+                                <ul>
+                                    <li><strong>Approach:</strong> 6-layer heuristic system (same as obstacle detection) tuned for blue cones</li>
+                                    <li><strong>Depth Estimation:</strong> Uses 7× larger area constant (0.146 m² vs 0.021 m²) for accurate depth</li>
+                                    <li><strong>Elevation Handling:</strong> Target marker positioned at z=0.1 m in visualization and transforms</li>
+                                    <li><strong>Advantages:</strong> Fast, works in any obstacle configuration, provides angular accuracy</li>
+                                    <li><strong>Limitations:</strong> Depth less accurate than LIDAR, requires unobstructed view</li>
+                                </ul>
+                                <div class="method-photos">
+                                    <img src="images/CVTargetDetection.png" alt="Camera target detection">
+                                </div>
+                            </div>
+                        </div>
+
+                        <h4>Sensor Fusion Strategy</h4>
+                        <p>At close range (&lt;1 m), camera provides accurate angular position while LIDAR provides accurate distance. Fusion combines 60% LIDAR distance + 40% camera angle for optimal pose estimate. Confidence scores guide fusion weights dynamically.</p>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Unscented Kalman Filter (UKF) for Target Velocity Tracking</h3>
+                        <p>UKF tracks target velocity and position when detections are intermittent or noisy.</p>
+                        <ul>
+                            <li><strong>State Vector:</strong> [px, py, vx, vy] - position and velocity in 2D</li>
+                            <li><strong>Process Model:</strong> Constant velocity with process noise Q = 0.02 × I</li>
+                            <li><strong>Measurement Model:</strong> Position measurements with noise R = 0.03 × I</li>
+                            <li><strong>Sigma Points:</strong> 2n+1 = 9 points for n=4 state dimensions</li>
+                            <li><strong>Why UKF over EKF:</strong> Handles nonlinear dynamics better, no Jacobian computation needed, superior accuracy for target tracking</li>
+                        </ul>
+                    </div>
+                </article>
+            </div>
+
+            <div class="card">
+                <h2>State Estimation</h2>
+
+                <article class="impl-item">
+                    <div class="method-photos multiple state-photos">
+                        <figure class="method-figure">
+                            <img src="images/EKF.png" alt="EKF state estimation">
+                            <figcaption>EKF: Extended Kalman Filter — fused pose estimate at 100 Hz</figcaption>
+                        </figure>
+                        <figure class="method-figure">
+                            <img src="images/MCL.png" alt="MCL state estimation">
+                            <figcaption>MCL: Monte Carlo Localization — particle distribution (simulation only)</figcaption>
+                        </figure>
+                    </div>
+
+                    <div class="impl-body">
+                        <h3>Extended Kalman Filter (EKF) for Robot Pose</h3>
+                        <p><strong>High-rate sensor fusion (100 Hz) for smooth, accurate robot localization.</strong></p>
+                        
+                        <ul>
+                            <li><strong>State Vector:</strong> [x, y, θ, vx, vy, ω] - position, heading, linear velocity, angular velocity</li>
+                            <li><strong>Sensor Fusion:</strong>
+                                <ul>
+                                    <li>IMU gyroscope: angular velocity ω (R = 0.002)</li>
+                                    <li>IMU accelerometer: linear acceleration ax, ay (R = 0.4, gravity-compensated)</li>
+                                    <li>Magnetometer: heading θ (R = 0.02, auto-calibrated)</li>
+                                    <li>Odometry: position, heading, velocities (R = 0.01-0.05, lower weight due to wheel slip)</li>
+                                </ul>
+                            </li>
+                            <li><strong>Process Model:</strong> Unicycle kinematics with process noise Q (position: 1e-4, heading: 5e-3, velocities: 0.01-0.02)</li>
+                            <li><strong>Update Rate:</strong> 100 Hz enables smooth control without lag</li>
+                            <li><strong>Why EKF over MCL:</strong> Deterministic, computationally efficient, multi-sensor fusion, absolute heading from magnetometer, real-time performance</li>
+                        </ul>
+
+                        <p><strong>Magnetometer Auto-Calibration:</strong> Collects 100 samples during initialization to compute offset, removing magnetic bias for accurate heading.</p>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Covariance Expansion and Contraction in State Estimation</h3>
+                        <p>Proper management of covariance matrices is critical for accurate state estimation. Our filters implement careful expansion during prediction and contraction during measurement updates.</p>
+                        
+                        <div class="tech-spec">
+                            <h4>Covariance Expansion (Prediction Step)</h4>
+                            <p>During prediction, uncertainty increases as the system propagates forward with process noise:</p>
+                            <ul>
+                                <li><strong>EKF:</strong> <span class="math-formula">P = F·P·Fᵀ + Q·dt</span> where <span class="var">F</span> is the Jacobian and <span class="var">Q</span> is process noise</li>
+                                <li><strong>Process Noise (Q):</strong>
+                                    <ul>
+                                        <li>Position: <span class="param-value">1e-4</span> (very small - robot motion is predictable)</li>
+                                        <li>Heading: <span class="param-value">5e-3</span> (moderate - heading drift over time)</li>
+                                        <li>Linear velocity: <span class="param-value">0.01</span> (higher - velocity can change quickly)</li>
+                                        <li>Angular velocity: <span class="param-value">0.02</span> (highest - angular motion most uncertain)</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Time-Dependent:</strong> Process noise scales with time step <span class="math-formula">dt</span>, ensuring covariance grows appropriately between updates</li>
+                            </ul>
+                        </div>
+
+                        <div class="algorithm-detail">
+                            <h4>Covariance Contraction (Update Step)</h4>
+                            <p>During measurement updates, uncertainty decreases as new information reduces ambiguity:</p>
+                            <ul>
+                                <li><strong>EKF Update:</strong> <span class="math-formula">P = (I - K·H)·P</span> where <span class="var">K</span> is Kalman gain and <span class="var">H</span> is measurement matrix</li>
+                                <li><strong>Measurement Noise (R):</strong> Determines how much trust we place in measurements
+                                    <ul>
+                                        <li>IMU gyroscope: <span class="param-value">0.002</span> (very low - highly accurate)</li>
+                                        <li>Magnetometer: <span class="param-value">0.02</span> (low - provides absolute heading)</li>
+                                        <li>IMU accelerometer: <span class="param-value">0.4</span> (high - noisy, requires gravity compensation)</li>
+                                        <li>Odometry position: <span class="param-value">0.01</span> (moderate - subject to wheel slip)</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Kalman Gain:</strong> <span class="math-formula">K = P·Hᵀ·(H·P·Hᵀ + R)⁻¹</span> - automatically balances between prediction and measurement based on their relative uncertainties</li>
+                                <li><strong>Higher R:</strong> Less trust in measurement → smaller K → less covariance reduction</li>
+                                <li><strong>Lower R:</strong> More trust in measurement → larger K → more covariance reduction</li>
+                            </ul>
+                        </div>
+
+                        <div class="tech-spec">
+                            <h4>Covariance Inflation for Safety (Target EKF)</h4>
+                            <p>For target estimation, we implement intentional covariance inflation when publishing to the seeker:</p>
+                            <ul>
+                                <li><strong>Scale Factor:</strong> <span class="param-value">4.0×</span> inflation of position and velocity covariances</li>
+                                <li><strong>Rationale:</strong> Conservative uncertainty prevents overconfidence in target position</li>
+                                <li><strong>MPC Safety:</strong> Larger uncertainty ellipses force MPC to plan more conservative trajectories</li>
+                                <li><strong>Implementation:</strong> Separate publishers: <code>/target_estimate</code> (true covariance) and <code>/target_estimate_slow</code> (inflated, throttled)</li>
+                            </ul>
+                            <div class="math-block">
+                                <div class="eq-label">Inflated Covariance:</div>
+                                <span class="math-formula">P_seeker = 4.0 × P_true</span>
+                            </div>
+                        </div>
+
+                        <div class="algorithm-detail">
+                            <h4>Numerical Stability and Bounding</h4>
+                            <p>To prevent numerical issues, we implement several safeguards:</p>
+                            <ul>
+                                <li><strong>Symmetry Enforcement:</strong> <span class="math-formula">P = (P + Pᵀ) / 2</span> ensures covariance remains symmetric</li>
+                                <li><strong>Positive Definiteness:</strong> Small regularization term <span class="math-formula">P += ε·I</span> prevents singular matrices</li>
+                                <li><strong>Covariance Clipping:</strong> UKF bounds covariance elements to <span class="param-value">[-5.0, 5.0]</span> to prevent explosion</li>
+                                <li><strong>Diagonal Bounds:</strong> Ensures diagonal elements (variances) remain positive and bounded</li>
+                                <li><strong>Joseph Form (UKF):</strong> More numerically stable covariance update: <span class="math-formula">P = (I-KH)·P·(I-KH)ᵀ + K·R·Kᵀ</span></li>
+                            </ul>
+                        </div>
+
+                        <p><strong>Key Insight:</strong> Covariance expansion during prediction reflects growing uncertainty over time, while contraction during updates reflects information gain. The balance between <span class="var">Q</span> and <span class="var">R</span> determines how quickly the filter trusts new measurements versus its predictions.</p>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Target State Estimation with State Propagation</h3>
+                        <p>Robust target tracking with temporal smoothing and state propagation during occlusions.</p>
+                        
+                        <ul>
+                            <li><strong>Temporal Smoothing:</strong> Exponential moving average (α = 0.8) for position, filters noisy detections</li>
+                            <li><strong>Outlier Rejection:</strong> Rejects jumps &gt;1.0 m from last estimate, prevents false updates</li>
+                            <li><strong>State Propagation:</strong> When target is occluded, propagates state forward using constant velocity model:
+                                <ul>
+                                    <li>Position: x(t+dt) = x(t) + vx × dt</li>
+                                    <li>Confidence decays exponentially: confidence(t) = 0.9 × exp(-0.5 × dt)</li>
+                                    <li>Minimum confidence floor: 0.2 (never fully trust propagated state)</li>
+                                </ul>
+                            </li>
+                            <li><strong>Final Approach:</strong> When &lt;0.8 m from target, aggressive blending (α = 0.7) toward detections for precise interception</li>
+                        </ul>
+                    </div>
+                </article>
+            </div>
+
+            <div class="card">
+                <h2>Control & Planning</h2>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Model Predictive Control (MPC)</h3>
+                        <p><strong>Receding-horizon optimal control with obstacle avoidance constraints.</strong></p>
+                        
+                        <ul>
+                            <li><strong>Horizon:</strong> 15 steps ahead (1.5 seconds at 10 Hz)</li>
+                            <li><strong>Time Step:</strong> dt = 0.1 s</li>
+                            <li><strong>State Space:</strong> Unicycle model [x, y, θ, v]</li>
+                            <li><strong>Control Inputs:</strong> Linear velocity v ∈ [0, 0.6] m/s, angular velocity ω ∈ [-1.5, 1.5] rad/s</li>
+                        </ul>
+
+                        <h4>Cost Function</h4>
+                        <ul>
+                            <li><strong>Position Cost:</strong> Qp = 140.0 × ||p - p_target||² (strong goal attraction)</li>
+                            <li><strong>Heading Cost:</strong> Qθ = 25.0 × (θ - θ_ref)² (prefers straight paths, reduces curvature)</li>
+                            <li><strong>Control Costs:</strong> Ra = 0.01 × v², Rw = 0.15 × ω² (penalizes angular velocity strongly)</li>
+                            <li><strong>Obstacle Cost:</strong> Q_obs = 900.0 × smooth_penalty(distance) (avoids obstacles with high weight)</li>
+                            <li><strong>Terminal Cost:</strong> 10× position + 10× heading (strong terminal constraints)</li>
+                        </ul>
+
+                        <h4>Obstacle Avoidance</h4>
+                        <ul>
+                            <li><strong>Constraint:</strong> Smooth penalty function for obstacles (no strict inequalities in CVXPY)</li>
+                            <li><strong>Safety Margin:</strong> Robot radius (0.105 m) + obstacle radius + 12 cm safety buffer</li>
+                            <li><strong>Trajectory Validation:</strong> Simulates entire predicted trajectory, checks clearance at each step</li>
+                            <li><strong>Velocity Scaling:</strong> Adaptive speed reduction near obstacles (0.5-1.0× based on minimum clearance)</li>
+                        </ul>
+
+                        <h4>Solver</h4>
+                        <ul>
+                            <li><strong>Framework:</strong> CVXPY convex optimization</li>
+                            <li><strong>Solver:</strong> ECOS or OSQP (interior-point methods)</li>
+                            <li><strong>Fallback:</strong> Proportional control if MPC fails (angle error → ω, distance → v)</li>
+                        </ul>
+
+                        <div class="method-photos multiple">
+                            <figure class="method-figure">
+                                <img src="images/mpc_sim.png" alt="MPC simulation">
+                                <figcaption>MPC trajectory planning in simulation - intercepts target in 50 steps</figcaption>
+                            </figure>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Waypoint Generation for Obstacle Navigation</h3>
+                        <p>When obstacles block the direct path, generates intermediate waypoints to thread through gaps.</p>
+                        
+                        <ul>
+                            <li><strong>Trigger:</strong> Obstacle within 0.25 m, directly ahead (±30° from forward direction)</li>
+                            <li><strong>Algorithm:</strong> Projects waypoint 25% toward goal, shifts laterally by minimum clearance needed</li>
+                            <li><strong>Clearance:</strong> obstacle_radius + robot_radius + 3 cm safety margin</li>
+                            <li><strong>Path Validation:</strong> Checks line-of-sight from robot to waypoint, ensures no obstacles intersect</li>
+                            <li><strong>Waypoint Clearing:</strong> Considers waypoint reached within 20 cm, cooldown prevents rapid waypoint switching</li>
+                        </ul>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Terminal Guidance & Final Approach</h3>
+                        <p>Specialized behaviors for precise interception when close to target.</p>
+                        
+                        <ul>
+                            <li><strong>Activation:</strong> When distance to target &lt; 0.8 m</li>
+                            <li><strong>Pose Locking:</strong> Aggressively locks to target position (α = 0.7 smoothing), prevents drift</li>
+                            <li><strong>Velocity Scaling:</strong> Reduces speed for precise approach (60-75% of maximum)</li>
+                            <li><strong>Final Approach Mode:</strong> MPC uses tighter constraints, prioritizes reaching target over obstacle avoidance</li>
+                            <li><strong>Goal Reached Detection:</strong> Within 15 cm of target position → mission complete</li>
+                        </ul>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Emergency Recovery System</h3>
+                        <p>State machine for handling stuck or collision situations.</p>
+                        
+                        <ul>
+                            <li><strong>States:</strong> NORMAL → BACKUP → ROTATE → RECOVERY</li>
+                            <li><strong>Backup Phase:</strong> Reverses along known-safe trajectory history (1.5 seconds, 15 cm/s)</li>
+                            <li><strong>Rotate Phase:</strong> Spins up to 3 seconds to find clear path in any direction</li>
+                            <li><strong>Recovery:</strong> Resets waypoints and resumes normal operation</li>
+                            <li><strong>Trajectory Memory:</strong> Stores last 50 positions (5 seconds at 10 Hz) for safe backtracking</li>
+                        </ul>
+                    </div>
+                </article>
+            </div>
+
+            <div class="card">
+                <h2>System Integration</h2>
+                
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>ROS2 Node Architecture</h3>
+                        <ul>
+                            <li><strong>ekf_pose_estimator:</strong> EKF sensor fusion (100 Hz pose updates)</li>
+                            <li><strong>cartographer_pose_bridge:</strong> Bridges Cartographer SLAM pose to /amcl_pose</li>
+                            <li><strong>fast_local_grid:</strong> High-speed local occupancy grid (5-10 Hz)</li>
+                            <li><strong>camera_cone_detector:</strong> 6-layer HSV filtering for cone detection</li>
+                            <li><strong>target_est_node:</strong> Multi-modal target estimation with state propagation</li>
+                            <li><strong>target_ekf_node:</strong> Camera-based target tracking (EKF)</li>
+                            <li><strong>ukf_node:</strong> UKF for target velocity tracking</li>
+                            <li><strong>mpc_node:</strong> Model Predictive Control with obstacle avoidance</li>
+                            <li><strong>trajectory_logger:</strong> Data logging for offline analysis</li>
+                        </ul>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="impl-body">
+                        <h3>Data Flow & Synchronization</h3>
+                        <ul>
+                            <li><strong>Sensor Rates:</strong> LIDAR (5-10 Hz), Camera (30 Hz), IMU (100+ Hz), Odometry (50 Hz)</li>
+                            <li><strong>Control Rate:</strong> MPC updates at 10 Hz (100 ms time step)</li>
+                            <li><strong>TF Transformations:</strong> All sensor data transformed to map frame for consistent coordinate system</li>
+                            <li><strong>Topic Latency:</strong> Typical end-to-end latency &lt;200 ms (sensor → control)</li>
+                        </ul>
+                    </div>
+                </article>
+            </div>
         </section>
     </main>
 
@@ -171,4 +458,3 @@
     </footer>
 </body>
 </html>
-

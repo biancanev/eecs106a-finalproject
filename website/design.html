@@ -25,16 +25,17 @@
     <main class="container">
         <header class="page-header">
             <h1>Design</h1>
-            <p class="subtitle">Our design process and methodology</p>
+            <p class="subtitle">System architecture, design decisions, and technical approach</p>
         </header>
 
         <section class="content">
             <div class="card">
                 <h2>Design Criteria</h2>
                 <ul>
-                    <li><strong>Mapping:</strong> Accurately map the environment to identify obstacles, free space and the seeker and target robot poses.</li>
-                    <li><strong>Trajectory:</strong> Plan and execute an optimal trajectory for the seeker robot to intercept the target robot while avoiding obstacles.</li>
-                    <li><strong>Real-time Performance:</strong> Ensure the system operates in real-time to adapt to dynamic changes in the environment and target movement.</li>
+                    <li><strong>Mapping:</strong> Accurately map the environment to identify obstacles, free space, and the seeker and target robot poses in real-time.</li>
+                    <li><strong>Trajectory:</strong> Plan and execute an optimal trajectory for the seeker robot to intercept the target robot while avoiding obstacles with smooth, efficient paths.</li>
+                    <li><strong>Real-time Performance:</strong> Ensure the system operates in real-time to adapt to dynamic changes in the environment and target movement, with control updates at 10 Hz and state estimation at 100 Hz.</li>
+                    <li><strong>Robustness:</strong> Handle sensor occlusions, noisy measurements, and hardware variations through multi-modal sensor fusion and state propagation.</li>
                 </ul>
             </div>
 
@@ -51,12 +52,14 @@
                             <li>Develop Fast Local Grid for real-time obstacle awareness (5-10 Hz)</li>
                             <li>Integrate 6-layer HSV heuristic system on USB camera to detect cones</li>
                             <li>Implement LIDAR-based target localization using map origins and Kabsch algorithm</li>
+                            <li>Automatic LIDAR frame calibration for unknown mounting orientations</li>
                         </ul>
                         <h4>Deliverables</h4>
                         <ul>
                             <li>Fast local occupancy grids (5-10 Hz updates)</li>
-                            <li>Yellow and blue cone detection for obstacles and target respectively</li>
+                            <li>Yellow and blue cone detection for obstacles and target respectively (target elevated ~10 cm)</li>
                             <li>Robust LIDAR-based target pose estimation with confidence scoring</li>
+                            <li>Multi-modal sensor fusion with confidence-based weighting</li>
                         </ul>
                     </article>
 
@@ -65,9 +68,11 @@
                         <p>Using current knowledge of surroundings and state estimates for both robots, calculate an optimal trajectory from seeker to target with obstacle avoidance.</p>
                         <h4>Action Items</h4>
                         <ul>
-                            <li> State estimation of seeker using Extended Kalman Filter (EKF) fusing IMU, magnetometer, and encoders (100 Hz)</li>
+                            <li>State estimation of seeker using Extended Kalman Filter (EKF) fusing IMU, magnetometer, and encoders (100 Hz)</li>
                             <li>State estimation of target using multi-sensor fusion (LIDAR map alignment + camera detections + UKF for velocity tracking)</li>
                             <li>Plan optimal trajectories using Model Predictive Control (MPC) with obstacle constraints</li>
+                            <li>Implement state propagation for target tracking during occlusions</li>
+                            <li>Develop waypoint generation for complex obstacle navigation</li>
                         </ul>
 
                         <h4>Deliverables</h4>
@@ -84,16 +89,129 @@
                         <p>The target turtlebot moves freely along a predesigned trajectory. The seeker turtlebot follows the MPC-calculated optimal trajectory.</p>
                         <h4>Action Items</h4>
                         <ul>
-                            <li>MPC directly outputs velocity commands (/cmd_vel) to robot base</li>
+                            <li>MPC directly outputs velocity commands (<code>/cmd_vel</code>) to robot base</li>
                             <li>Design simple target trajectories for testing</li>
-                            <li> Implement terminal guidance for final approach</li>
+                            <li>Implement terminal guidance for final approach</li>
+                            <li>Emergency recovery system for stuck situations</li>
                         </ul>
 
                         <h4>Deliverables</h4>
                         <ul>
                             <li>Smooth trajectory following via MPC</li>
                             <li>Terminal guidance and final approach behaviors</li>
+                            <li>Adaptive velocity scaling based on obstacle proximity</li>
                             <li>Interception!</li>
+                        </ul>
+                    </article>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Mapping Architecture: Dual-Layer Approach</h2>
+                <p>Our mapping system uses a complementary dual-layer architecture that balances global consistency with real-time responsiveness.</p>
+
+                <div class="tech-spec">
+                    <h4>Cartographer SLAM (Global Mapping)</h4>
+                    <ul>
+                        <li><strong>Update Rate:</strong> 1-2 Hz (slower, more computationally intensive)</li>
+                        <li><strong>Purpose:</strong> Global map consistency, loop closure, and accurate pose estimation</li>
+                        <li><strong>Algorithm:</strong> Production-grade SLAM with scan matching, submaps, and loop closure detection</li>
+                        <li><strong>Advantages:</strong> Highly accurate, handles large-scale environments, corrects drift through loop closure</li>
+                        <li><strong>Limitations:</strong> Too slow for real-time obstacle avoidance at MPC control rate (10 Hz)</li>
+                    </ul>
+                </div>
+
+                <div class="algorithm-detail">
+                    <h4>Fast Local Grid (Real-Time Obstacle Awareness)</h4>
+                    <p>We developed a custom high-speed occupancy grid that runs at LIDAR rate (5-10 Hz) to provide immediate obstacle awareness for MPC planning.</p>
+                    
+                    <ul>
+                        <li><strong>Update Rate:</strong> 5-10 Hz (matches LIDAR frequency)</li>
+                        <li><strong>Grid Size:</strong> <span class="param-value">5.0 m × 5.0 m</span> robot-centric window</li>
+                        <li><strong>Resolution:</strong> <span class="param-value">0.05 m</span> (5 cm cells, matching Cartographer)</li>
+                        <li><strong>Frame:</strong> Robot-centric coordinates, automatically transforms to world frame for MPC</li>
+                        <li><strong>Algorithm:</strong> Log-odds occupancy grid with ray-casting updates</li>
+                    </ul>
+
+                    <div class="math-block">
+                        <div class="eq-label">Log-Odds Update:</div>
+                        <span class="math-formula">log_odds(cell) += log_odds_occupied</span> if occupied
+                        <span class="math-formula">log_odds(cell) += log_odds_free</span> if free space
+                    </div>
+
+                    <div class="tech-spec">
+                        <h4>Key Design Decisions</h4>
+                        <ul>
+                            <li><strong>World Frame Storage:</strong> Obstacles stored in world coordinates to prevent disappearance as robot moves</li>
+                            <li><strong>Aggressive Occupied Evidence:</strong> <span class="param-value">log_odds_occupied = 2.0</span> for fast obstacle appearance</li>
+                            <li><strong>Weak Free Evidence:</strong> <span class="param-value">log_odds_free = -0.4</span> to prevent rapid clearing (handles noise)</li>
+                            <li><strong>Obstacle Decay:</strong> <span class="param-value">decay_rate = 0.95</span> for gradual forgetting of old obstacles</li>
+                            <li><strong>Complementary to Cartographer:</strong> Provides real-time awareness while Cartographer ensures global consistency</li>
+                        </ul>
+                    </div>
+
+                    <p><strong>Why Fast Local Grid?</strong> MPC needs obstacle information at 10 Hz for smooth control. Cartographer's 1-2 Hz updates would cause jerky obstacle avoidance. The fast local grid bridges this gap by providing immediate obstacle awareness while Cartographer maintains the accurate global map.</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>SLAM Node Implementation</h2>
+                <p>Our custom SLAM node uses log-odds occupancy grid mapping for reliable map building from LIDAR scans.</p>
+
+                <div class="tech-spec">
+                    <h4>Log-Odds Occupancy Grid Mapping</h4>
+                    <ul>
+                        <li><strong>Map Size:</strong> Configurable (typically <span class="param-value">100 × 100</span> cells)</li>
+                        <li><strong>Resolution:</strong> <span class="param-value">0.05 m</span> (5 cm per cell)</li>
+                        <li><strong>Update Method:</strong> Direct log-odds updates (no conversion overhead)</li>
+                        <li><strong>Ray-Casting:</strong> Small step size for accurate free space marking</li>
+                        <li><strong>Obstacle Expansion:</strong> Neighborhood expansion with distance weighting for obstacles</li>
+                    </ul>
+                </div>
+
+                <div class="math-block">
+                    <div class="eq-label">Log-Odds Parameters:</div>
+                    <span class="math-formula">log_odds_free = -0.6</span>,
+                    <span class="math-formula">log_odds_occupied = 0.8</span>,
+                    <span class="math-formula">threshold = 0.25</span>
+                </div>
+
+                <p>The SLAM node processes LIDAR scans at the scan rate, updating the internal log-odds map. The map is published at 10 Hz for real-time visualization and integration with other nodes.</p>
+            </div>
+
+            <div class="card">
+                <h2>Algorithm Selection Rationale</h2>
+
+                <div class="design-grid">
+                    <article class="design-item">
+                        <h3>EKF over MCL for Robot Pose</h3>
+                        <ul>
+                            <li><strong>Update Rate:</strong> EKF runs at 100 Hz vs. MCL's computational limits (~10 Hz)</li>
+                            <li><strong>Deterministic:</strong> EKF provides consistent, reproducible results</li>
+                            <li><strong>Multi-Sensor Fusion:</strong> Naturally handles IMU, magnetometer, and odometry</li>
+                            <li><strong>Absolute Heading:</strong> Magnetometer provides absolute heading reference</li>
+                            <li><strong>Real-Time Control:</strong> Low latency critical for smooth MPC operation</li>
+                        </ul>
+                    </article>
+
+                    <article class="design-item">
+                        <h3>UKF over EKF for Target Tracking</h3>
+                        <ul>
+                            <li><strong>Nonlinear Dynamics:</strong> Target motion has nonlinear components</li>
+                            <li><strong>Superior Accuracy:</strong> Sigma points better capture uncertainty</li>
+                            <li><strong>No Jacobians:</strong> Avoids linearization errors</li>
+                            <li><strong>Multi-Modal:</strong> Can handle multiple target hypotheses</li>
+                        </ul>
+                    </article>
+
+                    <article class="design-item">
+                        <h3>MPC over Reactive Control</h3>
+                        <ul>
+                            <li><strong>Look-Ahead:</strong> 15-step horizon (1.5 seconds) considers future states</li>
+                            <li><strong>Constraint Handling:</strong> Explicit obstacle avoidance constraints</li>
+                            <li><strong>Optimality:</strong> Minimizes cost function over horizon</li>
+                            <li><strong>Smooth Trajectories:</strong> Naturally produces smooth paths</li>
+                            <li><strong>Adaptive:</strong> Adjusts to changing target positions</li>
                         </ul>
                     </article>
                 </div>
@@ -116,8 +234,33 @@
             </div>
 
             <div class="card">
-                <h2>Design Impacts</h2>
-                <p>Our choice to use a LIDAR only based implementation initially affected the accuracy and reliability of obstacle detection in certain environments, leading us to integrate additional sensor modalities for improved performance much later into the project. Introducting both and using a CV based implementation however solved many of our problems and allowed us to obtain accurate state measurements of obstacles and target within the environment. In real life scenarios, combining multiple sensor types often leads to more robust and reliable autonomous systems take for example WAYMO vehicles which use both LIDAR and cameras or even Tesla which uses just camera. With reliable enough hardware this design would prove to be robust in general applications.</p>
+                <h2>Design Evolution & Lessons</h2>
+                <p>Our design evolved significantly based on real-world testing and performance requirements:</p>
+                
+                <div class="algorithm-detail">
+                    <h4>Initial Approach: LIDAR-Only Perception</h4>
+                    <p>We initially planned to rely solely on LIDAR for obstacle detection. However, testing revealed several limitations:</p>
+                    <ul>
+                        <li><strong>Depth Accuracy:</strong> LIDAR provides excellent distance measurements but struggles with thin objects and cones at certain angles</li>
+                        <li><strong>Occlusion Issues:</strong> Multiple obstacles can cause detection gaps</li>
+                        <li><strong>False Positives:</strong> Reflections and noise create spurious detections</li>
+                        <li><strong>Robustness:</strong> Single-sensor systems lack redundancy</li>
+                    </ul>
+                </div>
+
+                <div class="tech-spec">
+                    <h4>Final Approach: Multi-Modal Sensor Fusion</h4>
+                    <p>Integrating camera-based detection solved many problems:</p>
+                    <ul>
+                        <li><strong>Complementary Strengths:</strong> Camera provides angular accuracy, LIDAR provides distance accuracy</li>
+                        <li><strong>Redundancy:</strong> Multiple sensors increase robustness to failures</li>
+                        <li><strong>Close-Range Performance:</strong> Camera excels at detecting cones within 1-3 meters</li>
+                        <li><strong>Color Discrimination:</strong> HSV filtering distinguishes yellow obstacles from blue target</li>
+                        <li><strong>Real-World Validation:</strong> Mirrors production systems (Waymo uses LIDAR + cameras, Tesla uses cameras)</li>
+                    </ul>
+                </div>
+
+                <p><strong>Key Insight:</strong> In real-world scenarios, combining multiple sensor types leads to more robust and reliable autonomous systems. This design philosophy, inspired by production autonomous vehicles, proved essential for handling the complexity and uncertainty of real environments.</p>
             </div>
         </section>
     </main>
@@ -127,4 +270,3 @@
     </footer>
 </body>
 </html>
-
