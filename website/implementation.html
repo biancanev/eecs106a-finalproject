@@ -233,6 +233,78 @@
 
                 <article class="impl-item">
                     <div class="impl-body">
+                        <h3>Covariance Expansion and Contraction in State Estimation</h3>
+                        <p>Proper management of covariance matrices is critical for accurate state estimation. Our filters implement careful expansion during prediction and contraction during measurement updates.</p>
+                        
+                        <div class="tech-spec">
+                            <h4>Covariance Expansion (Prediction Step)</h4>
+                            <p>During prediction, uncertainty increases as the system propagates forward with process noise:</p>
+                            <ul>
+                                <li><strong>EKF:</strong> <span class="math-formula">P = F·P·Fᵀ + Q·dt</span> where <span class="var">F</span> is the Jacobian and <span class="var">Q</span> is process noise</li>
+                                <li><strong>Process Noise (Q):</strong>
+                                    <ul>
+                                        <li>Position: <span class="param-value">1e-4</span> (very small - robot motion is predictable)</li>
+                                        <li>Heading: <span class="param-value">5e-3</span> (moderate - heading drift over time)</li>
+                                        <li>Linear velocity: <span class="param-value">0.01</span> (higher - velocity can change quickly)</li>
+                                        <li>Angular velocity: <span class="param-value">0.02</span> (highest - angular motion most uncertain)</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Time-Dependent:</strong> Process noise scales with time step <span class="math-formula">dt</span>, ensuring covariance grows appropriately between updates</li>
+                            </ul>
+                        </div>
+
+                        <div class="algorithm-detail">
+                            <h4>Covariance Contraction (Update Step)</h4>
+                            <p>During measurement updates, uncertainty decreases as new information reduces ambiguity:</p>
+                            <ul>
+                                <li><strong>EKF Update:</strong> <span class="math-formula">P = (I - K·H)·P</span> where <span class="var">K</span> is Kalman gain and <span class="var">H</span> is measurement matrix</li>
+                                <li><strong>Measurement Noise (R):</strong> Determines how much trust we place in measurements
+                                    <ul>
+                                        <li>IMU gyroscope: <span class="param-value">0.002</span> (very low - highly accurate)</li>
+                                        <li>Magnetometer: <span class="param-value">0.02</span> (low - provides absolute heading)</li>
+                                        <li>IMU accelerometer: <span class="param-value">0.4</span> (high - noisy, requires gravity compensation)</li>
+                                        <li>Odometry position: <span class="param-value">0.01</span> (moderate - subject to wheel slip)</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Kalman Gain:</strong> <span class="math-formula">K = P·Hᵀ·(H·P·Hᵀ + R)⁻¹</span> - automatically balances between prediction and measurement based on their relative uncertainties</li>
+                                <li><strong>Higher R:</strong> Less trust in measurement → smaller K → less covariance reduction</li>
+                                <li><strong>Lower R:</strong> More trust in measurement → larger K → more covariance reduction</li>
+                            </ul>
+                        </div>
+
+                        <div class="tech-spec">
+                            <h4>Covariance Inflation for Safety (Target EKF)</h4>
+                            <p>For target estimation, we implement intentional covariance inflation when publishing to the seeker:</p>
+                            <ul>
+                                <li><strong>Scale Factor:</strong> <span class="param-value">4.0×</span> inflation of position and velocity covariances</li>
+                                <li><strong>Rationale:</strong> Conservative uncertainty prevents overconfidence in target position</li>
+                                <li><strong>MPC Safety:</strong> Larger uncertainty ellipses force MPC to plan more conservative trajectories</li>
+                                <li><strong>Implementation:</strong> Separate publishers: <code>/target_estimate</code> (true covariance) and <code>/target_estimate_slow</code> (inflated, throttled)</li>
+                            </ul>
+                            <div class="math-block">
+                                <div class="eq-label">Inflated Covariance:</div>
+                                <span class="math-formula">P_seeker = 4.0 × P_true</span>
+                            </div>
+                        </div>
+
+                        <div class="algorithm-detail">
+                            <h4>Numerical Stability and Bounding</h4>
+                            <p>To prevent numerical issues, we implement several safeguards:</p>
+                            <ul>
+                                <li><strong>Symmetry Enforcement:</strong> <span class="math-formula">P = (P + Pᵀ) / 2</span> ensures covariance remains symmetric</li>
+                                <li><strong>Positive Definiteness:</strong> Small regularization term <span class="math-formula">P += ε·I</span> prevents singular matrices</li>
+                                <li><strong>Covariance Clipping:</strong> UKF bounds covariance elements to <span class="param-value">[-5.0, 5.0]</span> to prevent explosion</li>
+                                <li><strong>Diagonal Bounds:</strong> Ensures diagonal elements (variances) remain positive and bounded</li>
+                                <li><strong>Joseph Form (UKF):</strong> More numerically stable covariance update: <span class="math-formula">P = (I-KH)·P·(I-KH)ᵀ + K·R·Kᵀ</span></li>
+                            </ul>
+                        </div>
+
+                        <p><strong>Key Insight:</strong> Covariance expansion during prediction reflects growing uncertainty over time, while contraction during updates reflects information gain. The balance between <span class="var">Q</span> and <span class="var">R</span> determines how quickly the filter trusts new measurements versus its predictions.</p>
+                    </div>
+                </article>
+
+                <article class="impl-item">
+                    <div class="impl-body">
                         <h3>Target State Estimation with State Propagation</h3>
                         <p>Robust target tracking with temporal smoothing and state propagation during occlusions.</p>
                         

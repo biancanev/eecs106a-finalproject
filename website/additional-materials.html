@@ -31,41 +31,81 @@
             <div class="card">
                 <h2>Resources</h2>
                 <ul>
-                    <li><a href="https://github.com/biancanev/eecs106a-finalproject/tree/implement-mpc-paper">GitHub Repository(code, CAD, launch files/executables, instructions)</a></li>
-                    <li><a href="https://github.com/biancanev/eecs106a-finalproject/blob/implement-mpc-paper/MPC_Write_Up%20(1).pdf">Detailed MPC Writeup(more on the math behind our MPC node)</a></li>
+                    <li><a href="https://github.com/biancanev/eecs106a-finalproject/tree/implement-mpc-paper">GitHub Repository (code, CAD, launch files/executables, instructions)</a></li>
+                    <li><a href="https://github.com/biancanev/eecs106a-finalproject/blob/implement-mpc-paper/MPC_Write_Up%20(1).pdf">Detailed MPC Writeup (more on the math behind our MPC node)</a></li>
                 </ul>
             </div>
 
             <div class="card">
-                <h2>Citations</h2>
-                <ul>
-                    <li>
-                        <a href="https://www.researchgate.net/publication/237525807_Optimal_Path_Planning_of_UAVs_Using_Direct_Collocation_with_Nonlinear_Programming">
-                        https://www.researchgate.net/publication/237525807_Optimal_Path_Planning_of_UAVs_Using_Direct_Collocation_with_Nonlinear_Programming
-                        </a>
-                    </li>
-                    <li>
-                        <a href="https://stanford.edu/~boyd/papers/pdf/fast_mpc.pdf">
-                        https://stanford.edu/~boyd/papers/pdf/fast_mpc.pdf
-                        </a>
-                    </li>
-                    <li>
-                        <a href="https://www.researchgate.net/publication/237525807_Optimal_Path_Planning_of_UAVs_Using_Direct_Collocation_with_Nonlinear_Programming/link/0deec52caea371aa01000000/download?_tp=eyJjb250ZXh0Ijp7ImZpcnN0UGFnZSI6InB1YmxpY2F0aW9uIiwicGFnZSI6InB1YmxpY2F0aW9uIn19">
-                        https://www.researchgate.net/publication/237525807_Optimal_Path_Planning_of_UAVs_Using_Direct_Collocation_with_Nonlinear_Programming/...
-                        </a>
-                    </li>
-                    <li>
-                        <a href="https://arxiv.org/abs/1707.06347">
-                        https://arxiv.org/abs/1707.06347
-                        </a>
-                    </li>
-                    <li>
-                        <a href="https://cecas.clemson.edu/ayalew/Papers/Vehicle%20Systems%20Dynamics%20and%20Control/Papers/Modeling%20Professional%20Drivers_VSD2017/modeling%20professional%20drivers%20with%20MPC.pdf">
-                        https://cecas.clemson.edu/ayalew/Papers/Vehicle%20Systems%20Dynamics%20and%20Control/Papers/Modeling%20Professional%20Drivers_VSD2017/modeling%20professional%20drivers%20with%20MPC.pdf
-                        </a>
-                    </li>
-                    </ul>
+                <h2>CAD Design: Halo v5.stl</h2>
+                <p>3D printed circular halo attachment mounted on both seeker and target robots to provide a physical safety buffer during interception, preventing direct collision while avoiding sensor occlusion. The STL file (<code>Halo v5.stl</code>) is available in our <a href="https://github.com/biancanev/eecs106a-finalproject/tree/implement-mpc-paper">GitHub repository</a>.</p>
+            </div>
 
+            <div class="card">
+                <h2>References & Citations</h2>
+                
+                <div class="tech-spec" style="margin-bottom: 1.5rem;">
+                    <h4>Model Predictive Control</h4>
+                    <div style="padding-left: 1rem;">
+                        <p><strong>Boyd, S., & Barratt, C.</strong> (2010). <em>Fast Model Predictive Control using Online Optimization</em>. Stanford University. <a href="https://stanford.edu/~boyd/papers/pdf/fast_mpc.pdf" target="_blank">[PDF]</a></p>
+                        
+                        <p><strong>Wang, L.</strong> (2009). <em>Model Predictive Control System Design and Implementation Using MATLAB</em>. Springer-Verlag London. <a href="https://doi.org/10.1007/978-1-84882-331-0" target="_blank">[DOI]</a></p>
+                    </div>
+                </div>
+
+                <div class="algorithm-detail" style="margin-bottom: 1.5rem;">
+                    <h4>Optimal Path Planning & Trajectory Optimization</h4>
+                    <div style="padding-left: 1rem;">
+                        <p><strong>Shah, B., & Gupta, A.</strong> (2011). <em>Optimal Path Planning of UAVs Using Direct Collocation with Nonlinear Programming</em>. ResearchGate. <a href="https://www.researchgate.net/publication/237525807_Optimal_Path_Planning_of_UAVs_Using_Direct_Collocation_with_Nonlinear_Programming" target="_blank">[Link]</a></p>
+                        
+                        <p><strong>Ayalew, B., & Kulcsar, B.</strong> (2017). <em>Modeling Professional Drivers to Enhance Automated Vehicle Control</em>. Vehicle System Dynamics, 55(5), 649-668. <a href="https://cecas.clemson.edu/ayalew/Papers/Vehicle%20Systems%20Dynamics%20and%20Control/Papers/Modeling%20Professional%20Drivers_VSD2017/modeling%20professional%20drivers%20with%20MPC.pdf" target="_blank">[PDF]</a></p>
+                    </div>
+                </div>
+
+                <div class="tech-spec" style="margin-bottom: 1.5rem;">
+                    <h4>State Estimation & Kalman Filtering</h4>
+                    <div style="padding-left: 1rem;">
+                        <p><strong>Thrun, S., Burgard, W., & Fox, D.</strong> (2005). <em>Probabilistic Robotics</em>. MIT Press. (Chapter 5: Mobile Robot Localization; Chapter 6: Mapping with Known Poses)</p>
+                        
+                        <p><strong>Wan, E. A., & Van Der Merwe, R.</strong> (2000). <em>The Unscented Kalman Filter for Nonlinear Estimation</em>. Proceedings of the IEEE 2000 Adaptive Systems for Signal Processing, Communications, and Control Symposium. <a href="https://doi.org/10.1109/ASSPCC.2000.882463" target="_blank">[DOI]</a></p>
+                    </div>
+                </div>
+
+                <div class="algorithm-detail" style="margin-bottom: 1.5rem;">
+                    <h4>Simultaneous Localization and Mapping (SLAM)</h4>
+                    <div style="padding-left: 1rem;">
+                        <p><strong>Grisetti, G., Kümmerle, R., Stachniss, C., & Burgard, W.</strong> (2010). <em>A Tutorial on Graph-Based SLAM</em>. IEEE Intelligent Transportation Systems Magazine, 2(4), 31-43. <a href="https://doi.org/10.1109/MITS.2010.939925" target="_blank">[DOI]</a></p>
+                        
+                        <p><strong>Hess, W., et al.</strong> (2016). <em>Real-Time Loop Closure in 2D LIDAR SLAM</em>. 2016 IEEE International Conference on Robotics and Automation (ICRA). <a href="https://github.com/googlecartographer/cartographer" target="_blank">[Cartographer]</a></p>
+                    </div>
+                </div>
+
+                <div class="tech-spec" style="margin-bottom: 1.5rem;">
+                    <h4>Computer Vision & Object Detection</h4>
+                    <div style="padding-left: 1rem;">
+                        <p><strong>Bradski, G., & Kaehler, A.</strong> (2008). <em>Learning OpenCV: Computer Vision with the OpenCV Library</em>. O'Reilly Media. (HSV Color Space, Contour Detection)</p>
+                        
+                        <p><strong>Forsyth, D. A., & Ponce, J.</strong> (2012). <em>Computer Vision: A Modern Approach</em> (2nd ed.). Pearson. (Feature Detection and Matching)</p>
+                    </div>
+                </div>
+
+                <div class="algorithm-detail" style="margin-bottom: 1.5rem;">
+                    <h4>Geometric Algorithms</h4>
+                    <div style="padding-left: 1rem;">
+                        <p><strong>Kabsch, W.</strong> (1976). <em>A Solution for the Best Rotation to Relate Two Sets of Vectors</em>. Acta Crystallographica Section A, 32(5), 922-923. <a href="https://doi.org/10.1107/S0567739476001873" target="_blank">[DOI]</a></p>
+                        
+                        <p><strong>Fischler, M. A., & Bolles, R. C.</strong> (1981). <em>Random Sample Consensus: A Paradigm for Model Fitting with Applications to Image Analysis and Automated Cartography</em>. Communications of the ACM, 24(6), 381-395. <a href="https://doi.org/10.1145/358669.358692" target="_blank">[DOI]</a></p>
+                    </div>
+                </div>
+
+                <div class="tech-spec">
+                    <h4>Reinforcement Learning & Control</h4>
+                    <div style="padding-left: 1rem;">
+                        <p><strong>Schulman, J., et al.</strong> (2017). <em>Proximal Policy Optimization Algorithms</em>. arXiv preprint arXiv:1707.06347. <a href="https://arxiv.org/abs/1707.06347" target="_blank">[arXiv]</a></p>
+                        
+                        <p><strong>Sutton, R. S., & Barto, A. G.</strong> (2018). <em>Reinforcement Learning: An Introduction</em> (2nd ed.). MIT Press. (Policy Gradient Methods, Actor-Critic Algorithms)</p>
+                    </div>
+                </div>
             </div>
 
         </section>

@@ -109,12 +109,96 @@
                 </ul>
 
                 <h3>Algorithmic Improvements</h3>
-                <ul>
-                    <li><strong>L₁ Adaptive Control:</strong> As an alternative to MPC, L₁ adaptive control could provide faster computation and better robustness to model uncertainties. This would be worth exploring for comparison.</li>
-                    <li><strong>Learning-Based Perception:</strong> Deep learning models (e.g., YOLO) could replace heuristic filtering for more robust detection across lighting conditions. We already have YOLO integration as optional fallback.</li>
-                    <li><strong>Multi-Hypothesis Tracking:</strong> For highly uncertain environments, maintaining multiple target hypotheses (particle filter for target) could improve robustness.</li>
-                    <li><strong>Optimal Time-to-Go:</strong> Current MPC minimizes distance to goal. Minimizing time-to-intercept (with velocity constraints) could provide faster interception.</li>
-                </ul>
+                
+                <div class="algorithm-detail">
+                    <h4>Minimum Time-to-Go Optimization</h4>
+                    <p>Current MPC minimizes distance to goal with velocity constraints. A critical next step is implementing minimum time-to-go optimization to achieve faster interception:</p>
+                    <ul>
+                        <li><strong>Objective Function:</strong> Replace position-based cost with time-to-intercept minimization: <span class="math-formula">minimize t_f</span> subject to <span class="math-formula">x(t_f) = x_target</span></li>
+                        <li><strong>Constraint Handling:</strong> Velocity and acceleration limits remain, but the optimization seeks the fastest feasible path rather than shortest distance</li>
+                        <li><strong>Benefits:</strong> Faster interception times, more aggressive (but safe) trajectories, better performance in time-critical scenarios</li>
+                        <li><strong>Challenge:</strong> Adds nonlinearity to the optimization problem, may require iterative solvers or convex approximations</li>
+                    </ul>
+                </div>
+
+                <div class="tech-spec">
+                    <h4>Boyd's Fast MPC</h4>
+                    <p>Implementing Stephen Boyd's fast MPC algorithms could dramatically improve computational efficiency:</p>
+                    <ul>
+                        <li><strong>Approach:</strong> Exploits structure in the MPC problem (banded matrices, warm-starting) for faster solve times</li>
+                        <li><strong>Methods:</strong> Preconditioned conjugate gradient, operator splitting (ADMM), or custom solvers tailored to MPC structure</li>
+                        <li><strong>Benefits:</strong> 10-100× faster solve times, enables higher control frequencies (50-100 Hz vs. current 10 Hz), longer prediction horizons</li>
+                        <li><strong>Trade-offs:</strong> May sacrifice some optimality for speed, but often negligible in practice</li>
+                    </ul>
+                    <div class="math-block">
+                        <div class="eq-label">Fast MPC Structure:</div>
+                        Exploits sparsity in <span class="math-formula">H</span> (Hessian) and <span class="math-formula">A</span> (constraint) matrices
+                    </div>
+                </div>
+
+                <div class="algorithm-detail">
+                    <h4>Offline Solution with Selective Recalculation</h4>
+                    <p>Hybrid online/offline approach combining precomputed solutions with intelligent recalculation:</p>
+                    <ul>
+                        <li><strong>Offline Precomputation:</strong> Solve MPC for common scenarios (straight paths, common obstacle configurations) and store in lookup table</li>
+                        <li><strong>Online Selection:</strong> Match current state to nearest precomputed solution, use directly if within tolerance</li>
+                        <li><strong>Selective Recalculation:</strong> Only recompute when:
+                            <ul>
+                                <li>State deviates significantly from precomputed scenarios</li>
+                                <li>New obstacles detected that weren't in precomputed set</li>
+                                <li>Target trajectory changes substantially</li>
+                                <li>Periodic recalculation (e.g., every N steps) for drift correction</li>
+                            </ul>
+                        </li>
+                        <li><strong>Benefits:</strong> Near-instantaneous control when using cached solutions, computational savings enable more complex online optimizations when needed</li>
+                        <li><strong>Implementation:</strong> Could use k-d trees or learned policies (via RL) to map states to precomputed actions</li>
+                    </ul>
+                </div>
+
+                <div class="tech-spec">
+                    <h4>Ultimate Coupling with Reinforcement Learning</h4>
+                    <p>Integrating RL with MPC creates a powerful hybrid system combining optimal control with learned policies:</p>
+                    <ul>
+                        <li><strong>RL Role:</strong> Learn high-level policy for scenario selection, horizon length adaptation, or cost function tuning</li>
+                        <li><strong>MPC Role:</strong> Provides safe, constraint-satisfying low-level control based on RL's high-level decisions</li>
+                        <li><strong>Architecture:</strong>
+                            <ul>
+                                <li><strong>Hierarchical:</strong> RL selects which MPC formulation/precomputed solution to use</li>
+                                <li><strong>Hybrid:</strong> RL learns cost function weights or terminal costs based on experience</li>
+                                <li><strong>Adaptive:</strong> RL adjusts MPC parameters (horizon, constraints) based on environment complexity</li>
+                                <li><strong>Fallback:</strong> MPC ensures safety when RL explores or encounters novel situations</li>
+                            </ul>
+                        </li>
+                        <li><strong>Training:</strong> Use MPC-generated expert demonstrations for imitation learning, then fine-tune with policy gradient methods</li>
+                        <li><strong>Benefits:</strong> Combines MPC's safety guarantees with RL's adaptability and learning from experience</li>
+                        <li><strong>Applications:</strong> Could learn optimal horizon lengths, obstacle avoidance strategies, or cost function tuning for different scenarios</li>
+                    </ul>
+                    <div class="math-block">
+                        <div class="eq-label">RL-MPC Coupling:</div>
+                        <span class="math-formula">u = π_RL(s) → MPC(s, π_RL(s))</span> where RL selects MPC parameters
+                    </div>
+                </div>
+
+                <div class="tech-spec">
+                    <h4>Other Algorithmic Improvements</h4>
+                    <ul>
+                        <li><strong>L₁ Adaptive Control:</strong> As an alternative to MPC, L₁ adaptive control could provide faster computation and better robustness to model uncertainties. This would be worth exploring for comparison.</li>
+                        <li><strong>Learning-Based Perception:</strong> Deep learning models (e.g., YOLO) could replace heuristic filtering for more robust detection across lighting conditions. We already have YOLO integration as optional fallback.</li>
+                        <li><strong>Multi-Hypothesis Tracking:</strong> For highly uncertain environments, maintaining multiple target hypotheses (particle filter for target) could improve robustness.</li>
+                    </ul>
+                </div>
+
+                <div class="algorithm-detail">
+                    <h4>Integrated Vision</h4>
+                    <p>The combination of minimum time-to-go, Boyd's fast MPC, offline precomputation, and RL coupling would create a highly sophisticated control system:</p>
+                    <ul>
+                        <li><strong>Fast MPC</strong> enables real-time optimization at high frequencies</li>
+                        <li><strong>Minimum time-to-go</strong> optimizes for speed rather than just distance</li>
+                        <li><strong>Offline precomputation</strong> provides instant responses for common scenarios</li>
+                        <li><strong>RL coupling</strong> adapts and learns optimal strategies over time</li>
+                        <li><strong>Together:</strong> A system that is both fast (via precomputation and fast MPC), optimal (via time-to-go), and adaptive (via RL)</li>
+                    </ul>
+                </div>
 
                 <h3>Performance Optimization</h3>
                 <ul>
