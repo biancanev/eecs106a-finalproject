@@ -25,18 +25,64 @@
     <main class="container">
         <header class="page-header">
             <h1>Turtlebot Interceptor</h1>
-            <p class="subtitle">Welcome to Team 15's Fall 2025 EECS 106A Final Project</p>
+            <p class="subtitle">Autonomous Interception System with Multi-Modal Perception, Optimal Control, and Robust State Estimation</p>
         </header>
 
         <section class="content">
             <div class="card">
                 <h2>Project Overview</h2>
-                <p>The goal of our project was to deploy two Turtlebots in an unknown environment with obstacles obstructing the path between them. Our task was to design and implement a system in which one Turtlebot, designated as the seeker, intercepts a target Turtlebot—potentially in motion—in optimal time by mapping its surroundings and determining the most efficient path to the target.</p>
+                <p>The goal of our project was to deploy two Turtlebots in an unknown environment with obstacles obstructing the path between them. Our task was to design and implement a system in which one Turtlebot, designated as the <strong>seeker</strong>, intercepts a target Turtlebot—potentially in motion—in optimal time by mapping its surroundings and determining the most efficient path to the target.</p>
+                
+                <p>This project required the integration of multiple sophisticated algorithms:</p>
+                <ul>
+                    <li><strong>Multi-Modal Perception:</strong> 6-layer HSV filtering system for camera-based cone detection, LIDAR-based occupancy mapping, and automatic LIDAR frame calibration</li>
+                    <li><strong>Advanced State Estimation:</strong> Extended Kalman Filter (EKF) running at 100 Hz for robot pose, Unscented Kalman Filter (UKF) for target velocity tracking, with state propagation during occlusions</li>
+                    <li><strong>Optimal Control:</strong> Model Predictive Control (MPC) with receding-horizon optimization, obstacle avoidance constraints, and adaptive velocity scaling</li>
+                    <li><strong>Geometric Algorithms:</strong> Kabsch algorithm for LIDAR-based target localization, RANSAC for robust transform estimation</li>
+                    <li><strong>Real-Time Processing:</strong> Fast local occupancy grid (5-10 Hz) for immediate obstacle awareness, complementing Cartographer's global SLAM</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h2>Key Technical Achievements</h2>
+                <div class="design-grid">
+                    <article class="design-item">
+                        <h3>Perception</h3>
+                        <ul>
+                            <li>6-layer heuristic system for robust cone detection in varying lighting</li>
+                            <li>Automatic LIDAR frame calibration (0°, 90°, 180°, 270° detection)</li>
+                            <li>Multi-modal sensor fusion with confidence-based weighting</li>
+                            <li>Fast local grid at 5-10 Hz for real-time obstacle awareness</li>
+                        </ul>
+                    </article>
+
+                    <article class="design-item">
+                        <h3>State Estimation</h3>
+                        <ul>
+                            <li>100 Hz EKF fusing IMU, magnetometer, and odometry</li>
+                            <li>UKF for nonlinear target velocity tracking</li>
+                            <li>State propagation during sensor occlusions</li>
+                            <li>Temporal smoothing and outlier rejection</li>
+                        </ul>
+                    </article>
+
+                    <article class="design-item">
+                        <h3>Control</h3>
+                        <ul>
+                            <li>MPC with 15-step horizon and obstacle constraints</li>
+                            <li>Adaptive velocity scaling based on obstacle proximity</li>
+                            <li>Waypoint generation for complex obstacle navigation</li>
+                            <li>Terminal guidance for precise final approach</li>
+                        </ul>
+                    </article>
+                </div>
             </div>
 
             <div class="card">
                 <h2>Inspiration</h2>
-                <p>Our work was inspired by ongoing research in interception systems, as well as missile interception technologies in which one missile autonomously intercepts another. The challenges observed in these systems reflect many of the difficulties we encountered in our project, including accurately mapping noisy environments and successfully planning an optimal trajectory.</p>
+                <p>Our work was inspired by ongoing research in interception systems, as well as missile interception technologies in which one missile autonomously intercepts another. The challenges observed in these systems reflect many of the difficulties we encountered in our project, including accurately mapping noisy environments, fusing multiple sensor modalities, handling sensor occlusions, and successfully planning an optimal trajectory in real-time.</p>
+                
+                <p>Like production autonomous systems (Waymo's LIDAR+camera fusion, Tesla's camera-based perception), our system leverages multi-modal sensing to achieve robustness that single-sensor systems cannot provide. The integration of geometric algorithms (Kabsch), optimal control (MPC), and advanced filtering (EKF, UKF) demonstrates the complexity required for real-world autonomous navigation.</p>
             </div>
             
         </section>
@@ -47,4 +93,3 @@
     </footer>
 </body>
 </html>
-
