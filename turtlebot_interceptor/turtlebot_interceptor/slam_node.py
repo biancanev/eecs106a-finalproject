@@ -260,27 +260,6 @@ class SLAMNode(Node):
                             # Update occupancy value
                             self.map_data[ngy, ngx] = log_odds_to_occupancy(new_lo)
     
-    def update_cell_log_odds(self, gx, gy, log_odds_update):
-        """Update log-odds for a single cell (legacy method - now handled directly in update_map_from_scan)"""
-        # This method is kept for compatibility but log-odds are now updated directly
-        # in update_map_from_scan for better performance
-        if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
-            current_lo = self.log_odds_data[gy, gx]
-            new_lo = current_lo + log_odds_update
-            new_lo = np.clip(new_lo, self.log_odds_min, self.log_odds_max)
-            self.log_odds_data[gy, gx] = new_lo
-            
-            # Convert back to occupancy
-            if new_lo < -self.occupancy_threshold:
-                self.map_data[gy, gx] = 0  # Free
-            elif new_lo > self.occupancy_threshold:
-                self.map_data[gy, gx] = 100  # Occupied
-            else:
-                if new_lo > 0.1:
-                    self.map_data[gy, gx] = 50  # Uncertain but likely occupied
-                else:
-                    self.map_data[gy, gx] = -1  # Unknown
-    
     def world_to_grid(self, x, y):
         """Convert world coordinates to grid coordinates"""
         gx = int((x - self.origin_x) / self.resolution)
