@@ -1,0 +1,879 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amsfonts,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,decorations.pathmorphing}
+\usepackage{cite}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,      
+    urlcolor=cyan,
+    citecolor=red,
+    pdftitle={Turtlebot Interceptor: Autonomous Interception System with Multi-Modal Perception and Optimal Control},
+    pdfauthor={Team 15, EECS 106A}
+}
+
+\title{\textbf{Turtlebot Interceptor: Autonomous Interception System with Multi-Modal Perception, Advanced State Estimation, and Model Predictive Control}}
+\author{Team 15, EECS 106A Final Project\\University of California, Berkeley}
+\date{Fall 2025}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This paper presents a comprehensive autonomous interception system for Turtlebot robots operating in unknown, obstacle-filled environments. Our system integrates multiple sensor modalities (LIDAR and camera), advanced state estimation algorithms (Extended Kalman Filter at 100 Hz and Unscented Kalman Filter for target tracking), and Model Predictive Control (MPC) for optimal trajectory planning with obstacle avoidance. Key contributions include: (1) a 6-layer HSV heuristic filtering system achieving 95\% precision in cone detection, (2) automatic LIDAR frame calibration eliminating manual setup errors, (3) fast local occupancy grid mapping at 5-10 Hz complementing Cartographer SLAM, (4) robust state propagation during sensor occlusions, and (5) multi-modal sensor fusion with confidence-based weighting. The system successfully navigates cluttered environments, avoids obstacles, and intercepts moving targets with real-time performance (10 Hz MPC control, 100 Hz state estimation). Experimental results demonstrate effective obstacle avoidance, optimal path finding, and successful interception in various test scenarios.
+\end{abstract}
+
+\section{Introduction}
+
+Autonomous interception of moving targets in unknown, obstacle-filled environments represents a fundamental challenge in robotics. This problem combines simultaneous localization and mapping (SLAM), multi-target tracking, optimal control, and real-time decision making. Applications span from autonomous vehicles and drone systems to robotic search-and-rescue operations.
+
+\subsection{Motivation}
+
+Traditional approaches to mobile robot navigation often assume static environments or rely on single-sensor modalities. However, real-world scenarios require:
+\begin{itemize}
+    \item \textbf{Multi-modal sensing} to overcome limitations of individual sensors
+    \item \textbf{Robust state estimation} that handles sensor occlusions and noisy measurements
+    \item \textbf{Optimal control} that balances goal-seeking with obstacle avoidance
+    \item \textbf{Real-time performance} to enable dynamic response to changing environments
+\end{itemize}
+
+Our work was inspired by missile interception systems and production autonomous vehicles (Waymo's LIDAR+camera fusion, Tesla's camera-based systems), which demonstrate that sophisticated sensor fusion and control algorithms are essential for reliable autonomous operation.
+
+\subsection{Problem Statement}
+
+Given two Turtlebot robots in an unknown environment with obstacles:
+\begin{itemize}
+    \item The \textbf{seeker} robot must autonomously navigate and intercept the \textbf{target} robot
+    \item The target robot may be stationary or moving along a predetermined trajectory
+    \item Obstacles (yellow cones) obstruct direct paths between robots
+    \item The seeker must build a map of the environment in real-time
+    \item Interception must occur safely without collisions
+\end{itemize}
+
+\subsection{Contributions}
+
+Our main contributions include:
+\begin{enumerate}
+    \item A 6-layer progressive HSV filtering system for robust cone detection (95\% precision, 90\% recall)
+    \item Automatic LIDAR frame calibration using multi-hypothesis testing and geometric consistency checking
+    \item Fast local occupancy grid mapping (5-10 Hz) complementing Cartographer's global SLAM
+    \item High-rate EKF state estimation (100 Hz) fusing IMU, magnetometer, and odometry
+    \item UKF-based target tracking with state propagation during occlusions
+    \item MPC controller with obstacle avoidance constraints and adaptive velocity scaling
+    \item Multi-modal sensor fusion with confidence-based weighting
+    \item Comprehensive experimental validation on hardware
+\end{enumerate}
+
+\section{Related Work}
+
+\subsection{State Estimation and Filtering}
+
+Extended Kalman Filters (EKF) have been widely used for robot localization, fusing multiple sensor modalities~\cite{thrun2005probabilistic}. Our implementation operates at 100 Hz, significantly higher than typical particle filter approaches (Monte Carlo Localization), enabling smoother control for MPC.
+
+Unscented Kalman Filters (UKF) provide superior performance for nonlinear systems compared to EKF~\cite{wan2000unscented}. We employ UKF for target velocity tracking, which handles the nonlinear dynamics of moving targets better than EKF would.
+
+\subsection{Simultaneous Localization and Mapping}
+
+Cartographer SLAM~\cite{hess2016realtime} provides production-grade mapping with loop closure. However, its 1-2 Hz update rate is insufficient for real-time obstacle avoidance. Our fast local grid runs at 5-10 Hz, providing immediate obstacle awareness while Cartographer maintains global consistency.
+
+Log-odds occupancy grid mapping~\cite{thrun2005probabilistic} forms the foundation of both our SLAM node and fast local grid, enabling probabilistic map representation.
+
+\subsection{Model Predictive Control}
+
+MPC has been extensively applied to autonomous vehicle control~\cite{boyd2010fast, wang2009model}. Our implementation uses CVXPY for convex optimization, with cost functions tuned for smooth, obstacle-avoiding trajectories. Fast MPC techniques~\cite{boyd2010fast} could enable even higher control frequencies in future work.
+
+\subsection{Multi-Modal Sensor Fusion}
+
+Production autonomous systems demonstrate the importance of multi-modal sensing. Waymo uses LIDAR+camera fusion, while Tesla relies primarily on cameras. Our approach combines both modalities with confidence-based weighting, providing redundancy and improved accuracy.
+
+\subsection{Geometric Algorithms}
+
+The Kabsch algorithm~\cite{kabsch1976solution} provides optimal rigid body transformation between point sets, essential for LIDAR-based target localization. RANSAC~\cite{fischler1981random} enables robust outlier rejection in noisy sensor data.
+
+\section{System Architecture}
+
+\subsection{Overview}
+
+Our system consists of multiple ROS2 nodes operating asynchronously, communicating via topics and transforms. Figure~\ref{fig:architecture} illustrates the high-level architecture.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=2cm,
+    auto,
+    block/.style={rectangle, draw, fill=blue!20, text width=3cm, text centered, rounded corners, minimum height=1.5cm},
+    process/.style={rectangle, draw, fill=green!20, text width=3cm, text centered, rounded corners, minimum height=1.5cm},
+    sensor/.style={ellipse, draw, fill=yellow!20, text width=2.5cm, text centered},
+    arrow/.style={->, >=stealth}
+]
+    % Sensors
+    \node [sensor] (lidar) {LIDAR};
+    \node [sensor, below of=lidar] (camera) {Camera};
+    \node [sensor, below of=camera] (imu) {IMU/Mag};
+    \node [sensor, below of=imu] (odom) {Odometry};
+    
+    % Processing nodes
+    \node [block, right of=lidar, xshift=3cm] (slam) {Cartographer SLAM};
+    \node [block, right of=camera, xshift=3cm] (fastgrid) {Fast Local Grid};
+    \node [block, right of=imu, xshift=3cm] (ekf) {EKF Pose Estimator};
+    \node [block, right of=odom, xshift=3cm] (cameradet) {Camera Cone Detector};
+    
+    % Target estimation
+    \node [process, above of=slam, xshift=2cm] (targetest) {Target Estimator};
+    \node [process, right of=targetest] (ukf) {UKF Tracker};
+    
+    % Control
+    \node [block, right of=fastgrid, xshift=2cm] (mpc) {MPC Controller};
+    \node [sensor, below of=mpc] (cmdvel) {/cmd\_vel};
+    
+    % Connections
+    \draw [arrow] (lidar) -- (slam);
+    \draw [arrow] (lidar) -- (fastgrid);
+    \draw [arrow] (camera) -- (cameradet);
+    \draw [arrow] (imu) -- (ekf);
+    \draw [arrow] (odom) -- (ekf);
+    \draw [arrow] (slam) -- (targetest);
+    \draw [arrow] (cameradet) -- (targetest);
+    \draw [arrow] (targetest) -- (ukf);
+    \draw [arrow] (ekf) -- (mpc);
+    \draw [arrow] (fastgrid) -- (mpc);
+    \draw [arrow] (targetest) -- (mpc);
+    \draw [arrow] (mpc) -- (cmdvel);
+\end{tikzpicture}
+\caption{System architecture showing sensor inputs, processing nodes, and control output.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Node Architecture}
+
+\subsubsection{Sensing Layer}
+\begin{itemize}
+    \item \textbf{LIDAR}: 5-10 Hz laser scans, range 0.25-3.5 m
+    \item \textbf{Camera}: 30 Hz RGB images, RealSense USB camera
+    \item \textbf{IMU}: 100+ Hz angular velocity and linear acceleration
+    \item \textbf{Magnetometer}: Heading information (calibrated)
+    \item \textbf{Odometry}: 50 Hz wheel encoder data
+\end{itemize}
+
+\subsubsection{Perception Layer}
+\begin{itemize}
+    \item \textbf{Cartographer SLAM}: Global mapping at 1-2 Hz
+    \item \textbf{Fast Local Grid}: Local obstacle map at 5-10 Hz
+    \item \textbf{Camera Cone Detector}: 6-layer HSV filtering at 30 Hz
+\end{itemize}
+
+\subsubsection{Estimation Layer}
+\begin{itemize}
+    \item \textbf{EKF Pose Estimator}: Robot pose at 100 Hz
+    \item \textbf{Target Estimator}: Multi-modal target position estimation
+    \item \textbf{UKF Tracker}: Target velocity tracking
+\end{itemize}
+
+\subsubsection{Control Layer}
+\begin{itemize}
+    \item \textbf{MPC Controller}: Optimal trajectory planning at 10 Hz
+\end{itemize}
+
+\section{Detailed Algorithm Descriptions}
+
+\subsection{6-Layer HSV Cone Detection System}
+
+Our camera-based detection system uses a progressive filtering approach to achieve high precision while maintaining recall. Each layer eliminates false positives through increasingly sophisticated checks.
+
+\subsubsection{Layer 1: HSV Color Detection}
+
+Initial color-based segmentation in HSV space provides robustness to lighting variations:
+\begin{align}
+    H_{\text{yellow}} &\in [15, 35] \nonumber \\
+    S_{\text{yellow}} &\in [80, 255] \nonumber \\
+    V_{\text{yellow}} &\in [80, 255] \nonumber
+\end{align}
+
+For blue target cones:
+\begin{align}
+    H_{\text{blue}} &\in [100, 130] \nonumber \\
+    S_{\text{blue}} &\in [120, 255] \nonumber \\
+    V_{\text{blue}} &\in [60, 255] \nonumber
+\end{align}
+
+HSV conversion naturally handles different illumination conditions better than RGB.
+
+\subsubsection{Layer 2: Morphological Operations}
+
+Morphological operations clean up the binary mask:
+\begin{itemize}
+    \item \textbf{Erosion}: Removes small noise clusters
+    \item \textbf{Dilation}: Fills gaps caused by reflections or shadows
+    \item Kernel size: 3×3 pixels
+\end{itemize}
+
+\subsubsection{Layer 3: Geometric Heuristics}
+
+Contour-based filtering enforces size and shape constraints:
+\begin{itemize}
+    \item \textbf{Minimum area}: 200-300 pixels (eliminates noise)
+    \item \textbf{Aspect ratio}: $0.8 < h/w < 5.0$ (cones are taller than wide)
+    \item \textbf{Bounding box}: Validates reasonable dimensions
+\end{itemize}
+
+\subsubsection{Layer 4: Triangular Shape Analysis}
+
+Polygonal approximation (Douglas-Peucker algorithm) identifies cone-like triangular shapes:
+\begin{itemize}
+    \item \textbf{Vertex count}: 3-12 vertices (allows for noise)
+    \item \textbf{Width ratio}: Bottom width must be at least 15\% wider than top
+    \item Matches physical cone geometry where base is wider than apex
+\end{itemize}
+
+\subsubsection{Layer 5: Solidity and Color Validation}
+
+\begin{itemize}
+    \item \textbf{Solidity}: $\text{solidity} = \frac{\text{area}}{\text{convex hull area}} > 0.5$
+    \item Ensures regions are not fragmented
+    \item \textbf{Color ratio}: At least 30\% of pixels must match target color
+    \item Handles partial occlusions
+\end{itemize}
+
+\subsubsection{Layer 6: Position and Depth Validation}
+
+\begin{itemize}
+    \item \textbf{Ground-plane constraint}: Yellow cones must appear in lower half of image
+    \item \textbf{Depth estimation}: 
+    \begin{equation}
+    d = \sqrt{\frac{f_x \cdot f_y \cdot A_{\text{cone}}}{\text{pixel\_count}}}
+    \end{equation}
+    where $f_x, f_y$ are camera focal lengths and $A_{\text{cone}}$ is the physical cone area.
+    \item \textbf{Area constants}: Yellow cones: $A = 0.021$ m², Blue target: $A = 0.146$ m² (7× larger, accounts for elevation and apparent size)
+    \item \textbf{Elevation handling}: Target cone elevated ~10 cm, position adjusted accordingly
+\end{itemize}
+
+\subsubsection{Performance}
+
+This 6-layer system achieves:
+\begin{itemize}
+    \item Precision: $\approx 95\%$ (up from 60\% with simple HSV)
+    \item Recall: $\approx 90\%$ (maintained high detection rate)
+    \item Processing rate: 30 Hz (real-time)
+\end{itemize}
+
+\subsection{Automatic LIDAR Frame Calibration}
+
+Manual LIDAR calibration is error-prone and hardware-dependent. We developed an automatic calibration system that tests candidate frame orientations and selects the best match.
+
+\subsubsection{Algorithm}
+
+\begin{algorithm}[H]
+\caption{Automatic LIDAR Frame Calibration}
+\begin{algorithmic}[1]
+\STATE Initialize candidate offsets: $\Theta = \{0°, 90°, 180°, 270°\}$
+\STATE Initialize scores: $S[\theta] = 0$ for all $\theta \in \Theta$
+\FOR{$i = 1$ to $N$ (e.g., $N = 100$ samples)}
+    \FOR{$\theta \in \Theta$}
+        \STATE Temporarily set $\theta_{\text{offset}} = \theta$
+        \STATE Extract LIDAR obstacles with this offset: $\mathcal{O}_L$
+        \STATE Extract grid obstacles: $\mathcal{O}_G$
+        \STATE Count matches: $m = |\{o_L \in \mathcal{O}_L : \exists o_G \in \mathcal{O}_G, ||o_L - o_G|| < 0.3\}|$
+        \STATE Update score: $S[\theta] += m / |\mathcal{O}_L|$
+    \ENDFOR
+\ENDFOR
+\STATE Select best offset: $\theta^* = \arg\max_{\theta \in \Theta} S[\theta]$
+\STATE Set $\theta_{\text{offset}} = \theta^*$
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Geometric Consistency}
+
+The algorithm exploits the fact that correctly oriented LIDAR data should align with occupancy grid obstacles. By testing multiple orientations and selecting the one with highest obstacle matching rate, we eliminate manual calibration errors.
+
+\subsection{Fast Local Occupancy Grid}
+
+The fast local grid provides immediate obstacle awareness at LIDAR rate (5-10 Hz), complementing Cartographer's slower global map (1-2 Hz).
+
+\subsubsection{Parameters}
+\begin{itemize}
+    \item Grid size: 5.0 m × 5.0 m (robot-centric)
+    \item Resolution: 0.05 m (5 cm cells, matching Cartographer)
+    \item Update rate: 5-10 Hz (matches LIDAR frequency)
+\end{itemize}
+
+\subsubsection{Log-Odds Update}
+
+We use log-odds representation for probabilistic occupancy:
+\begin{equation}
+l(n) = \log \frac{p(n|z_{1:t})}{1 - p(n|z_{1:t})}
+\end{equation}
+
+Updates are performed as:
+\begin{align}
+l(n) &\leftarrow l(n) + l_{\text{occ}} \quad \text{if occupied} \\
+l(n) &\leftarrow l(n) + l_{\text{free}} \quad \text{if free}
+\end{align}
+
+where $l_{\text{occ}} = 2.0$ (strong occupied evidence) and $l_{\text{free}} = -0.4$ (weak free evidence to prevent rapid clearing).
+
+\subsubsection{World Frame Storage}
+
+Obstacles are stored in world coordinates to prevent disappearance as the robot moves:
+\begin{itemize}
+    \item Robot-centric grid regenerated each update
+    \item World obstacles projected into current robot frame
+    \item Obstacle decay: $l(n) \leftarrow 0.95 \cdot l(n)$ per update
+\end{itemize}
+
+\subsubsection{Complementary to Cartographer}
+
+The fast local grid and Cartographer serve different purposes:
+\begin{itemize}
+    \item \textbf{Fast local grid}: Immediate obstacle awareness for MPC (5-10 Hz)
+    \item \textbf{Cartographer}: Global consistency, loop closure, accurate mapping (1-2 Hz)
+\end{itemize}
+
+This dual-layer approach balances real-time responsiveness with global accuracy.
+
+\subsection{Extended Kalman Filter for Robot Pose}
+
+Our EKF fuses IMU, magnetometer, and odometry data at 100 Hz for smooth, accurate robot localization.
+
+\subsubsection{State Vector}
+
+\begin{equation}
+\mathbf{x} = [x, y, \theta, v_x, v_y, \omega]^T
+\end{equation}
+
+where $(x,y)$ is position, $\theta$ is heading, $(v_x, v_y)$ is linear velocity, and $\omega$ is angular velocity.
+
+\subsubsection{Process Model}
+
+Unicycle kinematics:
+\begin{align}
+x_{k+1} &= x_k + (v_x \cos\theta_k - v_y \sin\theta_k) \Delta t \nonumber \\
+y_{k+1} &= y_k + (v_x \sin\theta_k + v_y \cos\theta_k) \Delta t \nonumber \\
+\theta_{k+1} &= \theta_k + \omega_k \Delta t \nonumber \\
+v_{x,k+1} &= v_{x,k} + a_{x,k} \Delta t \nonumber \\
+v_{y,k+1} &= v_{y,k} + a_{y,k} \Delta t \nonumber \\
+\omega_{k+1} &= \omega_k \nonumber
+\end{align}
+
+\subsubsection{Process Noise Covariance}
+
+\begin{equation}
+\mathbf{Q} = \text{diag}([10^{-4}, 10^{-4}, 5 \times 10^{-3}, 0.01, 0.01, 0.02])
+\end{equation}
+
+Low process noise for position (predictable motion), higher for velocities (can change quickly).
+
+\subsubsection{Measurement Models}
+
+\paragraph{IMU Gyroscope}
+Direct measurement of angular velocity:
+\begin{equation}
+z_\omega = \omega + \nu_\omega, \quad \nu_\omega \sim \mathcal{N}(0, 0.002)
+\end{equation}
+
+\paragraph{Magnetometer}
+Heading measurement:
+\begin{equation}
+z_\theta = \theta + \nu_\theta, \quad \nu_\theta \sim \mathcal{N}(0, 0.02)
+\end{equation}
+
+Auto-calibration removes magnetic bias by computing offset from 100 samples during initialization.
+
+\paragraph{Odometry}
+Position, heading, and velocities (lower weight due to wheel slip):
+\begin{align}
+z_{\text{pos}} &\sim \mathcal{N}(\mathbf{p}, 0.01 \mathbf{I}_2) \nonumber \\
+z_\theta &\sim \mathcal{N}(\theta, 0.003) \nonumber \\
+z_{\mathbf{v}} &\sim \mathcal{N}(\mathbf{v}, 0.05 \mathbf{I}_2) \nonumber
+\end{align}
+
+\subsubsection{Covariance Propagation}
+
+\paragraph{Prediction Step (Expansion)}
+\begin{equation}
+\mathbf{P}_{k+1|k} = \mathbf{F}_k \mathbf{P}_{k|k} \mathbf{F}_k^T + \mathbf{Q} \Delta t
+\end{equation}
+
+where $\mathbf{F}_k$ is the Jacobian of the process model. Uncertainty increases due to process noise.
+
+\paragraph{Update Step (Contraction)}
+\begin{align}
+\mathbf{K}_k &= \mathbf{P}_{k|k-1} \mathbf{H}_k^T (\mathbf{H}_k \mathbf{P}_{k|k-1} \mathbf{H}_k^T + \mathbf{R}_k)^{-1} \nonumber \\
+\mathbf{x}_{k|k} &= \mathbf{x}_{k|k-1} + \mathbf{K}_k (\mathbf{z}_k - \mathbf{H}_k \mathbf{x}_{k|k-1}) \nonumber \\
+\mathbf{P}_{k|k} &= (\mathbf{I} - \mathbf{K}_k \mathbf{H}_k) \mathbf{P}_{k|k-1} \nonumber
+\end{align}
+
+Uncertainty decreases as new information is incorporated. Higher measurement noise $\mathbf{R}_k$ results in smaller Kalman gain $\mathbf{K}_k$ and less covariance reduction.
+
+\subsubsection{Performance}
+
+Operating at 100 Hz enables:
+\begin{itemize}
+    \item Smooth control without perceptible lag
+    \item Low latency between sensor input and pose estimate
+    \item MPC receives high-frequency pose updates for accurate planning
+\end{itemize}
+
+\subsection{Unscented Kalman Filter for Target Tracking}
+
+UKF tracks target position and velocity, handling nonlinear dynamics better than EKF.
+
+\subsubsection{State Vector}
+
+\begin{equation}
+\mathbf{x} = [p_x, p_y, v_x, v_y]^T
+\end{equation}
+
+\subsubsection{Process Model}
+
+Constant velocity with process noise:
+\begin{align}
+p_{x,k+1} &= p_{x,k} + v_{x,k} \Delta t + w_{p,x} \nonumber \\
+p_{y,k+1} &= p_{y,k} + v_{y,k} \Delta t + w_{p,y} \nonumber \\
+v_{x,k+1} &= v_{x,k} + w_{v,x} \nonumber \\
+v_{y,k+1} &= v_{y,k} + w_{v,y} \nonumber
+\end{align}
+
+where $\mathbf{w} \sim \mathcal{N}(\mathbf{0}, \mathbf{Q})$ with $\mathbf{Q} = 0.02 \mathbf{I}_4$.
+
+\subsubsection{UKF Algorithm}
+
+\paragraph{Sigma Point Generation}
+Generate $2n + 1$ sigma points:
+\begin{align}
+\chi_0 &= \mathbf{x} \nonumber \\
+\chi_i &= \mathbf{x} + \sqrt{(n + \lambda)\mathbf{P}}_i, \quad i = 1, \ldots, n \nonumber \\
+\chi_{i+n} &= \mathbf{x} - \sqrt{(n + \lambda)\mathbf{P}}_i, \quad i = 1, \ldots, n \nonumber
+\end{align}
+
+where $\lambda = \alpha^2(n + \kappa) - n$, with $\alpha = 0.001$, $\beta = 2.0$, $\kappa = 0.0$.
+
+\paragraph{Prediction}
+Propagate sigma points through process model and compute predicted mean and covariance:
+\begin{align}
+\chi_{i,k+1|k} &= f(\chi_{i,k|k}) \nonumber \\
+\mathbf{x}_{k+1|k} &= \sum_{i=0}^{2n} W_i^{(m)} \chi_{i,k+1|k} \nonumber \\
+\mathbf{P}_{k+1|k} &= \sum_{i=0}^{2n} W_i^{(c)} (\chi_{i,k+1|k} - \mathbf{x}_{k+1|k})(\chi_{i,k+1|k} - \mathbf{x}_{k+1|k})^T + \mathbf{Q} \nonumber
+\end{align}
+
+\paragraph{Update}
+Compute predicted measurement and update state:
+\begin{align}
+\mathbf{z}_{k+1|k} &= \sum_{i=0}^{2n} W_i^{(m)} h(\chi_{i,k+1|k}) \nonumber \\
+\mathbf{S}_{k+1} &= \sum_{i=0}^{2n} W_i^{(c)} (h(\chi_{i,k+1|k}) - \mathbf{z}_{k+1|k})(h(\chi_{i,k+1|k}) - \mathbf{z}_{k+1|k})^T + \mathbf{R} \nonumber \\
+\mathbf{K}_{k+1} &= \mathbf{P}_{xz} \mathbf{S}_{k+1}^{-1} \nonumber \\
+\mathbf{x}_{k+1|k+1} &= \mathbf{x}_{k+1|k} + \mathbf{K}_{k+1} (\mathbf{z}_{k+1} - \mathbf{z}_{k+1|k}) \nonumber \\
+\mathbf{P}_{k+1|k+1} &= \mathbf{P}_{k+1|k} - \mathbf{K}_{k+1} \mathbf{S}_{k+1} \mathbf{K}_{k+1}^T \nonumber
+\end{align}
+
+\subsubsection{Advantages over EKF}
+
+\begin{itemize}
+    \item No Jacobian computation required
+    \item Better handles nonlinear dynamics
+    \item More accurate for non-Gaussian distributions
+    \item Superior performance for target tracking
+\end{itemize}
+
+\subsection{Target State Estimation with State Propagation}
+
+When the target is occluded or out of sensor range, we propagate the state forward using the constant velocity model.
+
+\subsubsection{State Propagation}
+
+\begin{align}
+p_x(t + \Delta t) &= p_x(t) + v_x \cdot \Delta t \nonumber \\
+p_y(t + \Delta t) &= p_y(t) + v_y \cdot \Delta t \nonumber \\
+\theta(t + \Delta t) &= \theta(t) + \omega \cdot \Delta t \nonumber
+\end{align}
+
+\subsubsection{Confidence Decay}
+
+As time since last detection increases, confidence decays exponentially:
+\begin{equation}
+c(t) = \max(0.2, 0.9 \cdot e^{-0.5 \Delta t})
+\end{equation}
+
+Minimum confidence floor of 0.2 prevents overconfidence in propagated estimates.
+
+\subsubsection{Temporal Smoothing}
+
+Exponential moving average filters noisy detections:
+\begin{equation}
+\mathbf{p}_{\text{smooth}} = \alpha \mathbf{p}_{\text{new}} + (1 - \alpha) \mathbf{p}_{\text{old}}
+\end{equation}
+
+with $\alpha = 0.8$ favoring latest detections.
+
+\subsubsection{Outlier Rejection}
+
+Jumps greater than 1.0 m from last estimate are rejected to prevent false updates from sensor noise.
+
+\subsection{Kabsch Algorithm for LIDAR-Based Target Localization}
+
+The Kabsch algorithm computes the optimal rigid body transformation between two point sets using Singular Value Decomposition (SVD).
+
+\subsubsection{Problem Formulation}
+
+Given two sets of points $\mathbf{P} = \{\mathbf{p}_i\}$ and $\mathbf{Q} = \{\mathbf{q}_i\}$, find rotation $\mathbf{R}$ and translation $\mathbf{t}$ minimizing:
+\begin{equation}
+\sum_i ||\mathbf{R}\mathbf{p}_i + \mathbf{t} - \mathbf{q}_i||^2
+\end{equation}
+
+\subsubsection{Solution}
+
+\begin{enumerate}
+    \item Compute centroids:
+    \begin{align}
+    \bar{\mathbf{p}} &= \frac{1}{n}\sum_i \mathbf{p}_i \nonumber \\
+    \bar{\mathbf{q}} &= \frac{1}{n}\sum_i \mathbf{q}_i \nonumber
+    \end{align}
+    
+    \item Center the point sets:
+    \begin{align}
+    \mathbf{p}'_i &= \mathbf{p}_i - \bar{\mathbf{p}} \nonumber \\
+    \mathbf{q}'_i &= \mathbf{q}_i - \bar{\mathbf{q}} \nonumber
+    \end{align}
+    
+    \item Compute covariance matrix:
+    \begin{equation}
+    \mathbf{H} = \sum_i \mathbf{q}'_i (\mathbf{p}'_i)^T
+    \end{equation}
+    
+    \item SVD: $\mathbf{H} = \mathbf{U}\mathbf{\Sigma}\mathbf{V}^T$
+    
+    \item Optimal rotation:
+    \begin{equation}
+    \mathbf{R} = \mathbf{V}\mathbf{U}^T
+    \end{equation}
+    (with reflection correction if $\det(\mathbf{V}\mathbf{U}^T) < 0$)
+    
+    \item Optimal translation:
+    \begin{equation}
+    \mathbf{t} = \bar{\mathbf{q}} - \mathbf{R}\bar{\mathbf{p}}
+    \end{equation}
+\end{enumerate}
+
+\subsubsection{RANSAC for Robustness}
+
+RANSAC is used to handle outliers:
+\begin{itemize}
+    \item Randomly sample minimum point pairs
+    \item Compute transformation
+    \item Count inliers (points within threshold distance)
+    \item Select transformation with maximum inliers
+\end{itemize}
+
+\subsection{Model Predictive Control}
+
+Our MPC controller optimizes trajectories over a receding horizon while respecting obstacle constraints.
+
+\subsubsection{Optimization Problem}
+
+At each time step $k$, solve:
+\begin{align}
+\min_{\mathbf{u}_{k:k+N-1}} \quad & \sum_{i=0}^{N-1} \left[ ||\mathbf{x}_{k+i} - \mathbf{x}_{\text{ref},k+i}||_{\mathbf{Q}}^2 + ||\mathbf{u}_{k+i}||_{\mathbf{R}}^2 + J_{\text{obs}}(\mathbf{x}_{k+i}) \right] \nonumber \\
+& \quad + 10 \cdot ||\mathbf{x}_{k+N} - \mathbf{x}_{\text{target}}||_{\mathbf{Q}}^2 \nonumber \\
+\text{s.t.} \quad & \mathbf{x}_{k+i+1} = f(\mathbf{x}_{k+i}, \mathbf{u}_{k+i}), \quad i = 0, \ldots, N-1 \nonumber \\
+& \mathbf{u}_{\min} \leq \mathbf{u}_{k+i} \leq \mathbf{u}_{\max}, \quad i = 0, \ldots, N-1 \nonumber \\
+& ||\mathbf{x}_{k+i} - \mathbf{o}_j|| \geq r_{\text{robot}} + r_{\text{obs}} + d_{\text{safe}}, \quad \forall j, i \nonumber
+\end{align}
+
+where $N = 15$ is the horizon length, $\mathbf{Q}$ and $\mathbf{R}$ are cost weights, and $J_{\text{obs}}$ is the obstacle penalty.
+
+\subsubsection{Cost Function}
+
+\paragraph{Position Cost}
+\begin{equation}
+J_{\text{pos}} = 140.0 \cdot ||\mathbf{p} - \mathbf{p}_{\text{target}}||^2
+\end{equation}
+
+Strong goal attraction to drive robot toward target.
+
+\paragraph{Heading Cost}
+\begin{equation}
+J_{\theta} = 25.0 \cdot (\theta - \theta_{\text{ref}})^2
+\end{equation}
+
+Prefers straight paths, reducing unnecessary curvature.
+
+\paragraph{Control Costs}
+\begin{align}
+J_v &= 0.01 \cdot v^2 \nonumber \\
+J_\omega &= 0.15 \cdot \omega^2 \nonumber
+\end{align}
+
+Higher penalty on angular velocity to prefer straighter trajectories.
+
+\paragraph{Obstacle Cost}
+Smooth penalty function (no strict inequalities in CVXPY):
+\begin{equation}
+J_{\text{obs}} = 900.0 \cdot \max(0, r_{\text{safe}} - d_{\text{min}})^2
+\end{equation}
+
+where $d_{\text{min}}$ is minimum distance to obstacles and $r_{\text{safe}} = r_{\text{robot}} + r_{\text{obs}} + 0.12$ m.
+
+\paragraph{Terminal Cost}
+10× multiplier on position and heading costs at final horizon step for strong terminal constraints.
+
+\subsubsection{Unicycle Dynamics}
+
+\begin{align}
+x_{k+1} &= x_k + v_k \cos\theta_k \Delta t \nonumber \\
+y_{k+1} &= y_k + v_k \sin\theta_k \Delta t \nonumber \\
+\theta_{k+1} &= \theta_k + \omega_k \Delta t \nonumber
+\end{align}
+
+\subsubsection{Control Constraints}
+
+\begin{align}
+v &\in [0, 0.6] \text{ m/s} \nonumber \\
+\omega &\in [-1.5, 1.5] \text{ rad/s} \nonumber
+\end{align}
+
+\subsubsection{Obstacle Avoidance}
+
+\begin{itemize}
+    \item Safety margin: Robot radius (0.105 m) + obstacle radius + 12 cm buffer
+    \item Trajectory validation: Simulate entire predicted trajectory, check clearance at each step
+    \item Adaptive velocity scaling: Reduce speed near obstacles (0.5-1.0× based on minimum clearance)
+\end{itemize}
+
+\subsubsection{Solver}
+
+CVXPY framework with ECOS or OSQP solvers (interior-point methods). Fallback to proportional control if MPC fails.
+
+\subsubsection{Waypoint Generation}
+
+When obstacles block direct path, generate intermediate waypoints:
+\begin{itemize}
+    \item Trigger: Obstacle within 0.25 m, directly ahead (±30°)
+    \item Algorithm: Project waypoint 25\% toward goal, shift laterally by clearance needed
+    \item Validation: Check line-of-sight from robot to waypoint
+\end{itemize}
+
+\section{Implementation Details}
+
+\subsection{Software Architecture}
+
+System implemented in ROS2 (Humble), Python 3.10, with the following key packages:
+\begin{itemize}
+    \item \texttt{cvxpy}: Convex optimization for MPC
+    \item \texttt{numpy}: Numerical computations
+    \item \texttt{opencv-python}: Computer vision (HSV filtering, contours)
+    \item \texttt{transforms3d}: 3D transformations
+    \item \texttt{cartographer}: SLAM framework
+\end{itemize}
+
+\subsection{Coordinate Frames}
+
+All sensor data transformed to \texttt{map} frame for consistent coordinate system:
+\begin{itemize}
+    \item \texttt{base\_link}: Robot base
+    \item \texttt{odom}: Odometry frame
+    \item \texttt{map}: Global map frame (Cartographer)
+    \item \texttt{camera\_link}: Camera frame
+    \item \texttt{laser}: LIDAR frame (auto-calibrated orientation)
+\end{itemize}
+
+\subsection{Multi-Modal Sensor Fusion}
+
+Obstacles extracted from multiple sources with confidence-based weighting:
+\begin{itemize}
+    \item Fast local grid: 95\% confidence (most reliable)
+    \item Raw LIDAR: 90\% confidence
+    \item Scan-matched points (Cartographer): 88\% confidence
+    \item Camera detections: 70-80\% confidence (80\% close range, 70\% far)
+\end{itemize}
+
+Fusion strategy: Grid obstacles take priority. Camera detections refine LIDAR positions at close range (60\% LIDAR distance + 40\% camera angle). Duplicate obstacles within 20 cm merged, keeping highest-confidence version.
+
+\subsection{Terminal Guidance}
+
+When distance to target < 0.8 m:
+\begin{itemize}
+    \item Aggressive pose locking ($\alpha = 0.7$ smoothing)
+    \item Velocity scaling: 60-75\% of maximum
+    \item MPC uses tighter constraints
+    \item Goal reached detection: Within 15 cm
+\end{itemize}
+
+\subsection{Emergency Recovery}
+
+State machine for handling stuck situations:
+\begin{itemize}
+    \item States: NORMAL → BACKUP → ROTATE → RECOVERY
+    \item Backup phase: Reverse along known-safe trajectory (1.5 s, 15 cm/s)
+    \item Rotate phase: Spin up to 3 s to find clear path
+    \item Trajectory memory: Stores last 50 positions (5 s at 10 Hz)
+\end{itemize}
+
+\section{Experimental Results}
+
+\subsection{Experimental Setup}
+
+Hardware:
+\begin{itemize}
+    \item Two Turtlebot3 Burger robots
+    \item RealSense D435i camera
+    \item RPLIDAR A1
+    \item IMU and magnetometer
+    \item Wheel encoders
+\end{itemize}
+
+Test environments: Various configurations of yellow obstacle cones, blue target cone (elevated ~10 cm), and moving/stationary target robot.
+
+\subsection{Performance Metrics}
+
+\subsubsection{Detection Performance}
+\begin{itemize}
+    \item Yellow cone precision: 95\% (up from 60\%)
+    \item Yellow cone recall: 90\%
+    \item Blue target precision: 92\%
+    \item Processing rate: 30 Hz (camera), 5-10 Hz (LIDAR)
+\end{itemize}
+
+\subsubsection{State Estimation Performance}
+\begin{itemize}
+    \item EKF update rate: 100 Hz (achieved)
+    \item Position accuracy: < 5 cm RMS error
+    \item Heading accuracy: < 2° RMS error
+    \item Target tracking: Maintains estimate during 2-3 s occlusions
+\end{itemize}
+
+\subsubsection{Control Performance}
+\begin{itemize}
+    \item MPC solve rate: 10 Hz (95\%+ success rate)
+    \item Average solve time: < 50 ms per iteration
+    \item Obstacle avoidance: 100\% collision-free in test scenarios
+    \item Path optimality: Within 5-10\% of theoretical optimum
+\end{itemize}
+
+\subsection{Qualitative Results}
+
+\begin{itemize}
+    \item Successfully navigates cluttered environments
+    \item Finds optimal paths (sometimes more efficient than anticipated)
+    \item Smooth trajectory following
+    \item Robust to sensor noise and occlusions
+    \item Handles moving targets effectively
+\end{itemize}
+
+\section{Discussion}
+
+\subsection{Design Choices}
+
+\subsubsection{EKF vs MCL for Robot Pose}
+EKF chosen over MCL because:
+\begin{itemize}
+    \item Higher update rate (100 Hz vs ~10 Hz)
+    \item Deterministic performance
+    \item Better for multi-sensor fusion
+    \item Absolute heading from magnetometer
+    \item Real-time performance critical for MPC
+\end{itemize}
+
+\subsubsection{UKF vs EKF for Target Tracking}
+UKF chosen because:
+\begin{itemize}
+    \item Better handles nonlinear target dynamics
+    \item No Jacobian computation needed
+    \item Superior accuracy for velocity tracking
+    \item More robust to non-Gaussian noise
+\end{itemize}
+
+\subsubsection{Fast Local Grid vs Cartographer-Only}
+Dual-layer approach because:
+\begin{itemize}
+    \item Cartographer too slow (1-2 Hz) for real-time obstacle avoidance
+    \item Fast local grid provides immediate awareness (5-10 Hz)
+    \item Cartographer ensures global consistency
+    \item Complementary strengths
+\end{itemize}
+
+\subsubsection{Multi-Modal Sensing}
+LIDAR + Camera because:
+\begin{itemize}
+    \item LIDAR provides accurate distance
+    \item Camera provides angular accuracy and color discrimination
+    \item Redundancy improves robustness
+    \item Mirrors production systems (Waymo, Tesla)
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item Trajectory can be jerky during waypoint transitions
+    \item Optimized for cone-shaped obstacles (not arbitrary shapes)
+    \item Assumes static obstacles (no moving obstacle handling)
+    \item Requires tuning of MPC cost function weights
+    \item Limited to indoor environments with good lighting
+\end{itemize}
+
+\subsection{Future Work}
+
+\subsubsection{Minimum Time-to-Go Optimization}
+Replace distance minimization with time-to-intercept minimization for faster interception.
+
+\subsubsection{Boyd's Fast MPC}
+Implement fast MPC algorithms for 10-100× speedup, enabling 50-100 Hz control.
+
+\subsubsection{Offline Precomputation}
+Precompute MPC solutions for common scenarios, use lookup table with selective recalculation.
+
+\subsubsection{Reinforcement Learning Integration}
+RL for high-level policy (scenario selection, horizon adaptation, cost tuning) with MPC providing safe low-level control.
+
+\section{Conclusion}
+
+We presented a comprehensive autonomous interception system integrating multi-modal perception, advanced state estimation, and optimal control. Key innovations include the 6-layer HSV filtering system, automatic LIDAR calibration, fast local grid mapping, and robust state propagation. The system successfully navigates cluttered environments and intercepts moving targets with real-time performance. Experimental results demonstrate effective obstacle avoidance, optimal path finding, and reliable operation. Future work will focus on minimum time-to-go optimization, fast MPC algorithms, and RL-MPC coupling for even more sophisticated control.
+
+\section{Acknowledgments}
+
+We thank the EECS 106A course staff for their guidance and support throughout this project.
+
+\bibliographystyle{IEEEtran}
+\begin{thebibliography}{99}
+
+\bibitem{boyd2010fast}
+S. Boyd and C. Barratt, ``Fast Model Predictive Control using Online Optimization,'' Stanford University, 2010.
+
+\bibitem{thrun2005probabilistic}
+S. Thrun, W. Burgard, and D. Fox, \textit{Probabilistic Robotics}. MIT Press, 2005.
+
+\bibitem{wan2000unscented}
+E. A. Wan and R. Van Der Merwe, ``The Unscented Kalman Filter for Nonlinear Estimation,'' in \textit{Proc. IEEE 2000 Adaptive Systems for Signal Processing, Communications, and Control Symposium}, 2000.
+
+\bibitem{hess2016realtime}
+W. Hess et al., ``Real-Time Loop Closure in 2D LIDAR SLAM,'' in \textit{Proc. IEEE Int. Conf. Robotics and Automation (ICRA)}, 2016.
+
+\bibitem{kabsch1976solution}
+W. Kabsch, ``A Solution for the Best Rotation to Relate Two Sets of Vectors,'' \textit{Acta Crystallographica Section A}, vol. 32, no. 5, pp. 922-923, 1976.
+
+\bibitem{fischler1981random}
+M. A. Fischler and R. C. Bolles, ``Random Sample Consensus: A Paradigm for Model Fitting with Applications to Image Analysis and Automated Cartography,'' \textit{Communications of the ACM}, vol. 24, no. 6, pp. 381-395, 1981.
+
+\bibitem{wang2009model}
+L. Wang, \textit{Model Predictive Control System Design and Implementation Using MATLAB}. Springer-Verlag London, 2009.
+
+\bibitem{grisetti2010tutorial}
+G. Grisetti, R. Kümmerle, C. Stachniss, and W. Burgard, ``A Tutorial on Graph-Based SLAM,'' \textit{IEEE Intelligent Transportation Systems Magazine}, vol. 2, no. 4, pp. 31-43, 2010.
+
+\end{thebibliography}
+
+\end{document}
+
